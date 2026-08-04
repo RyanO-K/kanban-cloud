@@ -1,0 +1,101 @@
+-- kanban-cloud schema (Postgres / Neon flavor).
+-- NOTE: the server auto-creates all tables on startup via SQLAlchemy
+-- (Base.metadata.create_all), so running this file is OPTIONAL — it documents
+-- the schema and can be used to pre-create tables in Neon by hand.
+
+CREATE TABLE IF NOT EXISTS users (
+    id            SERIAL PRIMARY KEY,
+    email         VARCHAR(255) NOT NULL UNIQUE,
+    password_hash VARCHAR(255) NOT NULL,
+    created_at    TIMESTAMP NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS auth_tokens (
+    token      VARCHAR(64) PRIMARY KEY,
+    user_id    INTEGER NOT NULL REFERENCES users(id),
+    created_at TIMESTAMP NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS clusters (
+    id         SERIAL PRIMARY KEY,
+    name       VARCHAR(255) NOT NULL,
+    join_code  VARCHAR(16) NOT NULL UNIQUE,
+    created_by INTEGER NOT NULL REFERENCES users(id),
+    created_at TIMESTAMP NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS cluster_members (
+    id         SERIAL PRIMARY KEY,
+    cluster_id INTEGER NOT NULL REFERENCES clusters(id),
+    user_id    INTEGER NOT NULL REFERENCES users(id),
+    joined_at  TIMESTAMP NOT NULL DEFAULT now(),
+    UNIQUE (cluster_id, user_id)
+);
+
+-- claude_api_key: stored server-side; masked in every browser-facing response;
+-- delivered in full only to the worker that claims a work item.
+CREATE TABLE IF NOT EXISTS cluster_settings (
+    cluster_id     INTEGER PRIMARY KEY REFERENCES clusters(id),
+    claude_api_key TEXT,
+    updated_at     TIMESTAMP NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS boards (
+    id         SERIAL PRIMARY KEY,
+    cluster_id INTEGER NOT NULL REFERENCES clusters(id),
+    name       VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS workers (
+    id         SERIAL PRIMARY KEY,
+    cluster_id INTEGER NOT NULL REFERENCES clusters(id),
+    name       VARCHAR(255) NOT NULL,
+    token      VARCHAR(64) NOT NULL UNIQUE,
+    status     VARCHAR(32) NOT NULL DEFAULT 'idle',   -- idle | working
+    last_seen  TIMESTAMP NOT NULL DEFAULT now(),
+    created_at TIMESTAMP NOT NULL DEFAULT now(),
+    UNIQUE (cluster_id, name)
+);
+
+-- status: todo | ready | doing | review | done | failed
+-- target_worker NULL = any worker in the cluster may claim.
+CREATE TABLE IF NOT EXISTS tickets (
+    id              SERIAL PRIMARY KEY,
+    board_id        INTEGER NOT NULL REFERENCES boards(id),
+    title           VARCHAR(500) NOT NULL,
+    body            TEXT NOT NULL DEFAULT '',
+    status          VARCHAR(32) NOT NULL DEFAULT 'todo',
+    created_by      INTEGER NOT NULL REFERENCES users(id),
+    assigned_worker INTEGER REFERENCES workers(id),
+    target_worker   INTEGER REFERENCES workers(id),
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    created_at      TIMESTAMP NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMP NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS comments (
+    id         SERIAL PRIMARY KEY,
+    ticket_id  INTEGER NOT NULL REFERENCES tickets(id),
+    writer     VARCHAR(255) NOT NULL,
+    message    TEXT NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT now()
+);
+
+-- Work queue doubles as the assignment log; one row per delegation attempt.
+-- Atomic claim: UPDATE work_queue SET status='claimed', claimed_by=$w
+--               WHERE id=$id AND status='queued'  (rowcount 0 => lost race).
+CREATE TABLE IF NOT EXISTS work_queue (
+    id          SERIAL PRIMARY KEY,
+    ticket_id   INTEGER NOT NULL REFERENCES tickets(id),
+    cluster_id  INTEGER NOT NULL REFERENCES clusters(id),
+    status      VARCHAR(32) NOT NULL DEFAULT 'queued',  -- queued | claimed | done | failed
+    claimed_by  INTEGER REFERENCES workers(id),
+    queued_at   TIMESTAMP NOT NULL DEFAULT now(),
+    claimed_at  TIMESTAMP,
+    finished_at TIMESTAMP,
+    result      TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_work_queue_claim
+    ON work_queue (cluster_id, status, queued_at);

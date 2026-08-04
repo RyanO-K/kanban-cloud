@@ -1,0 +1,156 @@
+"""SQLAlchemy ORM models for kanban-cloud.
+
+Status vocabulary (borrowed/adapted from the local .kanban tool):
+  todo   - backlog
+  ready  - queued for an agent (all prerequisites met; enqueued in work_queue)
+  doing  - claimed / in progress (worker or human)
+  review - agent finished, awaiting human review
+  done   - completed
+  failed - agent gave up after max attempts
+"""
+import datetime
+import secrets
+import string
+
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+TICKET_STATUSES = ["todo", "ready", "doing", "review", "done", "failed"]
+# Moving a ticket into this status queues it for an agent.
+AGENT_READY_STATUS = "ready"
+MAX_ATTEMPTS = 2
+WORKER_ONLINE_SECONDS = 30
+
+
+def utcnow() -> datetime.datetime:
+    """Naive UTC timestamp (stored consistently across SQLite and Postgres)."""
+    return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+
+
+def new_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def new_join_code() -> str:
+    alphabet = string.ascii_uppercase + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(8))
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class User(Base):
+    __tablename__ = "users"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class AuthToken(Base):
+    __tablename__ = "auth_tokens"
+    token: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow)
+
+    user: Mapped[User] = relationship()
+
+
+class Cluster(Base):
+    __tablename__ = "clusters"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    join_code: Mapped[str] = mapped_column(String(16), unique=True, nullable=False, default=new_join_code)
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class ClusterMember(Base):
+    __tablename__ = "cluster_members"
+    __table_args__ = (UniqueConstraint("cluster_id", "user_id"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    cluster_id: Mapped[int] = mapped_column(ForeignKey("clusters.id"), nullable=False)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    joined_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class ClusterSettings(Base):
+    __tablename__ = "cluster_settings"
+    cluster_id: Mapped[int] = mapped_column(ForeignKey("clusters.id"), primary_key=True)
+    # Stored server-side; NEVER returned to browsers after save (masked).
+    # Delivered only to the worker that claims a work item.
+    claude_api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class Board(Base):
+    __tablename__ = "boards"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    cluster_id: Mapped[int] = mapped_column(ForeignKey("clusters.id"), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class Worker(Base):
+    __tablename__ = "workers"
+    __table_args__ = (UniqueConstraint("cluster_id", "name"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    cluster_id: Mapped[int] = mapped_column(ForeignKey("clusters.id"), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    token: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, default=new_token)
+    status: Mapped[str] = mapped_column(String(32), default="idle")  # idle | working
+    last_seen: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow)
+
+    def is_online(self, now: datetime.datetime | None = None) -> bool:
+        now = now or utcnow()
+        return (now - self.last_seen).total_seconds() <= WORKER_ONLINE_SECONDS
+
+
+class Ticket(Base):
+    __tablename__ = "tickets"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    board_id: Mapped[int] = mapped_column(ForeignKey("boards.id"), nullable=False)
+    title: Mapped[str] = mapped_column(String(500), nullable=False)
+    body: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(32), default="todo")
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    assigned_worker: Mapped[int | None] = mapped_column(ForeignKey("workers.id"), nullable=True)
+    # NULL target_worker = "any worker in the cluster may claim".
+    target_worker: Mapped[int | None] = mapped_column(ForeignKey("workers.id"), nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class Comment(Base):
+    __tablename__ = "comments"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ticket_id: Mapped[int] = mapped_column(ForeignKey("tickets.id"), nullable=False)
+    writer: Mapped[str] = mapped_column(String(255), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class WorkItem(Base):
+    """Work queue + assignment log. One row per delegation attempt."""
+    __tablename__ = "work_queue"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ticket_id: Mapped[int] = mapped_column(ForeignKey("tickets.id"), nullable=False)
+    cluster_id: Mapped[int] = mapped_column(ForeignKey("clusters.id"), nullable=False)
+    # queued | claimed | done | failed
+    status: Mapped[str] = mapped_column(String(32), default="queued", nullable=False)
+    claimed_by: Mapped[int | None] = mapped_column(ForeignKey("workers.id"), nullable=True)
+    queued_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow)
+    claimed_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
+    result: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -1,0 +1,12 @@
+# Core server deps (SQLite fallback works with just these)
+fastapi>=0.110
+uvicorn>=0.29
+sqlalchemy>=2.0
+# Test deps
+pytest>=8.0
+httpx>=0.27
+
+# --- Optional: Postgres/Neon support ---
+# The server uses the `postgresql+psycopg` dialect when DATABASE_URL is set.
+# Install the driver only when you actually point at Postgres:
+#   pip install "psycopg[binary]"

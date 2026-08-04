@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kanban-cloud</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --panel: #ffffff; --ink: #1b1f24; --muted: #6b7280;
+    --accent: #2563eb; --border: #d8dce3; --ok: #16a34a; --bad: #dc2626;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: "Segoe UI", system-ui, sans-serif; background: var(--bg); color: var(--ink); }
+  header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  header h1 { font-size: 16px; margin: 0 8px 0 0; }
+  select, input, textarea, button { font: inherit; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: #fff; color: var(--ink); }
+  button { cursor: pointer; background: var(--accent); color: #fff; border: none; }
+  button.ghost { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+  button.small { padding: 3px 8px; font-size: 12px; }
+  .spacer { flex: 1; }
+  .muted { color: var(--muted); font-size: 12px; }
+  .layout { display: flex; gap: 12px; padding: 12px 16px; align-items: flex-start; }
+  .board { display: flex; gap: 10px; flex: 1; overflow-x: auto; }
+  .col { background: #ebedf0; border-radius: 8px; min-width: 210px; width: 210px; padding: 8px; }
+  .col h3 { margin: 2px 4px 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); display: flex; justify-content: space-between; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 8px; margin-bottom: 8px; cursor: pointer; font-size: 13px; }
+  .card:hover { border-color: var(--accent); }
+  .card .tid { color: var(--muted); font-size: 11px; }
+  .badge { display: inline-block; font-size: 10px; padding: 1px 6px; border-radius: 8px; background: #eef2ff; color: var(--accent); margin-top: 4px; }
+  .side { width: 260px; flex-shrink: 0; display: flex; flex-direction: column; gap: 12px; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+  .panel h3 { margin: 0 0 8px; font-size: 14px; }
+  .worker-row { display: flex; align-items: center; gap: 8px; font-size: 13px; padding: 3px 0; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #9ca3af; }
+  .dot.on { background: var(--ok); }
+  /* modal */
+  .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.35); display: none; align-items: center; justify-content: center; z-index: 10; }
+  .overlay.show { display: flex; }
+  .modal { background: var(--panel); border-radius: 10px; padding: 18px; width: min(560px, 92vw); max-height: 88vh; overflow-y: auto; }
+  .modal h2 { margin: 0 0 10px; font-size: 17px; }
+  .modal label { display: block; margin: 10px 0 4px; font-size: 12px; color: var(--muted); }
+  .modal input, .modal textarea, .modal select { width: 100%; }
+  .modal textarea { min-height: 90px; resize: vertical; }
+  .row { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+  .comment { border-top: 1px solid var(--border); padding: 6px 0; font-size: 13px; }
+  .comment .who { font-weight: 600; font-size: 12px; }
+  #authView { max-width: 360px; margin: 60px auto; }
+  #toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--ink); color: #fff; padding: 8px 16px; border-radius: 8px; display: none; z-index: 20; }
+</style>
+</head>
+<body>
+
+<div id="authView" class="panel" style="display:none">
+  <h2>kanban-cloud</h2>
+  <label>Email</label><input id="authEmail" type="email" style="width:100%">
+  <label>Password</label><input id="authPass" type="password" style="width:100%">
+  <div class="row">
+    <button onclick="login()">Log in</button>
+    <button class="ghost" onclick="registerUser()">Register</button>
+  </div>
+  <p class="muted" id="authMsg"></p>
+</div>
+
+<div id="appView" style="display:none">
+  <header>
+    <h1>kanban-cloud</h1>
+    <select id="clusterSel" onchange="switchCluster()"></select>
+    <select id="boardSel" onchange="loadBoard()"></select>
+    <button class="small ghost" onclick="openClusterModal()">+ cluster</button>
+    <button class="small ghost" onclick="newBoard()">+ board</button>
+    <button class="small" onclick="openTicketModal(null)">+ ticket</button>
+    <div class="spacer"></div>
+    <span class="muted" id="whoami"></span>
+    <button class="small ghost" onclick="logout()">Log out</button>
+  </header>
+  <div class="layout">
+    <div class="board" id="board"></div>
+    <div class="side">
+      <div class="panel">
+        <h3>Workers</h3>
+        <div id="workersPanel" class="muted">–</div>
+        <p class="muted" style="margin-bottom:0">Join code: <b id="joinCode">–</b><br>
+        Start a PC: <code style="font-size:11px">py worker.py --server &lt;url&gt; --join-code &lt;code&gt;</code></p>
+      </div>
+      <div class="panel">
+        <h3>Settings</h3>
+        <label class="muted">Cluster Claude API key</label>
+        <input id="apiKeyInput" type="password" placeholder="sk-ant-..." style="width:100%; margin:4px 0">
+        <div class="row" style="margin-top:6px">
+          <button class="small" onclick="saveApiKey()">Save key</button>
+          <span class="muted" id="apiKeyState"></span>
+        </div>
+        <p class="muted">Key is stored server-side and only sent to the worker that claims a ticket. It is never shown here again.</p>
+      </div>
+      <div class="panel">
+        <h3>Recent delegations</h3>
+        <div id="queuePanel" class="muted" style="font-size:12px">–</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ticket modal -->
+<div class="overlay" id="ticketOverlay" onclick="if(event.target===this) closeTicketModal()">
+  <div class="modal">
+    <h2 id="ticketModalTitle">Ticket</h2>
+    <label>Title</label><input id="tTitle">
+    <label>Details</label><textarea id="tBody"></textarea>
+    <label>Status</label>
+    <select id="tStatus">
+      <option value="todo">todo</option>
+      <option value="ready">ready (queue for agent)</option>
+      <option value="doing">doing</option>
+      <option value="review">review</option>
+      <option value="done">done</option>
+      <option value="failed">failed</option>
+    </select>
+    <label>Run on</label>
+    <select id="tTarget"><option value="">any worker</option></select>
+    <div class="row">
+      <button onclick="saveTicket()">Save</button>
+      <button class="ghost" id="runBtn" onclick="runTicket()">Run on agent now</button>
+      <div class="spacer"></div>
+      <button class="ghost" style="color:var(--bad); border-color:var(--bad)" id="delBtn" onclick="deleteTicket()">Delete</button>
+    </div>
+    <div id="commentsWrap" style="margin-top:14px">
+      <h3 style="font-size:13px; margin:0 0 4px">Comments</h3>
+      <div id="comments"></div>
+      <div class="row">
+        <input id="newComment" placeholder="Add a comment..." style="flex:1">
+        <button class="small" onclick="addComment()">Post</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- cluster modal -->
+<div class="overlay" id="clusterOverlay" onclick="if(event.target===this) this.classList.remove('show')">
+  <div class="modal">
+    <h2>Clusters</h2>
+    <label>Create a new cluster</label>
+    <div class="row" style="margin-top:0"><input id="newClusterName" placeholder="Team name" style="flex:1"><button class="small" onclick="createCluster()">Create</button></div>
+    <label>Or join with a code</label>
+    <div class="row" style="margin-top:0"><input id="joinCodeInput" placeholder="ABC12345" style="flex:1"><button class="small" onclick="joinCluster()">Join</button></div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+const COLS = ["todo", "ready", "doing", "review", "done", "failed"];
+let token = localStorage.getItem("kc_token") || null;
+let clusters = [], boards = [], tickets = [], workers = [];
+let currentCluster = null, currentBoard = null, editingTicket = null;
+
+function toast(msg) {
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.style.display = "block";
+  setTimeout(() => t.style.display = "none", 2500);
+}
+
+async function api(method, path, body) {
+  const resp = await fetch(path, {
+    method,
+    headers: Object.assign({"Content-Type": "application/json"},
+      token ? {"Authorization": "Bearer " + token} : {}),
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (resp.status === 401 && path !== "/api/login") { logout(); throw new Error("unauthorized"); }
+  if (!resp.ok) {
+    let d = "request failed";
+    try { d = (await resp.json()).detail || d; } catch {}
+    toast(d); throw new Error(d);
+  }
+  return resp.json();
+}
+
+// ---------- auth ----------
+async function login() {
+  try {
+    const r = await api("POST", "/api/login", {
+      email: document.getElementById("authEmail").value,
+      password: document.getElementById("authPass").value });
+    token = r.token; localStorage.setItem("kc_token", token); init();
+  } catch (e) { document.getElementById("authMsg").textContent = "Login failed."; }
+}
+async function registerUser() {
+  try {
+    const r = await api("POST", "/api/register", {
+      email: document.getElementById("authEmail").value,
+      password: document.getElementById("authPass").value });
+    token = r.token; localStorage.setItem("kc_token", token); init();
+  } catch (e) { document.getElementById("authMsg").textContent = "Registration failed."; }
+}
+function logout() {
+  token = null; localStorage.removeItem("kc_token");
+  document.getElementById("appView").style.display = "none";
+  document.getElementById("authView").style.display = "block";
+}
+
+// ---------- clusters/boards ----------
+async function init() {
+  let me;
+  try { me = await api("GET", "/api/me"); } catch { return; }
+  document.getElementById("authView").style.display = "none";
+  document.getElementById("appView").style.display = "block";
+  document.getElementById("whoami").textContent = me.email;
+  clusters = await api("GET", "/api/clusters");
+  const sel = document.getElementById("clusterSel");
+  sel.innerHTML = clusters.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join("");
+  if (!clusters.length) { openClusterModal(); return; }
+  currentCluster = clusters.find(c => c.id == (localStorage.getItem("kc_cluster") || clusters[0].id)) || clusters[0];
+  sel.value = currentCluster.id;
+  await refreshClusterBits();
+}
+
+async function switchCluster() {
+  currentCluster = clusters.find(c => c.id == document.getElementById("clusterSel").value);
+  localStorage.setItem("kc_cluster", currentCluster.id);
+  await refreshClusterBits();
+}
+
+async function refreshClusterBits() {
+  document.getElementById("joinCode").textContent = currentCluster.join_code;
+  boards = await api("GET", `/api/clusters/${currentCluster.id}/boards`);
+  const bs = document.getElementById("boardSel");
+  bs.innerHTML = boards.map(b => `<option value="${b.id}">${esc(b.name)}</option>`).join("");
+  currentBoard = boards[0] || null;
+  if (currentBoard) bs.value = currentBoard.id;
+  await Promise.all([loadBoard(), loadWorkers(), loadSettings(), loadQueue()]);
+}
+
+function openClusterModal() { document.getElementById("clusterOverlay").classList.add("show"); }
+async function createCluster() {
+  const name = document.getElementById("newClusterName").value.trim();
+  if (!name) return;
+  await api("POST", "/api/clusters", {name});
+  document.getElementById("clusterOverlay").classList.remove("show");
+  init();
+}
+async function joinCluster() {
+  const code = document.getElementById("joinCodeInput").value.trim();
+  if (!code) return;
+  await api("POST", "/api/clusters/join", {join_code: code});
+  document.getElementById("clusterOverlay").classList.remove("show");
+  init();
+}
+async function newBoard() {
+  const name = prompt("Board name:");
+  if (!name) return;
+  await api("POST", `/api/clusters/${currentCluster.id}/boards`, {name});
+  refreshClusterBits();
+}
+
+// ---------- board ----------
+async function loadBoard() {
+  const bs = document.getElementById("boardSel");
+  currentBoard = boards.find(b => b.id == bs.value) || boards[0];
+  if (!currentBoard) { document.getElementById("board").innerHTML = ""; return; }
+  tickets = await api("GET", `/api/boards/${currentBoard.id}/tickets`);
+  const el = document.getElementById("board");
+  el.innerHTML = COLS.map(col => {
+    const cards = tickets.filter(t => t.status === col).map(t => `
+      <div class="card" onclick="openTicketModal(${t.id})" draggable="true"
+           ondragstart="event.dataTransfer.setData('text/plain','${t.id}')">
+        <div class="tid">#${t.id}${t.target_worker ? " → " + esc(workerName(t.target_worker)) : ""}</div>
+        <div>${esc(t.title)}</div>
+        ${t.assigned_worker && (t.status === "doing") ? `<span class="badge">on ${esc(workerName(t.assigned_worker))}</span>` : ""}
+        ${t.comments.length ? `<span class="badge">${t.comments.length} 💬</span>` : ""}
+      </div>`).join("");
+    return `<div class="col" ondragover="event.preventDefault()" ondrop="dropTicket(event,'${col}')">
+      <h3><span>${col}</span><span>${tickets.filter(t => t.status === col).length}</span></h3>${cards}</div>`;
+  }).join("");
+}
+
+async function dropTicket(ev, col) {
+  ev.preventDefault();
+  const id = ev.dataTransfer.getData("text/plain");
+  await api("PATCH", `/api/tickets/${id}`, {status: col});
+  if (col === "ready") toast("Queued for agent");
+  loadBoard(); loadQueue();
+}
+
+function workerName(id) {
+  const w = workers.find(w => w.id === id);
+  return w ? w.name : "worker " + id;
+}
+
+// ---------- ticket modal ----------
+function openTicketModal(id) {
+  editingTicket = id === null ? null : tickets.find(t => t.id === id);
+  document.getElementById("ticketModalTitle").textContent = editingTicket ? `Ticket #${editingTicket.id}` : "New ticket";
+  document.getElementById("tTitle").value = editingTicket ? editingTicket.title : "";
+  document.getElementById("tBody").value = editingTicket ? editingTicket.body : "";
+  document.getElementById("tStatus").value = editingTicket ? editingTicket.status : "todo";
+  const tgt = document.getElementById("tTarget");
+  tgt.innerHTML = `<option value="">any worker</option>` +
+    workers.map(w => `<option value="${w.id}">${esc(w.name)}${w.online ? "" : " (offline)"}</option>`).join("");
+  tgt.value = editingTicket && editingTicket.target_worker ? editingTicket.target_worker : "";
+  document.getElementById("delBtn").style.display = editingTicket ? "" : "none";
+  document.getElementById("runBtn").style.display = editingTicket ? "" : "none";
+  document.getElementById("commentsWrap").style.display = editingTicket ? "" : "none";
+  if (editingTicket) renderComments(editingTicket);
+  document.getElementById("ticketOverlay").classList.add("show");
+}
+function closeTicketModal() { document.getElementById("ticketOverlay").classList.remove("show"); }
+
+function renderComments(t) {
+  document.getElementById("comments").innerHTML = t.comments.map(c => `
+    <div class="comment"><span class="who">${esc(c.writer)}</span>
+    <span class="muted">${c.timestamp.slice(0, 16).replace("T", " ")}</span><br>${esc(c.message)}</div>`).join("")
+    || `<p class="muted">No comments yet.</p>`;
+}
+
+async function saveTicket() {
+  const payload = {
+    title: document.getElementById("tTitle").value,
+    body: document.getElementById("tBody").value,
+    status: document.getElementById("tStatus").value,
+  };
+  const tgt = document.getElementById("tTarget").value;
+  if (tgt) payload.target_worker = parseInt(tgt); else payload.clear_target = true;
+  if (editingTicket) {
+    await api("PATCH", `/api/tickets/${editingTicket.id}`, payload);
+  } else {
+    delete payload.clear_target;
+    await api("POST", `/api/boards/${currentBoard.id}/tickets`, payload);
+  }
+  closeTicketModal(); loadBoard(); loadQueue();
+}
+async function runTicket() {
+  if (!editingTicket) return;
+  await api("POST", `/api/tickets/${editingTicket.id}/run`);
+  toast("Queued for agent"); closeTicketModal(); loadBoard(); loadQueue();
+}
+async function deleteTicket() {
+  if (!editingTicket || !confirm("Delete ticket #" + editingTicket.id + "?")) return;
+  await api("DELETE", `/api/tickets/${editingTicket.id}`);
+  closeTicketModal(); loadBoard();
+}
+async function addComment() {
+  const msg = document.getElementById("newComment").value.trim();
+  if (!msg || !editingTicket) return;
+  const t = await api("POST", `/api/tickets/${editingTicket.id}/comments`, {message: msg});
+  document.getElementById("newComment").value = "";
+  editingTicket = t; renderComments(t); loadBoard();
+}
+
+// ---------- side panels ----------
+async function loadWorkers() {
+  workers = await api("GET", `/api/clusters/${currentCluster.id}/workers`);
+  document.getElementById("workersPanel").innerHTML = workers.length
+    ? workers.map(w => `<div class="worker-row"><span class="dot ${w.online ? "on" : ""}"></span>
+        <b>${esc(w.name)}</b><span class="muted">${w.online ? w.status : "offline"}</span></div>`).join("")
+    : `<span class="muted">No PCs registered yet.</span>`;
+}
+async function loadSettings() {
+  const s = await api("GET", `/api/clusters/${currentCluster.id}/settings`);
+  document.getElementById("apiKeyState").textContent =
+    s.has_key ? "Saved: " + s.claude_api_key_masked : "No key set";
+}
+async function saveApiKey() {
+  const v = document.getElementById("apiKeyInput").value.trim();
+  if (!v) return;
+  await api("PUT", `/api/clusters/${currentCluster.id}/settings`, {claude_api_key: v});
+  document.getElementById("apiKeyInput").value = "";
+  toast("API key saved"); loadSettings();
+}
+async function loadQueue() {
+  const q = await api("GET", `/api/clusters/${currentCluster.id}/queue`);
+  document.getElementById("queuePanel").innerHTML = q.length
+    ? q.slice(0, 10).map(i => `<div>#${i.ticket_id} — ${i.status}${i.claimed_by ? " by " + esc(workerName(i.claimed_by)) : ""}</div>`).join("")
+    : "No delegations yet.";
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+// periodic refresh of live bits
+setInterval(() => {
+  if (token && currentCluster && document.getElementById("appView").style.display !== "none") {
+    loadWorkers(); loadQueue();
+    if (!document.getElementById("ticketOverlay").classList.contains("show")) loadBoard();
+  }
+}, 5000);
+
+if (token) init(); else logout();
+</script>
+</body>
+</html>
