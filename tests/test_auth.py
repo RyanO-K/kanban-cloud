@@ -27,6 +27,16 @@ def test_protected_routes_require_token(client):
     assert client.get("/api/me", headers={"Authorization": "Bearer nope"}).status_code == 401
 
 
+def test_mask_secret_never_reveals_short_values():
+    from app.auth import mask_secret
+
+    assert mask_secret(None) is None
+    assert mask_secret("") is None
+    assert mask_secret("abcd") == "•" * 8          # short: fully hidden
+    assert mask_secret("12345678") == "•" * 8      # boundary: fully hidden
+    assert mask_secret("sk-ant-api03-xyz-abcd") == "•" * 8 + "abcd"
+
+
 def test_password_hash_roundtrip():
     from app.auth import hash_password, verify_password
 
