@@ -45,6 +45,30 @@ def test_cluster_scoping_blocks_outsiders(client, user, cluster):
     assert client.get(f"/api/boards/{cluster['board_id']}/tickets", headers=other).status_code == 200
 
 
+def test_create_ticket_honors_requested_status(client, user, cluster):
+    t = make_ticket(client, user, cluster["board_id"], title="Started elsewhere", status="review")
+    assert t["status"] == "review"
+
+    t2 = make_ticket(client, user, cluster["board_id"], title="Queue me", status="ready")
+    assert t2["status"] == "ready"
+    q = client.get(f"/api/clusters/{cluster['id']}/queue", headers=user["headers"]).json()
+    assert [i["ticket_id"] for i in q] == [t2["id"]]  # only the ready one queued
+
+    r = client.post(f"/api/boards/{cluster['board_id']}/tickets",
+                    json={"title": "bad", "status": "bogus"}, headers=user["headers"])
+    assert r.status_code == 400
+
+
+def test_create_ticket_rejects_foreign_target_worker(client, user, cluster):
+    from conftest import register_worker
+    c2 = client.post("/api/clusters", json={"name": "Other"}, headers=user["headers"]).json()
+    foreign = register_worker(client, c2["join_code"], "foreign-pc")
+    r = client.post(f"/api/boards/{cluster['board_id']}/tickets",
+                    json={"title": "x", "target_worker": foreign["worker_id"]},
+                    headers=user["headers"])
+    assert r.status_code == 400
+
+
 def test_api_key_masked_in_browser_responses(client, user, cluster):
     key = "sk-ant-api03-verysecretkey-abcd"
     r = client.put(f"/api/clusters/{cluster['id']}/settings", json={"claude_api_key": key},

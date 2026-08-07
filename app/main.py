@@ -382,11 +382,15 @@ def create_app(db_url: str | None = None) -> FastAPI:
         board = board_for_user(db, user, board_id)
         if body.status not in TICKET_STATUSES:
             raise HTTPException(400, f"status must be one of {TICKET_STATUSES}")
+        if body.target_worker is not None:
+            worker = db.get(Worker, body.target_worker)
+            if worker is None or worker.cluster_id != board.cluster_id:
+                raise HTTPException(400, "target_worker must be a worker in this cluster")
         ticket = Ticket(
             board_id=board.id,
             title=body.title.strip(),
             body=body.body,
-            status="todo",
+            status=body.status,  # validated above; "ready" also enqueues below
             created_by=user.id,
             target_worker=body.target_worker,
         )
