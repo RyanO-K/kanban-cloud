@@ -131,6 +131,15 @@ def register(server: str, join_code: str, name: str) -> dict:
 
 
 def main() -> int:
+    # Windows consoles often default to a legacy codepage (cp1252); a ticket
+    # title with any non-encodable char would crash the worker *after* it
+    # claimed the ticket, orphaning the claim. Never let printing kill us.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
     parser = argparse.ArgumentParser(description="kanban-cloud worker")
     parser.add_argument("--server", help="server base URL, e.g. http://host:8900")
     parser.add_argument("--join-code", help="cluster join code (registers this PC)")
