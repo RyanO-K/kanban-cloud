@@ -173,6 +173,47 @@ def test_enqueue_is_idempotent(client, user, cluster):
     assert len(q) == 1  # only one queued item despite three triggers
 
 
+def test_reenqueue_supersedes_orphaned_claim(client, user, cluster):
+    """Worker dies mid-ticket (claim stays 'claimed'): moving the ticket back
+    to ready must supersede the dead claim and queue a fresh item, and a late
+    result for the old assignment is rejected."""
+    t = make_ticket(client, user, cluster["board_id"])
+    client.post(f"/api/tickets/{t['id']}/run", headers=user["headers"])
+    w = register_worker(client, cluster["join_code"], "pc-1")
+    work = poll(client, w)  # claimed, then the worker "dies"
+
+    client.patch(f"/api/tickets/{t['id']}", json={"status": "ready"}, headers=user["headers"])
+    q = client.get(f"/api/clusters/{cluster['id']}/queue", headers=user["headers"]).json()
+    assert [i["status"] for i in q] == ["queued", "failed"]  # fresh item + superseded claim
+
+    work2 = poll(client, w)
+    assert work2 is not None and work2["assignment_id"] != work["assignment_id"]
+    assert work2["ticket"]["id"] == t["id"]
+
+    # late result for the superseded assignment is rejected
+    late = client.post(f"/api/work/{work['assignment_id']}/result",
+                       json={"ok": True, "comment": "too late"}, headers=w["headers"])
+    assert late.status_code == 409
+
+
+def test_rerun_after_permanent_failure_gets_fresh_retry_budget(client, user, cluster):
+    """A re-delegated ticket must not inherit the exhausted attempt count."""
+    t = make_ticket(client, user, cluster["board_id"])
+    client.post(f"/api/tickets/{t['id']}/run", headers=user["headers"])
+    w = register_worker(client, cluster["join_code"], "pc-1")
+    for _ in range(2):  # exhaust MAX_ATTEMPTS -> failed
+        work = poll(client, w)
+        client.post(f"/api/work/{work['assignment_id']}/result",
+                    json={"ok": False, "comment": "boom"}, headers=w["headers"])
+
+    client.post(f"/api/tickets/{t['id']}/run", headers=user["headers"])  # re-run
+    work = poll(client, w)
+    assert work is not None and work["ticket"]["attempts"] == 1  # reset, not 3
+    r = client.post(f"/api/work/{work['assignment_id']}/result",
+                    json={"ok": False, "comment": "boom"}, headers=w["headers"])
+    assert r.json()["ticket_status"] == "ready"  # requeued, not instantly failed
+
+
 def test_worker_register_and_reregister(client, user, cluster):
     bad = client.post("/api/workers/register", json={"join_code": "NOPE1234", "name": "x"})
     assert bad.status_code == 404
