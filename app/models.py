@@ -16,6 +16,7 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -144,6 +145,8 @@ class Comment(Base):
 class WorkItem(Base):
     """Work queue + assignment log. One row per delegation attempt."""
     __tablename__ = "work_queue"
+    # Matches idx_work_queue_claim in schema.sql so auto-created DBs get it too.
+    __table_args__ = (Index("idx_work_queue_claim", "cluster_id", "status", "queued_at"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     ticket_id: Mapped[int] = mapped_column(ForeignKey("tickets.id"), nullable=False)
     cluster_id: Mapped[int] = mapped_column(ForeignKey("clusters.id"), nullable=False)
