@@ -26,17 +26,31 @@ def main() -> int:
     client = TestClient(app)
     created = {}
     try:
-        # -- fixtures via the human API --
+        # -- fixtures via the human API; tolerant of reruns --
         r = client.post("/api/register", json={"email": "smoke-v2@example.com",
                                                "password": "smokepass"})
-        assert r.status_code == 200, r.text
+        if r.status_code == 409:
+            # rerun: user exists, fall back to login
+            r = client.post("/api/login", json={"email": "smoke-v2@example.com",
+                                                "password": "smokepass"})
+            assert r.status_code == 200, f"login failed: {r.text}"
+        else:
+            assert r.status_code == 200, r.text
         headers = {"Authorization": f"Bearer {r.json()['token']}"}
-        c = client.post("/api/clusters", json={"name": "smoke-v2-cluster"},
-                        headers=headers).json()
+
+        # discover or create cluster
+        clusters = client.get("/api/clusters", headers=headers).json()
+        smoke_cluster = next((c for c in clusters if c["name"] == "smoke-v2-cluster"), None)
+        if smoke_cluster:
+            c = smoke_cluster
+        else:
+            c = client.post("/api/clusters", json={"name": "smoke-v2-cluster"},
+                            headers=headers).json()
         created["cluster_id"] = c["id"]
         board = client.get(f"/api/clusters/{c['id']}/boards", headers=headers).json()[0]
-        client.put(f"/api/clusters/{c['id']}/settings",
-                   json={"claude_api_key": "sk-smoke-fake"}, headers=headers)
+        r = client.put(f"/api/clusters/{c['id']}/settings",
+                       json={"claude_api_key": "sk-smoke-fake"}, headers=headers)
+        assert r.status_code == 200, r.text
         t = client.post(f"/api/boards/{board['id']}/tickets",
                         json={"title": "smoke v2 ticket", "status": "ready"},
                         headers=headers).json()
@@ -64,7 +78,7 @@ def main() -> int:
         print(f"claim race: 1/{RACE_N} winner (assignment {work['assignment_id']})")
 
         # -- finish -> review --
-        with psycopg.connect(dsns[0]) as conn:
+        with psycopg.connect(dsns[0], connect_timeout=15) as conn:
             status = worker_mod.finish_work(conn, wids[0], "smoke-pc-a",
                                             work["assignment_id"], t["id"],
                                             True, "smoke result")
@@ -93,30 +107,70 @@ def main() -> int:
         return 0
     finally:
         # -- precise cleanup: scratch rows + scratch roles only --
-        with psycopg.connect(admin_url.replace("postgresql+psycopg://", "postgresql://"),
-                             connect_timeout=15) as conn, conn.cursor() as cur:
-            cid = created.get("cluster_id")
-            if cid is not None:
-                cur.execute("DELETE FROM comments WHERE ticket_id IN "
-                            "(SELECT t.id FROM tickets t JOIN boards b ON b.id=t.board_id "
-                            "WHERE b.cluster_id=%s)", (cid,))
-                cur.execute("DELETE FROM work_queue WHERE cluster_id=%s", (cid,))
-                cur.execute("DELETE FROM tickets WHERE board_id IN "
-                            "(SELECT id FROM boards WHERE cluster_id=%s)", (cid,))
-                cur.execute("DELETE FROM boards WHERE cluster_id=%s", (cid,))
-                cur.execute("SELECT id, role_name FROM workers WHERE cluster_id=%s", (cid,))
-                for _, role in cur.fetchall():
-                    if role:
-                        cur.execute(f'DROP ROLE IF EXISTS "{role}"')
-                cur.execute("DELETE FROM workers WHERE cluster_id=%s", (cid,))
-                cur.execute("DELETE FROM cluster_settings WHERE cluster_id=%s", (cid,))
-                cur.execute("DELETE FROM cluster_members WHERE cluster_id=%s", (cid,))
-                cur.execute("DELETE FROM clusters WHERE id=%s", (cid,))
-            cur.execute("DELETE FROM auth_tokens WHERE user_id IN "
-                        "(SELECT id FROM users WHERE email='smoke-v2@example.com')")
-            cur.execute("DELETE FROM users WHERE email='smoke-v2@example.com'")
-            conn.commit()
-        print("fixtures cleaned")
+        try:
+            with psycopg.connect(
+                admin_url.replace("postgresql+psycopg://", "postgresql://"),
+                connect_timeout=15, autocommit=True
+            ) as conn, conn.cursor() as cur:
+                cid = created.get("cluster_id")
+                if cid is not None:
+                    try:
+                        cur.execute("DELETE FROM comments WHERE ticket_id IN "
+                                    "(SELECT t.id FROM tickets t JOIN boards b ON b.id=t.board_id "
+                                    "WHERE b.cluster_id=%s)", (cid,))
+                    except Exception as e:
+                        print(f"cleanup: delete comments failed: {e}")
+                    try:
+                        cur.execute("DELETE FROM work_queue WHERE cluster_id=%s", (cid,))
+                    except Exception as e:
+                        print(f"cleanup: delete work_queue failed: {e}")
+                    try:
+                        cur.execute("DELETE FROM tickets WHERE board_id IN "
+                                    "(SELECT id FROM boards WHERE cluster_id=%s)", (cid,))
+                    except Exception as e:
+                        print(f"cleanup: delete tickets failed: {e}")
+                    try:
+                        cur.execute("DELETE FROM boards WHERE cluster_id=%s", (cid,))
+                    except Exception as e:
+                        print(f"cleanup: delete boards failed: {e}")
+                    try:
+                        cur.execute("SELECT id, role_name FROM workers WHERE cluster_id=%s", (cid,))
+                        for _, role in cur.fetchall():
+                            if role:
+                                try:
+                                    cur.execute(f'DROP ROLE IF EXISTS "{role}"')
+                                except Exception as e:
+                                    print(f"cleanup: drop role {role} failed: {e}")
+                    except Exception as e:
+                        print(f"cleanup: select/drop roles failed: {e}")
+                    try:
+                        cur.execute("DELETE FROM workers WHERE cluster_id=%s", (cid,))
+                    except Exception as e:
+                        print(f"cleanup: delete workers failed: {e}")
+                    try:
+                        cur.execute("DELETE FROM cluster_settings WHERE cluster_id=%s", (cid,))
+                    except Exception as e:
+                        print(f"cleanup: delete cluster_settings failed: {e}")
+                    try:
+                        cur.execute("DELETE FROM cluster_members WHERE cluster_id=%s", (cid,))
+                    except Exception as e:
+                        print(f"cleanup: delete cluster_members failed: {e}")
+                    try:
+                        cur.execute("DELETE FROM clusters WHERE id=%s", (cid,))
+                    except Exception as e:
+                        print(f"cleanup: delete clusters failed: {e}")
+                try:
+                    cur.execute("DELETE FROM auth_tokens WHERE user_id IN "
+                                "(SELECT id FROM users WHERE email='smoke-v2@example.com')")
+                except Exception as e:
+                    print(f"cleanup: delete auth_tokens failed: {e}")
+                try:
+                    cur.execute("DELETE FROM users WHERE email='smoke-v2@example.com'")
+                except Exception as e:
+                    print(f"cleanup: delete users failed: {e}")
+            print("fixtures cleaned")
+        except Exception as cleanup_exc:
+            print(f"CLEANUP FAILED (fixtures may remain): {cleanup_exc}")
 
 
 if __name__ == "__main__":
