@@ -178,3 +178,74 @@ connected (plus a stubbed `psycopg.connect` to capture kwargs):
 - Tokens never expire; no roles; API key plaintext in DB; HTTP by default —
   all as documented under Security caveats.
 - Postgres path still only exercised offline/SQLite; no real Neon DB yet.
+  *(Resolved — see "Neon live smoke" below.)*
+
+## Neon live smoke (2026-08-07)
+
+First run against a **real Neon Postgres** (project `polished-glade-71097631`,
+fresh/empty; connection string in gitignored `.env` — the app does not load
+`.env` itself, so `DATABASE_URL` was exported in the shell before starting
+uvicorn on :8912).
+
+### Startup + auto-create
+
+`GET /api/health` → `{"ok":true,"db":"postgresql+psycopg"}`. The
+`postgresql://...?sslmode=require` URL normalized to the psycopg3 dialect and
+connected over TLS (server reported `PostgreSQL 18.4 ... aarch64-linux`).
+Querying `information_schema` through the app's own engine showed all 10
+tables auto-created on startup:
+
+```
+tables: ['auth_tokens', 'boards', 'cluster_members', 'cluster_settings',
+         'clusters', 'comments', 'tickets', 'users', 'work_queue', 'workers']
+claim index present: True   (idx_work_queue_claim — the 627ce17 fix, verified live)
+```
+
+### End-to-end (all against Neon)
+
+register `smoke-neon@example.com` → cluster `neon-smoke-cluster` (join code
+`LZXAYL6J`) → PUT settings with placeholder key `sk-ant-test-000-placeholder`
+(NOT a real key) → both PUT and GET responses masked (`••••••••lder`; asserted
+the full key appears in neither) → board → ticket "Neon smoke ticket ✓ vérify
+UTF-8" created `todo`, PATCHed to `ready` → `worker.py --once`:
+
+```
+Registered worker 'neon-smoke-pc' in cluster 'neon-smoke-cluster'
+Claimed ticket #1 'Neon smoke ticket ? v�rify UTF-8' (assignment 1)
+  [stub] pretending to work on ticket #1: ...
+  reported success -> ticket status: review
+```
+
+Ticket verified in `review` with the worker's `[StubExecutor] Completed...`
+comment; title/comment UTF-8 round-tripped intact through Neon (direct
+`select` shows `'Neon smoke ticket ✓ vérify UTF-8'`; the `?`/`�` above are the
+known console-display replacement chars). Delegation log endpoint and the
+`work_queue` row both show `queued_at → claimed_at → finished_at`, status
+`done`, `claimed_by` = worker 1; workers panel showed the PC online/idle.
+
+### Atomic claim under real Postgres concurrency
+
+Registered two extra workers, queued ONE ticket, then fired **8 concurrent**
+`POST /api/work/poll` claim attempts (2 workers × 4 threads, barrier-released
+simultaneously):
+
+```
+HTTP statuses: [200, 200, 200, 200, 200, 200, 200, 200]
+winners: 1 | empty polls: 7 | errors: 0
+```
+
+Exactly one poll received the assignment (with the full — unmasked — cluster
+key, as designed for the claiming worker only); no 500s, no double-claim. The
+winner's result posted → ticket `review` / item `done`; a duplicate result
+post was rejected with **409** as designed.
+
+### Wrap-up
+
+- Server killed cleanly; no local files changed except this STATUS.md
+  (`.env` and `.worker_config.json` are gitignored, verified via `git status`).
+- **Smoke-test data left in the Neon DB** (1 user, 1 cluster, 2 boards
+  incl. the auto-default, 2 tickets in `review`, 2 done `work_queue` rows,
+  3 workers, and the placeholder API key). It is harmless fixture data on an
+  otherwise fresh DB; wipe with `drop schema public cascade; create schema
+  public;` (or just delete the rows) before real use if desired.
+- No permission-classifier blocks were hit during this pass.
