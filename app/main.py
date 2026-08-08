@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from . import delegation
+from . import delegation, enrollment
 from .auth import hash_password, mask_secret, verify_password
 from .db import make_engine, make_session_factory, run_migrations
 from .models import (
@@ -40,12 +40,9 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 # ---------- reverse-proxy mode constants ----------
 
-# Worker-facing routes keep their own auth (join code / X-Worker-Token) and are
-# EXEMPT from the proxy gate: workers poll the server directly, not through the
-# browser-facing proxy.
-WORKER_EXEMPT_RE = re.compile(
-    r"^/api/(?:workers/register|work/poll|work/\d+/(?:result|progress))$"
-)
+# The single worker-facing route left in v2: one-time enrollment. Everything
+# else workers do is direct SQL against Postgres.
+WORKER_EXEMPT_RE = re.compile(r"^/api/workers/enroll$")
 
 # The only paths a SPECTATOR (read-only, unauthenticated-through-proxy visitor)
 # may GET. Default-deny: everything else is 403. Deliberately excluded:
@@ -111,14 +108,9 @@ class CommentBody(BaseModel):
     message: str
 
 
-class WorkerRegisterBody(BaseModel):
+class WorkerEnrollBody(BaseModel):
     join_code: str
     name: str
-
-
-class WorkResultBody(BaseModel):
-    ok: bool
-    comment: str | None = None
 
 
 # ---------- app factory ----------
@@ -127,6 +119,7 @@ def create_app(db_url: str | None = None, proxy_secret: str | None = None) -> Fa
     engine = make_engine(db_url)
     Base.metadata.create_all(engine)
     run_migrations(engine)
+    enrollment.ensure_worker_group(engine)
     SessionLocal = make_session_factory(engine)
 
     # Reverse-proxy mode is ON iff a (non-empty) shared secret is configured.
@@ -438,6 +431,7 @@ def create_app(db_url: str | None = None, proxy_secret: str | None = None) -> Fa
                 "status": w.status,
                 "online": w.is_online(now),
                 "last_seen": w.last_seen.isoformat(),
+                "revoked": w.revoked,
             }
             for w in workers
         ]
@@ -595,31 +589,42 @@ def create_app(db_url: str | None = None, proxy_secret: str | None = None) -> Fa
         db.commit()
         return {"ok": True}
 
-    # ----- worker API -----
+    # ----- worker enrollment (the only worker-facing HTTP in v2) -----
 
-    @app.post("/api/workers/register")
-    def worker_register(body: WorkerRegisterBody, db: Session = Depends(get_db)):
-        raise HTTPException(410, "Gone: use /api/workers/enroll (v2)")
-
-    @app.post("/api/work/poll")
-    def work_poll(db: Session = Depends(get_db)):
-        raise HTTPException(410, "Gone: use /api/workers/enroll (v2)")
-
-    @app.post("/api/work/{item_id}/result")
-    def work_result(
-        item_id: int,
-        body: WorkResultBody,
-        db: Session = Depends(get_db),
-    ):
-        raise HTTPException(410, "Gone: use /api/workers/enroll (v2)")
-
-    @app.post("/api/work/{item_id}/progress")
-    def work_progress(
-        item_id: int,
-        body: CommentBody,
-        db: Session = Depends(get_db),
-    ):
-        raise HTTPException(410, "Gone: use /api/workers/enroll (v2)")
+    @app.post("/api/workers/enroll")
+    def worker_enroll(body: WorkerEnrollBody, db: Session = Depends(get_db)):
+        """Issue this PC its own Postgres credentials. Re-enrolling the same
+        name rotates the password and clears any revocation."""
+        if not enrollment.can_provision(engine):
+            raise HTTPException(
+                400, "Enrollment requires a Postgres DATABASE_URL on the server"
+            )
+        cluster = db.scalar(
+            select(Cluster).where(Cluster.join_code == body.join_code.strip().upper())
+        )
+        if cluster is None:
+            raise HTTPException(404, "No cluster with that join code")
+        name = body.name.strip()
+        if not name:
+            raise HTTPException(400, "worker name required")
+        worker = db.scalar(
+            select(Worker).where(Worker.cluster_id == cluster.id, Worker.name == name)
+        )
+        if worker is None:
+            worker = Worker(cluster_id=cluster.id, name=name)
+            db.add(worker)
+            db.flush()
+        worker.role_name = enrollment.role_name_for(cluster.id, worker.id)
+        worker.revoked = False
+        worker.last_seen = utcnow()
+        db.commit()
+        password = enrollment.provision_role(engine, worker.role_name)
+        dsn = enrollment.build_worker_dsn(engine.url, worker.role_name, password)
+        return {
+            "worker_id": worker.id,
+            "cluster": {"id": cluster.id, "name": cluster.name},
+            "dsn": dsn,
+        }
 
     return app
 

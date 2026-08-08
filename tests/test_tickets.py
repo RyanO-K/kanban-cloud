@@ -60,13 +60,24 @@ def test_create_ticket_honors_requested_status(client, user, cluster):
     assert r.status_code == 400
 
 
-@pytest.mark.skip(reason="v1 worker HTTP API removed in v2 (Task 3 rewrites these)")
 def test_create_ticket_rejects_foreign_target_worker(client, user, cluster):
-    from conftest import register_worker
+    from sqlalchemy import text
+
+    from app.models import utcnow
+
     c2 = client.post("/api/clusters", json={"name": "Other"}, headers=user["headers"]).json()
-    foreign = register_worker(client, c2["join_code"], "foreign-pc")
+    engine = client.app.state.engine
+    with engine.begin() as conn:
+        conn.execute(text(
+            "INSERT INTO workers (cluster_id, name, revoked, status, last_seen, created_at) "
+            "VALUES (:c, 'other-pc', 0, 'idle', :n, :n)"
+        ), {"c": c2["id"], "n": utcnow()})
+        foreign_id = conn.execute(
+            text("SELECT id FROM workers WHERE cluster_id = :c AND name = 'other-pc'"),
+            {"c": c2["id"]},
+        ).scalar_one()
     r = client.post(f"/api/boards/{cluster['board_id']}/tickets",
-                    json={"title": "x", "target_worker": foreign["worker_id"]},
+                    json={"title": "x", "target_worker": foreign_id},
                     headers=user["headers"])
     assert r.status_code == 400
 

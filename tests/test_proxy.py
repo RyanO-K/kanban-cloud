@@ -1,10 +1,7 @@
 """Reverse-proxy mode: shared-secret gate, proxy identities, spectator lockdown.
 
-Worker-exempt routes (own token auth, bypass the gate):
-  POST /api/workers/register
-  POST /api/work/poll
-  POST /api/work/{id}/result
-  POST /api/work/{id}/progress
+Worker-exempt route (own validation, bypasses the gate):
+  POST /api/workers/enroll
 """
 import pytest
 from fastapi.testclient import TestClient
@@ -58,42 +55,18 @@ def test_gate_off_behavior_unchanged(client):
     assert client.get("/api/me", headers={"X-Proxy-User": "mallory"}).status_code == 401
 
 
-@pytest.mark.skip(reason="v1 worker HTTP API removed in v2 (Task 3 rewrites these)")
-def test_worker_routes_exempt_from_gate(pclient):
-    # No proxy secret on any of these: they must reach their own auth, not 403.
-    r = pclient.post("/api/workers/register", json={"join_code": "NOPE1234", "name": "pc"})
-    assert r.status_code == 404  # bad join code, NOT the gate's 403
-    assert pclient.post("/api/work/poll").status_code == 401  # missing worker token
-    assert pclient.post("/api/work/1/result", json={"ok": True}).status_code == 401
-    assert pclient.post("/api/work/1/progress", json={"message": "hi"}).status_code == 401
+def test_enroll_route_exempt_from_gate(pclient):
+    """Enrollment bypasses the proxy secret (workers hit the service directly);
+    it still fails its own validation (404 bad code / 400 sqlite), never 403."""
+    r = pclient.post("/api/workers/enroll", json={"join_code": "NOPE1234", "name": "pc"})
+    assert r.status_code in (400, 404)  # NOT 403
 
 
-@pytest.mark.skip(reason="v1 worker HTTP API removed in v2 (Task 3 rewrites these)")
-def test_worker_full_flow_without_proxy_secret(pclient):
-    seed = owner_seed(pclient)
-    join_code = seed["cluster"]["join_code"]
-    r = pclient.post("/api/workers/register", json={"join_code": join_code, "name": "pc-1"})
-    assert r.status_code == 200
-    wh = {"X-Worker-Token": r.json()["worker_token"]}
-
-    t = pclient.post(
-        f"/api/boards/{seed['board']['id']}/tickets",
-        json={"title": "Proxied job", "status": "ready"},
-        headers=OWNER,
-    )
-    assert t.status_code == 200
-
-    claim = pclient.post("/api/work/poll", headers=wh).json()["work"]
-    assert claim and claim["ticket"]["id"] == t.json()["id"]
-    item_id = claim["assignment_id"]
-    assert pclient.post(
-        f"/api/work/{item_id}/progress", json={"message": "50%"}, headers=wh
-    ).status_code == 200
-    r = pclient.post(
-        f"/api/work/{item_id}/result", json={"ok": True, "comment": "done"}, headers=wh
-    )
-    assert r.status_code == 200
-    assert r.json()["ticket_status"] == "review"
+def test_old_worker_routes_not_exempt_anymore(pclient):
+    """v1 worker paths are gone AND gated: without the secret they 403."""
+    assert pclient.post("/api/workers/register", json={}).status_code == 403
+    assert pclient.post("/api/work/poll").status_code == 403
+    assert pclient.post("/api/work/1/result", json={"ok": True}).status_code == 403
 
 
 # ---------- owner identity ----------

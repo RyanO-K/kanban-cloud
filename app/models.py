@@ -27,7 +27,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 TICKET_STATUSES = ["todo", "ready", "doing", "review", "done", "failed"]
 # Moving a ticket into this status queues it for an agent.
 AGENT_READY_STATUS = "ready"
-MAX_ATTEMPTS = 2
+MAX_ATTEMPTS = 2  # keep in sync with worker.py MAX_ATTEMPTS
 WORKER_ONLINE_SECONDS = 30
 
 

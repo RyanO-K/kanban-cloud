@@ -38,14 +38,6 @@ def cluster(client, user):
     return c
 
 
-def register_worker(client, join_code, name):
-    r = client.post("/api/workers/register", json={"join_code": join_code, "name": name})
-    assert r.status_code == 200, r.text
-    data = r.json()
-    data["headers"] = {"X-Worker-Token": data["worker_token"]}
-    return data
-
-
 def make_ticket(client, user, board_id, title="Do a thing", **kw):
     payload = {"title": title, "body": "details", **kw}
     r = client.post(f"/api/boards/{board_id}/tickets", json=payload, headers=user["headers"])
