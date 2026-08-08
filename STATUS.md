@@ -33,10 +33,14 @@ plan: `docs/superpowers/specs/2026-08-08-db-centric-workers-design.md` and
   the same PC recreates the role and restores access.
 - **Tests**: 47 passed, 0 skipped (up from the 35-test v1 baseline this
   worktree started from).
-- **Live Neon smoke pending**: the v1 Neon live-smoke pass below predates
-  this rework and no longer reflects the wire protocol. Task 8
-  (`scripts/neon_smoke_v2.py`) will re-run an end-to-end smoke against real
-  Neon under the new direct-SQL path; not yet done as of this entry.
+- **Live Neon smoke: PASSED (2026-08-08)**. Deployed to Render (commit
+  124c6cd, startup ran the v2 migrations + `kanban_worker` group creation
+  against prod cleanly), then `scripts/neon_smoke_v2.py` ran against the
+  real Neon DB: enrolled 2 workers with live per-PC roles → 8-way
+  concurrent claim race with exactly 1 winner → progress comment →
+  result recorded (ticket → review) → worker role correctly denied
+  `SELECT` on `users` → revoked worker's dropped role could no longer
+  connect. `SMOKE PASS`, fixtures cleaned.
 - **v1 caveats that still hold, unchanged by this rework**:
   - The cluster Claude API key is still stored **plaintext in the DB**. In
     v2 it is also readable, in plaintext, by **any enrolled worker's
