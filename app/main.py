@@ -232,16 +232,6 @@ def create_app(db_url: str | None = None, proxy_secret: str | None = None) -> Fa
             raise HTTPException(401, "Invalid token")
         return tok.user
 
-    def current_worker(
-        db: Session = Depends(get_db), x_worker_token: str | None = Header(None)
-    ) -> Worker:
-        if not x_worker_token:
-            raise HTTPException(401, "Missing X-Worker-Token header")
-        worker = db.scalar(select(Worker).where(Worker.token == x_worker_token))
-        if worker is None:
-            raise HTTPException(401, "Invalid worker token")
-        return worker
-
     def require_member(db: Session, user: User, cluster_id: int) -> Cluster:
         cluster = db.get(Cluster, cluster_id)
         if cluster is None:
@@ -612,48 +602,24 @@ def create_app(db_url: str | None = None, proxy_secret: str | None = None) -> Fa
         raise HTTPException(410, "Gone: use /api/workers/enroll (v2)")
 
     @app.post("/api/work/poll")
-    def work_poll(worker: Worker = Depends(current_worker), db: Session = Depends(get_db)):
-        """Heartbeat + attempt to claim work. Returns {work: null} when idle."""
-        db.add(worker)
-        claim = delegation.claim_next(db, worker)
-        return {"work": claim}
+    def work_poll(db: Session = Depends(get_db)):
+        raise HTTPException(410, "Gone: use /api/workers/enroll (v2)")
 
     @app.post("/api/work/{item_id}/result")
     def work_result(
         item_id: int,
         body: WorkResultBody,
-        worker: Worker = Depends(current_worker),
         db: Session = Depends(get_db),
     ):
-        db.add(worker)
-        item = db.get(WorkItem, item_id)
-        if item is None or item.claimed_by != worker.id:
-            raise HTTPException(404, "No such assignment for this worker")
-        if item.status != "claimed":
-            raise HTTPException(409, "Assignment already finished")
-        return delegation.finish_work(db, worker, item, body.ok, body.comment)
+        raise HTTPException(410, "Gone: use /api/workers/enroll (v2)")
 
     @app.post("/api/work/{item_id}/progress")
     def work_progress(
         item_id: int,
         body: CommentBody,
-        worker: Worker = Depends(current_worker),
         db: Session = Depends(get_db),
     ):
-        db.add(worker)
-        item = db.get(WorkItem, item_id)
-        if item is None or item.claimed_by != worker.id:
-            raise HTTPException(404, "No such assignment for this worker")
-        worker.last_seen = utcnow()
-        db.add(
-            Comment(
-                ticket_id=item.ticket_id,
-                writer=f"worker:{worker.name}",
-                message=body.message,
-            )
-        )
-        db.commit()
-        return {"ok": True}
+        raise HTTPException(410, "Gone: use /api/workers/enroll (v2)")
 
     return app
 
