@@ -2,12 +2,16 @@
 
 Run:  py -m uvicorn app.main:app --host 0.0.0.0 --port 8900
 Env:  DATABASE_URL (optional; Neon Postgres). Falls back to ./kanban_cloud.db.
+      PROXY_SHARED_SECRET (optional; enables trusted-reverse-proxy mode — see
+      "Deploying behind a reverse proxy" in README.md).
 """
+import hmac
 import os
+import re
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -33,6 +37,36 @@ from .models import (
 )
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+# ---------- reverse-proxy mode constants ----------
+
+# Worker-facing routes keep their own auth (join code / X-Worker-Token) and are
+# EXEMPT from the proxy gate: workers poll the server directly, not through the
+# browser-facing proxy.
+WORKER_EXEMPT_RE = re.compile(
+    r"^/api/(?:workers/register|work/poll|work/\d+/(?:result|progress))$"
+)
+
+# The only paths a SPECTATOR (read-only, unauthenticated-through-proxy visitor)
+# may GET. Default-deny: everything else is 403. Deliberately excluded:
+# /api/clusters (leaks join codes) and /api/clusters/{id}/settings (API-key
+# state) — spectators get the default cluster id from /api/session instead.
+SPECTATOR_ALLOWED_RE = re.compile(
+    r"^(?:/"
+    r"|/api/health"
+    r"|/api/session"
+    r"|/api/clusters/\d+/(?:boards|workers|queue)"
+    r"|/api/boards/\d+/tickets"
+    r")$"
+)
+
+DEFAULT_CLUSTER_NAME = "Main"
+# Not a valid pbkdf2 record -> verify_password() always fails, so proxy-managed
+# accounts can never be logged into with a password.
+PROXY_PASSWORD_HASH = "proxy-auth"
+# Leading/trailing hyphens are invalid in GitHub logins, so this synthetic
+# account can never collide with a real proxied user named "spectator".
+SPECTATOR_LOGIN = "-spectator-"
 
 
 # ---------- request bodies ----------
@@ -89,10 +123,16 @@ class WorkResultBody(BaseModel):
 
 # ---------- app factory ----------
 
-def create_app(db_url: str | None = None) -> FastAPI:
+def create_app(db_url: str | None = None, proxy_secret: str | None = None) -> FastAPI:
     engine = make_engine(db_url)
     Base.metadata.create_all(engine)
     SessionLocal = make_session_factory(engine)
+
+    # Reverse-proxy mode is ON iff a (non-empty) shared secret is configured.
+    # With it unset, every proxy-related branch below is dead code and the app
+    # behaves exactly as before (local dev login/register).
+    proxy_secret = proxy_secret if proxy_secret is not None else os.environ.get("PROXY_SHARED_SECRET")
+    proxy_secret = proxy_secret or None
 
     app = FastAPI(title="kanban-cloud")
     app.state.engine = engine
@@ -104,11 +144,86 @@ def create_app(db_url: str | None = None) -> FastAPI:
         finally:
             db.close()
 
+    # ----- reverse-proxy gate -----
+
+    @app.middleware("http")
+    async def proxy_gate(request: Request, call_next):
+        if proxy_secret is None:
+            return await call_next(request)
+        path = request.url.path
+        if WORKER_EXEMPT_RE.match(path):
+            # Worker routes keep their own token auth and bypass the proxy.
+            return await call_next(request)
+        provided = request.headers.get("x-proxy-secret", "")
+        if not hmac.compare_digest(provided.encode(), proxy_secret.encode()):
+            return JSONResponse({"detail": "Forbidden"}, status_code=403)
+        login = (request.headers.get("x-proxy-user") or "").strip()
+        readonly = request.headers.get("x-proxy-readonly") == "1"
+        if login and not readonly:
+            request.state.proxy_user = login
+            return await call_next(request)
+        # Spectator: server-side enforcement — safe whitelisted GETs only.
+        request.state.proxy_spectator = True
+        if request.method != "GET" or not SPECTATOR_ALLOWED_RE.match(path):
+            return JSONResponse(
+                {"detail": "Read-only spectator mode"}, status_code=403
+            )
+        return await call_next(request)
+
+    # ----- proxy identity helpers -----
+
+    def default_cluster(db: Session) -> Cluster | None:
+        """The instance's default cluster: the oldest one (a proxy deployment
+        is single-tenant, so the first cluster ever created is 'the' board)."""
+        return db.scalar(select(Cluster).order_by(Cluster.id).limit(1))
+
+    def get_or_create_proxy_user(
+        db: Session, login: str, *, create_default_cluster: bool
+    ) -> User:
+        """Auto-provision a proxy-authenticated account and join it to the
+        default cluster (creating that cluster on first use for owners)."""
+        email = f"{login.strip().lower()[:100]}@proxy.user"
+        user = db.scalar(select(User).where(User.email == email))
+        if user is None:
+            user = User(email=email, password_hash=PROXY_PASSWORD_HASH)
+            db.add(user)
+            db.flush()
+        cluster = default_cluster(db)
+        if cluster is None and create_default_cluster:
+            cluster = Cluster(name=DEFAULT_CLUSTER_NAME, created_by=user.id)
+            db.add(cluster)
+            db.flush()
+            db.add(Board(cluster_id=cluster.id, name=DEFAULT_CLUSTER_NAME))
+        if cluster is not None:
+            member = db.scalar(
+                select(ClusterMember).where(
+                    ClusterMember.cluster_id == cluster.id,
+                    ClusterMember.user_id == user.id,
+                )
+            )
+            if member is None:
+                db.add(ClusterMember(cluster_id=cluster.id, user_id=user.id))
+        db.commit()
+        return user
+
     # ----- auth dependencies -----
 
     def current_user(
-        db: Session = Depends(get_db), authorization: str | None = Header(None)
+        request: Request,
+        db: Session = Depends(get_db),
+        authorization: str | None = Header(None),
     ) -> User:
+        proxy_login = getattr(request.state, "proxy_user", None)
+        if proxy_login:
+            return get_or_create_proxy_user(
+                db, proxy_login, create_default_cluster=True
+            )
+        if getattr(request.state, "proxy_spectator", False):
+            # Only reachable on whitelisted GETs (the middleware blocked the
+            # rest); reads are scoped to the default cluster via membership.
+            return get_or_create_proxy_user(
+                db, SPECTATOR_LOGIN, create_default_cluster=False
+            )
         if not authorization or not authorization.startswith("Bearer "):
             raise HTTPException(401, "Missing bearer token")
         tok = db.get(AuthToken, authorization.removeprefix("Bearer ").strip())
@@ -189,6 +304,29 @@ def create_app(db_url: str | None = None) -> FastAPI:
     @app.get("/api/health")
     def health():
         return {"ok": True, "db": str(engine.url.drivername)}
+
+    @app.get("/api/session")
+    def session_info(request: Request, db: Session = Depends(get_db)):
+        """Who am I to this deployment?  Contract:
+        - {"mode": "local"} — no PROXY_SHARED_SECRET; normal login UI applies.
+        - {"mode": "owner", "user": {"id", "email"}} — trusted proxy supplied
+          X-Proxy-User; account auto-provisioned, full rights, no login UI.
+        - {"mode": "spectator", "cluster": {"id", "name"} | null} — read-only;
+          `cluster` is the default cluster to render (null if none exists yet).
+        """
+        if proxy_secret is None:
+            return {"mode": "local"}
+        proxy_login = getattr(request.state, "proxy_user", None)
+        if proxy_login:
+            user = get_or_create_proxy_user(
+                db, proxy_login, create_default_cluster=True
+            )
+            return {"mode": "owner", "user": {"id": user.id, "email": user.email}}
+        cluster = default_cluster(db)
+        return {
+            "mode": "spectator",
+            "cluster": {"id": cluster.id, "name": cluster.name} if cluster else None,
+        }
 
     # ----- auth -----
 
