@@ -2,6 +2,60 @@
 
 Last updated: 2026-08-08
 
+## 2026-08-08 — v2: DB-centric workers
+
+Reworked worker/server interaction from HTTP polling to direct SQL. Design +
+plan: `docs/superpowers/specs/2026-08-08-db-centric-workers-design.md` and
+`docs/superpowers/plans/2026-08-08-db-centric-workers.md`.
+
+- **What changed**: `worker.py` no longer polls `/api/work/poll` with an
+  `X-Worker-Token`; it makes one HTTP call ever — `POST /api/workers/enroll`
+  (`--enroll --server <url> --join-code <code> [--name <n>]`) — which
+  provisions this PC its own Postgres **login role** and returns a DSN, saved
+  to `.worker_config.json`. Every subsequent poll/claim/heartbeat/progress/
+  result (`py worker.py [--real] [--poll N] [--once]`, default
+  `POLL_SECONDS=10`) is direct SQL against Neon via `psycopg[binary]`
+  (`pip install "psycopg[binary]"` now required on worker PCs). The claim
+  query uses `FOR UPDATE ... SKIP LOCKED` instead of the v1
+  `UPDATE ... WHERE status='queued'` rowcount guard.
+- **Grant model** (`app/enrollment.py`): all per-PC roles inherit one shared
+  `NOLOGIN` group role, `kanban_worker` — `SELECT` on tickets, boards,
+  clusters, cluster_settings, workers, work_queue, comments; `INSERT` on
+  comments and work_queue; `UPDATE` on work_queue, tickets, workers; `USAGE,
+  SELECT` on all sequences. No `DELETE` anywhere; `users` and `auth_tokens`
+  are untouched by any worker grant.
+- **HTTP surface deleted**: `/api/workers/register`, `/api/work/poll`,
+  `/api/work/{id}/result`, and `/api/work/{id}/progress` are gone. The only
+  worker-facing HTTP route left is `POST /api/workers/enroll`
+  (proxy-exempt — it's the sole entry in `WORKER_EXEMPT_RE` now, down from
+  four routes). Revocation is `POST /api/workers/{id}/revoke`: the owner UI
+  button drops the Postgres role and terminates live sessions; re-enrolling
+  the same PC recreates the role and restores access.
+- **Tests**: 47 passed, 0 skipped (up from the 35-test v1 baseline this
+  worktree started from).
+- **Live Neon smoke pending**: the v1 Neon live-smoke pass below predates
+  this rework and no longer reflects the wire protocol. Task 8
+  (`scripts/neon_smoke_v2.py`) will re-run an end-to-end smoke against real
+  Neon under the new direct-SQL path; not yet done as of this entry.
+- **v1 caveats that still hold, unchanged by this rework**:
+  - The cluster Claude API key is still stored **plaintext in the DB**. In
+    v2 it is also readable, in plaintext, by **any enrolled worker's
+    Postgres role** via direct `SELECT` on `cluster_settings` (not just the
+    worker that claims a given ticket) — that's an intentional consequence
+    of the grant model (any worker may need the key to run `--real`), not a
+    regression, but it does widen the caveat: a compromised worker PC's DB
+    credentials now expose the key directly, no HTTP layer in between.
+  - **No stale-claim reaper.** A dead worker's `claimed` `work_queue` row
+    still doesn't time out on its own; the supersede-on-re-enqueue path
+    (drag back to `ready` / "Run now") covers it manually, same as v1 — it
+    flips the stale item to `failed` ("superseded") and queues a fresh one,
+    so if the dead worker's `finish_work` call ever does land, its rowcount
+    guard (`WHERE status='claimed' AND claimed_by=...`) finds nothing to
+    update and reports "superseded" rather than corrupting the fresh claim.
+  - A running worker still keeps the Neon compute endpoint awake (autosuspend
+    only fires when nothing is querying it) — same tradeoff as v1, just via
+    a different wire protocol.
+
 ## Reverse-proxy mode (2026-08-08)
 
 Prep for being reverse-proxied by the portfolio site at `/board` behind its
