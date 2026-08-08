@@ -15,10 +15,16 @@ from .models import (
 
 def enqueue_ticket(db: Session, ticket: Ticket) -> WorkItem | None:
     """Queue a ticket for agent execution (explicit user intent: move to ready
-    or "Run now"). No-op if already queued. If an outstanding *claimed* item
-    exists (e.g. the worker died mid-ticket), the claim is superseded so the
-    ticket can be delegated again; a late result for the old assignment is
-    rejected with 409 by the result endpoint.
+    or "Run now"). Idempotent on queue membership: if a *queued* item already
+    exists, no duplicate is created, but the ticket is resynced to ready with
+    a fresh attempt budget (covers a ticket row that drifted out of sync with
+    its still-outstanding queue item). If an outstanding *claimed* item exists
+    (e.g. the worker died mid-ticket), that claim is superseded so the ticket
+    can be delegated again; a late result for the superseded assignment is
+    discarded by the worker's own claim rowcount guard (v2: worker.py,
+    ``UPDATE work_queue SET status='done'/'failed' WHERE id=... AND
+    status='claimed' AND claimed_by=...`` — a rowcount of 0 means the claim
+    was superseded and the result is dropped).
     """
     existing = db.scalar(
         select(WorkItem).where(
@@ -44,9 +50,10 @@ def enqueue_ticket(db: Session, ticket: Ticket) -> WorkItem | None:
     item = WorkItem(ticket_id=ticket.id, cluster_id=board.cluster_id, status="queued")
     ticket.status = AGENT_READY_STATUS
     ticket.assigned_worker = None
-    # A fresh, user-initiated delegation gets a full retry budget. (The
-    # internal failure-requeue path in finish_work creates its WorkItem
-    # directly and therefore keeps the cumulative attempt count.)
+    # A fresh, user-initiated delegation gets a full retry budget. (In v2 the
+    # failure-requeue path lives in worker.py's finish_work, which creates its
+    # retry WorkItem directly via SQL and therefore keeps the cumulative
+    # attempt count instead of resetting it here.)
     ticket.attempts = 0
     db.add(item)
     db.commit()
