@@ -1,22 +1,20 @@
-"""kanban-cloud worker client.
+"""kanban-cloud worker client (v2: direct Postgres).
 
-Registers this PC into a cluster, then polls the server for delegated tickets.
-Stdlib-only (urllib) so any machine with Python 3.10+ can run it — no pip installs.
+One-time enrollment over HTTP issues this PC its own database role; after
+that the worker never contacts the web service — polling, claiming,
+progress, results, and heartbeats are SQL against Neon.
 
-Usage:
-    # First run (registers and saves .worker_config.json next to this file):
-    py worker.py --server http://your-server:8900 --join-code ABC12345 --name ryans-pc
+Setup (once per PC):
+    pip install "psycopg[binary]"
+    py worker.py --enroll --server https://kanban-cloud.onrender.com \
+                 --join-code ABC12345 --name ryans-pc
 
-    # Later runs (reuses saved config):
-    py worker.py
+Run:
+    py worker.py            # stub executor
+    py worker.py --real     # execute tickets via the Claude CLI
 
-    # Actually run tickets through the Claude CLI instead of the stub:
-    py worker.py --real
-
-Executors:
-    StubExecutor   (default) — pretends to work, posts a fake result comment.
-    ClaudeExecutor (--real)  — shells out to `claude -p "<prompt>"` with
-                               ANTHROPIC_API_KEY set from the cluster's key.
+Note: while this worker runs, its polling keeps Neon compute awake
+(free tier autosuspends only when idle). Stop the worker when not in use.
 """
 import argparse
 import json
@@ -28,28 +26,32 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+import psycopg
+
 CONFIG_PATH = Path(__file__).parent / ".worker_config.json"
-POLL_SECONDS = 4
+POLL_SECONDS = 10
+MAX_ATTEMPTS = 2  # keep in sync with app/models.py MAX_ATTEMPTS
+
+UTC_NOW = "(now() at time zone 'utc')"
+
+# Atomic, race-safe claim: SKIP LOCKED means concurrent workers never block
+# or double-claim; the subquery orders by queue age and honors target_worker.
+CLAIM_SQL = f"""
+UPDATE work_queue SET status='claimed', claimed_by=%(wid)s, claimed_at={UTC_NOW}
+WHERE id = (
+  SELECT wq.id FROM work_queue wq
+  JOIN tickets t ON t.id = wq.ticket_id
+  WHERE wq.status='queued' AND wq.cluster_id=%(cid)s
+    AND (t.target_worker IS NULL OR t.target_worker = %(wid)s)
+  ORDER BY wq.queued_at, wq.id
+  FOR UPDATE OF wq SKIP LOCKED
+  LIMIT 1
+)
+RETURNING id, ticket_id
+"""
 
 
-# ---------- tiny HTTP client ----------
-
-class Api:
-    def __init__(self, server: str, worker_token: str | None = None):
-        self.server = server.rstrip("/")
-        self.worker_token = worker_token
-
-    def call(self, method: str, path: str, body: dict | None = None) -> dict:
-        req = urllib.request.Request(self.server + path, method=method)
-        req.add_header("Content-Type", "application/json")
-        if self.worker_token:
-            req.add_header("X-Worker-Token", self.worker_token)
-        data = json.dumps(body).encode() if body is not None else None
-        with urllib.request.urlopen(req, data=data, timeout=30) as resp:
-            return json.loads(resp.read().decode() or "{}")
-
-
-# ---------- executors ----------
+# ---------- executors (unchanged from v1) ----------
 
 class StubExecutor:
     """Fake executor: waits a moment and produces a canned result."""
@@ -102,7 +104,7 @@ class ClaudeExecutor:
         return True, output[:10000] or "(no output)"
 
 
-# ---------- worker loop ----------
+# ---------- config & enrollment ----------
 
 def load_config() -> dict | None:
     if CONFIG_PATH.exists():
@@ -115,34 +117,162 @@ def save_config(cfg: dict) -> None:
     print(f"Saved worker config to {CONFIG_PATH}")
 
 
-def register(server: str, join_code: str, name: str) -> dict:
-    api = Api(server)
-    resp = api.call("POST", "/api/workers/register", {"join_code": join_code, "name": name})
+def enroll(server: str, join_code: str, name: str) -> dict:
+    """One-time HTTP call; the server creates this PC's Postgres role and
+    returns a ready-to-use DSN."""
+    req = urllib.request.Request(
+        server.rstrip("/") + "/api/workers/enroll", method="POST"
+    )
+    req.add_header("Content-Type", "application/json")
+    data = json.dumps({"join_code": join_code, "name": name}).encode()
+    with urllib.request.urlopen(req, data=data, timeout=30) as resp:
+        payload = json.loads(resp.read().decode())
     cfg = {
-        "server": server,
-        "worker_token": resp["worker_token"],
-        "worker_id": resp["worker_id"],
+        "dsn": payload["dsn"],
+        "worker_id": payload["worker_id"],
+        "cluster_id": payload["cluster"]["id"],
         "name": name,
-        "cluster": resp["cluster"],
+        "cluster_name": payload["cluster"]["name"],
     }
     save_config(cfg)
-    print(f"Registered worker '{name}' in cluster '{resp['cluster']['name']}'")
+    print(f"Enrolled worker '{name}' in cluster '{cfg['cluster_name']}'")
     return cfg
 
 
+# ---------- direct-SQL work protocol ----------
+
+def heartbeat(conn, worker_id: int) -> None:
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            f"UPDATE workers SET last_seen={UTC_NOW} WHERE id=%s", (worker_id,)
+        )
+
+
+def claim_next(conn, worker_id: int, cluster_id: int) -> dict | None:
+    """Claim the oldest eligible queued item; returns the v1 poll payload
+    shape or None. One transaction: claim + ticket flip + key read."""
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(CLAIM_SQL, {"wid": worker_id, "cid": cluster_id})
+        row = cur.fetchone()
+        if row is None:
+            cur.execute(
+                f"UPDATE workers SET status='idle', last_seen={UTC_NOW} WHERE id=%s",
+                (worker_id,),
+            )
+            return None
+        item_id, ticket_id = row
+        cur.execute(
+            f"UPDATE tickets SET status='doing', assigned_worker=%s, "
+            f"attempts=COALESCE(attempts,0)+1, updated_at={UTC_NOW} "
+            f"WHERE id=%s RETURNING board_id, title, body, attempts",
+            (worker_id, ticket_id),
+        )
+        board_id, title, body, attempts = cur.fetchone()
+        cur.execute(
+            f"UPDATE workers SET status='working', last_seen={UTC_NOW} WHERE id=%s",
+            (worker_id,),
+        )
+        cur.execute(
+            "SELECT claude_api_key FROM cluster_settings WHERE cluster_id=%s",
+            (cluster_id,),
+        )
+        key_row = cur.fetchone()
+        return {
+            "assignment_id": item_id,
+            "claude_api_key": key_row[0] if key_row else None,
+            "ticket": {
+                "id": ticket_id, "board_id": board_id, "title": title,
+                "body": body, "status": "doing", "attempts": attempts,
+            },
+        }
+
+
+def add_progress(conn, worker_id: int, worker_name: str, ticket_id: int, message: str) -> None:
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            f"INSERT INTO comments (ticket_id, writer, message, created_at) "
+            f"VALUES (%s, %s, %s, {UTC_NOW})",
+            (ticket_id, f"worker:{worker_name}", message),
+        )
+        cur.execute(
+            f"UPDATE workers SET last_seen={UTC_NOW} WHERE id=%s", (worker_id,)
+        )
+
+
+def finish_work(conn, worker_id: int, worker_name: str, item_id: int,
+                ticket_id: int, ok: bool, comment: str | None) -> str:
+    """Record the result. Mirrors v1 delegation.finish_work: success ->
+    review; failure -> requeue until MAX_ATTEMPTS then failed. The rowcount
+    guard on the first UPDATE preserves v1's 409-on-superseded semantics:
+    if the claim was superseded while we worked, nothing else is written."""
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            f"UPDATE work_queue SET status=%s, finished_at={UTC_NOW}, result=%s "
+            f"WHERE id=%s AND status='claimed' AND claimed_by=%s",
+            ("done" if ok else "failed", (comment or "")[:10000], item_id, worker_id),
+        )
+        if cur.rowcount != 1:
+            cur.execute(
+                f"UPDATE workers SET status='idle', last_seen={UTC_NOW} WHERE id=%s",
+                (worker_id,),
+            )
+            return "superseded"
+        if comment:
+            cur.execute(
+                f"INSERT INTO comments (ticket_id, writer, message, created_at) "
+                f"VALUES (%s, %s, %s, {UTC_NOW})",
+                (ticket_id, f"worker:{worker_name}", comment),
+            )
+        if ok:
+            ticket_status = "review"
+            cur.execute(
+                f"UPDATE tickets SET status='review', updated_at={UTC_NOW} WHERE id=%s",
+                (ticket_id,),
+            )
+        else:
+            cur.execute("SELECT attempts, board_id FROM tickets WHERE id=%s", (ticket_id,))
+            attempts, board_id = cur.fetchone()
+            if (attempts or 0) < MAX_ATTEMPTS:
+                ticket_status = "ready"
+                cur.execute("SELECT cluster_id FROM boards WHERE id=%s", (board_id,))
+                cluster_id = cur.fetchone()[0]
+                cur.execute(
+                    f"INSERT INTO work_queue (ticket_id, cluster_id, status, queued_at) "
+                    f"VALUES (%s, %s, 'queued', {UTC_NOW})",
+                    (ticket_id, cluster_id),
+                )
+                cur.execute(
+                    f"UPDATE tickets SET status='ready', assigned_worker=NULL, "
+                    f"updated_at={UTC_NOW} WHERE id=%s",
+                    (ticket_id,),
+                )
+            else:
+                ticket_status = "failed"
+                cur.execute(
+                    f"UPDATE tickets SET status='failed', updated_at={UTC_NOW} WHERE id=%s",
+                    (ticket_id,),
+                )
+        cur.execute(
+            f"UPDATE workers SET status='idle', last_seen={UTC_NOW} WHERE id=%s",
+            (worker_id,),
+        )
+        return ticket_status
+
+
+# ---------- main loop ----------
+
 def main() -> int:
-    # Windows consoles often default to a legacy codepage (cp1252); a ticket
-    # title with any non-encodable char would crash the worker *after* it
-    # claimed the ticket, orphaning the claim. Never let printing kill us.
     for stream in (sys.stdout, sys.stderr):
         try:
-            stream.reconfigure(errors="replace")
+            stream.reconfigure(errors="replace")  # cp1252 consoles must not kill us
         except (AttributeError, ValueError):
             pass
 
-    parser = argparse.ArgumentParser(description="kanban-cloud worker")
-    parser.add_argument("--server", help="server base URL, e.g. http://host:8900")
-    parser.add_argument("--join-code", help="cluster join code (registers this PC)")
+    parser = argparse.ArgumentParser(description="kanban-cloud worker (v2 direct-DB)")
+    parser.add_argument("--enroll", action="store_true",
+                        help="enroll this PC (needs --server and --join-code)")
+    parser.add_argument("--server", help="server base URL (enrollment only)")
+    parser.add_argument("--join-code", help="cluster join code (enrollment only)")
     parser.add_argument("--name", help="worker name (defaults to computer name)")
     parser.add_argument("--real", action="store_true",
                         help="use the Claude CLI executor instead of the stub")
@@ -152,47 +282,53 @@ def main() -> int:
                         help="poll a single time then exit (for testing)")
     args = parser.parse_args()
 
-    cfg = load_config()
-    if args.join_code:
-        if not args.server:
-            print("--server is required when registering with --join-code")
+    if args.enroll:
+        if not args.server or not args.join_code:
+            print("--enroll needs --server and --join-code")
             return 2
-        name = args.name or os.environ.get("COMPUTERNAME") or os.environ.get("HOSTNAME") or "worker"
-        cfg = register(args.server, args.join_code, name)
-    elif cfg is None:
-        print("No saved config. First run needs --server and --join-code.")
+        name = (args.name or os.environ.get("COMPUTERNAME")
+                or os.environ.get("HOSTNAME") or "worker")
+        enroll(args.server, args.join_code, name)
+        return 0
+
+    cfg = load_config()
+    if cfg is None:
+        print("No saved config. Enroll first: "
+              "py worker.py --enroll --server <url> --join-code <code>")
         return 2
-    elif args.server:
-        cfg["server"] = args.server
 
     executor = ClaudeExecutor() if args.real else StubExecutor()
-    api = Api(cfg["server"], cfg["worker_token"])
-    print(f"Worker '{cfg['name']}' polling {cfg['server']} every {args.poll}s "
+    print(f"Worker '{cfg['name']}' polling Postgres every {args.poll}s "
           f"(executor: {executor.name}). Ctrl+C to stop.")
 
+    conn = None
     while True:
         try:
-            resp = api.call("POST", "/api/work/poll")
-            work = resp.get("work")
+            if conn is None or conn.closed:
+                conn = psycopg.connect(cfg["dsn"], connect_timeout=15)
+            work = claim_next(conn, cfg["worker_id"], cfg["cluster_id"])
             if work:
                 ticket = work["ticket"]
                 item_id = work["assignment_id"]
-                print(f"Claimed ticket #{ticket['id']} '{ticket['title']}' (assignment {item_id})")
+                print(f"Claimed ticket #{ticket['id']} '{ticket['title']}' "
+                      f"(assignment {item_id})")
                 try:
                     ok, comment = executor.run(ticket, work.get("claude_api_key"))
-                except Exception as exc:  # executor crashed — report failure
+                except Exception as exc:
                     ok, comment = False, f"Executor error: {exc!r}"
-                result = api.call("POST", f"/api/work/{item_id}/result",
-                                  {"ok": ok, "comment": comment})
+                status = finish_work(conn, cfg["worker_id"], cfg["name"],
+                                     item_id, ticket["id"], ok, comment)
                 print(f"  reported {'success' if ok else 'FAILURE'} -> "
-                      f"ticket status: {result.get('ticket_status')}")
-        except urllib.error.HTTPError as e:
-            print(f"HTTP {e.code} from server: {e.read().decode()[:200]}")
-            if e.code == 401:
-                print("Worker token rejected — re-register with --join-code.")
+                      f"ticket status: {status}")
+            else:
+                heartbeat(conn, cfg["worker_id"])
+        except psycopg.OperationalError as e:
+            msg = str(e)
+            print(f"Database unreachable ({msg[:200]}); retrying...")
+            if "password authentication failed" in msg or "does not exist" in msg:
+                print("Credentials rejected — this PC may be revoked. Re-enroll.")
                 return 1
-        except (urllib.error.URLError, ConnectionError, TimeoutError) as e:
-            print(f"Server unreachable ({e}); retrying...")
+            conn = None
         except KeyboardInterrupt:
             print("\nStopping worker.")
             return 0
