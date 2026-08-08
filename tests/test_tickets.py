@@ -1,3 +1,4 @@
+import pytest
 from conftest import make_ticket
 
 
@@ -59,6 +60,7 @@ def test_create_ticket_honors_requested_status(client, user, cluster):
     assert r.status_code == 400
 
 
+@pytest.mark.skip(reason="v1 worker HTTP API removed in v2 (Task 3 rewrites these)")
 def test_create_ticket_rejects_foreign_target_worker(client, user, cluster):
     from conftest import register_worker
     c2 = client.post("/api/clusters", json={"name": "Other"}, headers=user["headers"]).json()

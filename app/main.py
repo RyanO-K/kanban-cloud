@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from . import delegation
 from .auth import hash_password, mask_secret, verify_password
-from .db import make_engine, make_session_factory
+from .db import make_engine, make_session_factory, run_migrations
 from .models import (
     TICKET_STATUSES,
     AuthToken,
@@ -126,6 +126,7 @@ class WorkResultBody(BaseModel):
 def create_app(db_url: str | None = None, proxy_secret: str | None = None) -> FastAPI:
     engine = make_engine(db_url)
     Base.metadata.create_all(engine)
+    run_migrations(engine)
     SessionLocal = make_session_factory(engine)
 
     # Reverse-proxy mode is ON iff a (non-empty) shared secret is configured.
@@ -608,29 +609,7 @@ def create_app(db_url: str | None = None, proxy_secret: str | None = None) -> Fa
 
     @app.post("/api/workers/register")
     def worker_register(body: WorkerRegisterBody, db: Session = Depends(get_db)):
-        cluster = db.scalar(
-            select(Cluster).where(Cluster.join_code == body.join_code.strip().upper())
-        )
-        if cluster is None:
-            raise HTTPException(404, "No cluster with that join code")
-        name = body.name.strip()
-        if not name:
-            raise HTTPException(400, "worker name required")
-        worker = db.scalar(
-            select(Worker).where(Worker.cluster_id == cluster.id, Worker.name == name)
-        )
-        if worker is None:
-            worker = Worker(cluster_id=cluster.id, name=name)
-            db.add(worker)
-        else:
-            worker.token = new_token()  # re-registration rotates the token
-        worker.last_seen = utcnow()
-        db.commit()
-        return {
-            "worker_id": worker.id,
-            "worker_token": worker.token,
-            "cluster": {"id": cluster.id, "name": cluster.name},
-        }
+        raise HTTPException(410, "Gone: use /api/workers/enroll (v2)")
 
     @app.post("/api/work/poll")
     def work_poll(worker: Worker = Depends(current_worker), db: Session = Depends(get_db)):

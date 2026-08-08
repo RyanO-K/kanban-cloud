@@ -51,7 +51,8 @@ CREATE TABLE IF NOT EXISTS workers (
     id         SERIAL PRIMARY KEY,
     cluster_id INTEGER NOT NULL REFERENCES clusters(id),
     name       VARCHAR(255) NOT NULL,
-    token      VARCHAR(64) NOT NULL UNIQUE,
+    role_name  VARCHAR(64),
+    revoked    BOOLEAN NOT NULL DEFAULT FALSE,
     status     VARCHAR(32) NOT NULL DEFAULT 'idle',   -- idle | working
     last_seen  TIMESTAMP NOT NULL DEFAULT now(),
     created_at TIMESTAMP NOT NULL DEFAULT now(),

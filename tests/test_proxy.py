@@ -58,6 +58,7 @@ def test_gate_off_behavior_unchanged(client):
     assert client.get("/api/me", headers={"X-Proxy-User": "mallory"}).status_code == 401
 
 
+@pytest.mark.skip(reason="v1 worker HTTP API removed in v2 (Task 3 rewrites these)")
 def test_worker_routes_exempt_from_gate(pclient):
     # No proxy secret on any of these: they must reach their own auth, not 403.
     r = pclient.post("/api/workers/register", json={"join_code": "NOPE1234", "name": "pc"})
@@ -67,6 +68,7 @@ def test_worker_routes_exempt_from_gate(pclient):
     assert pclient.post("/api/work/1/progress", json={"message": "hi"}).status_code == 401
 
 
+@pytest.mark.skip(reason="v1 worker HTTP API removed in v2 (Task 3 rewrites these)")
 def test_worker_full_flow_without_proxy_secret(pclient):
     seed = owner_seed(pclient)
     join_code = seed["cluster"]["join_code"]

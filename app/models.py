@@ -107,7 +107,9 @@ class Worker(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     cluster_id: Mapped[int] = mapped_column(ForeignKey("clusters.id"), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    token: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, default=new_token)
+    # Per-PC Postgres role issued at enrollment; None until first enroll.
+    role_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    revoked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="idle")  # idle | working
     last_seen: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow)
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow)

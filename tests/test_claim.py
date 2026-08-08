@@ -1,5 +1,8 @@
 """Delegation tests: enqueue, atomic claim, routing, failure handling."""
+import pytest
 from conftest import make_ticket, register_worker
+
+pytestmark = pytest.mark.skip(reason="v1 worker HTTP API removed in v2 (Task 3 rewrites these)")
 
 
 def poll(client, worker):

@@ -5,7 +5,7 @@ automatic zero-setup SQLite fallback at ./kanban_cloud.db.
 """
 import os
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
 DEFAULT_SQLITE_URL = "sqlite:///./kanban_cloud.db"
@@ -36,3 +36,20 @@ def make_engine(db_url: str | None = None):
 
 def make_session_factory(engine):
     return sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+
+
+def run_migrations(engine) -> None:
+    """Idempotent v2 schema fixes for existing Postgres DBs.
+
+    No alembic: the prod DB predates these columns but is (near-)empty, so a
+    few guarded ALTERs at startup are enough. SQLite DBs are scratch files —
+    delete and let create_all rebuild them instead.
+    """
+    if engine.url.get_backend_name() != "postgresql":
+        return
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE workers ADD COLUMN IF NOT EXISTS role_name VARCHAR(64)"))
+        conn.execute(text(
+            "ALTER TABLE workers ADD COLUMN IF NOT EXISTS revoked BOOLEAN NOT NULL DEFAULT FALSE"
+        ))
+        conn.execute(text("ALTER TABLE workers DROP COLUMN IF EXISTS token"))
