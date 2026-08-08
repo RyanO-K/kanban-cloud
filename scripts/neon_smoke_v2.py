@@ -22,7 +22,7 @@ RACE_N = 8
 
 def main() -> int:
     admin_url = sys.argv[1]
-    app = create_app(admin_url)  # no proxy secret: local-mode API
+    app = create_app(admin_url, proxy_secret="")
     client = TestClient(app)
     created = {}
     try:
@@ -76,6 +76,11 @@ def main() -> int:
         work = wins[0]
         assert work["claude_api_key"] == "sk-smoke-fake"
         print(f"claim race: 1/{RACE_N} winner (assignment {work['assignment_id']})")
+
+        # -- progress comment via direct SQL --
+        with psycopg.connect(dsns[0], connect_timeout=15) as conn:
+            worker_mod.add_progress(conn, wids[0], "smoke-pc-a", t["id"], "smoke progress 50%")
+        print("progress comment inserted")
 
         # -- finish -> review --
         with psycopg.connect(dsns[0], connect_timeout=15) as conn:
