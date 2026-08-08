@@ -6,3 +6,4 @@ kanban_cloud.db
 .worker_config.json
 .pytest_cache/
 .env
+.worktrees/
