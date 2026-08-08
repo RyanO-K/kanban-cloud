@@ -10,8 +10,9 @@ from app.main import create_app  # noqa: E402
 
 
 @pytest.fixture()
-def client(tmp_path):
-    """TestClient backed by a fresh SQLite database per test."""
+def client(tmp_path, monkeypatch):
+    """TestClient backed by a fresh SQLite database per test (no proxy gate)."""
+    monkeypatch.delenv("PROXY_SHARED_SECRET", raising=False)
     app = create_app(f"sqlite:///{tmp_path / 'test.db'}")
     with TestClient(app) as c:
         yield c
