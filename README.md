@@ -106,6 +106,65 @@ Runs against the SQLite fallback; covers auth, ticket CRUD + cluster scoping,
 API-key masking, atomic claim/double-claim guard, target-worker routing,
 offline-target queuing, cross-cluster isolation, and failure/retry handling.
 
+## Deploying behind a reverse proxy (portfolio-site mode)
+
+The app can run behind a trusted reverse proxy (e.g. the portfolio site
+serving it at `/board/` behind its own GitHub auth) with a public read-only
+spectator view. The frontend uses only **relative `./api/...` URLs**, so it
+works unchanged under any path prefix — just have the proxy forward
+`/board/…` → `…` (and redirect `/board` → `/board/` so relative URLs resolve).
+
+**Env var: `PROXY_SHARED_SECRET`** — setting it (non-empty) turns proxy mode
+on; unset, the app behaves exactly as before (local login/register UI). With
+it set, every route **except the worker-facing four** requires the header
+`X-Proxy-Secret: <secret>` (constant-time compare, 403 otherwise), so nobody
+can reach the app around the proxy. The exempt worker routes, which keep
+their own join-code / `X-Worker-Token` auth because worker PCs connect
+directly rather than through the browser proxy:
+
+- `POST /api/workers/register`
+- `POST /api/work/poll` (doubles as the heartbeat)
+- `POST /api/work/{id}/result`
+- `POST /api/work/{id}/progress`
+
+Note `GET /api/health` is *behind* the gate too — platform health checks must
+send the secret header (or probe a TCP connect).
+
+**Identity headers** (the proxy must strip any client-supplied `X-Proxy-*`
+headers before injecting its own):
+
+- `X-Proxy-User: <login>` → **owner**: a full-rights account
+  `<login>@proxy.user` is auto-provisioned (no password login possible) and
+  auto-joined to the *default cluster* — the oldest cluster, auto-created as
+  "Main" (with a "Main" board) on the first owner request. No login UI is
+  shown; the proxy is the authenticator.
+- No `X-Proxy-User`, or `X-Proxy-Readonly: 1` → **spectator**: server-side
+  read-only. Only safe GETs are allowed (the page itself, board list,
+  tickets + comments, workers status, delegation queue, health, session);
+  the cluster list (join codes!) and cluster settings are denied, and every
+  non-GET returns 403. The UI renders the default cluster's board live
+  (polling stays on) with all mutating controls hidden and a
+  "viewing read-only — owner login via site" note.
+
+**`GET /api/session`** tells the frontend which world it is in:
+
+```jsonc
+{"mode": "local"}                                        // no PROXY_SHARED_SECRET
+{"mode": "owner", "user": {"id": 1, "email": "ryan@proxy.user"}}
+{"mode": "spectator", "cluster": {"id": 1, "name": "Main"}}  // cluster null if none yet
+```
+
+Example nginx-ish proxy config:
+
+```
+location /board/ {
+    # ... site's own auth decides $ghuser (empty for anonymous visitors) ...
+    proxy_set_header X-Proxy-Secret "<PROXY_SHARED_SECRET>";
+    proxy_set_header X-Proxy-User   $ghuser;      # omit/empty => spectator
+    proxy_pass http://kanban-cloud:8900/;
+}
+```
+
 ## Security caveats (MVP)
 
 - **HTTP by default** — put it behind TLS (reverse proxy) before real use;

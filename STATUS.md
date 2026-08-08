@@ -1,6 +1,50 @@
 # STATUS — kanban-cloud MVP
 
-Last updated: 2026-08-07
+Last updated: 2026-08-08
+
+## Reverse-proxy mode (2026-08-08)
+
+Prep for being reverse-proxied by the portfolio site at `/board` behind its
+GitHub auth, with a public read-only spectator view (commits `4a8af23`,
+`7bc0d6f`, `c349a92`, docs commit after). Code only — not deployed.
+
+- **Relative frontend URLs**: every fetch in `app/static/index.html` is now
+  `./api/...` (all 22 call sites audited), so the UI works under a `/board/`
+  path prefix through a proxy with zero config.
+- **Proxy gate**: with env `PROXY_SHARED_SECRET` set, all routes except the
+  four worker-facing ones (`POST /api/workers/register`, `/api/work/poll`,
+  `/api/work/{id}/result`, `/api/work/{id}/progress` — they keep their own
+  token auth; workers connect directly) require `X-Proxy-Secret`
+  (hmac.compare_digest, 403 otherwise). Env unset → fully unchanged local
+  behavior (verified: legacy 24-test suite untouched, conftest clears the var).
+- **Proxy identities**: `X-Proxy-User: <login>` → auto-provisioned
+  full-rights user `<login>@proxy.user` (unusable password hash), auto-joined
+  to the default cluster (oldest; "Main" + board auto-created on first owner
+  request). No user header or `X-Proxy-Readonly: 1` → spectator: whitelisted
+  safe GETs only (boards/tickets/workers/queue/health/session/index), 403 on
+  all mutations and on sensitive GETs (`/api/clusters` leaks join codes;
+  settings leaks key state). `GET /api/session` returns
+  `{mode: 'local'|'owner'|'spectator', ...}` (owner: `user{id,email}`;
+  spectator: `cluster{id,name}|null`).
+- **Spectator UI**: boot asks `./api/session`; spectator renders the board
+  live (5s polling kept) with create/edit/drag/comments/settings/join-code
+  hidden or disabled and a "viewing read-only — owner login via site" note;
+  owner mode skips the login UI entirely.
+- **Tests**: 11 new in `tests/test_proxy.py` — gate on/off/wrong-secret,
+  worker-route exemption incl. a full no-secret register→poll→progress→result
+  flow, owner provisioning + full rights + no password login, session modes,
+  readonly override, spectator reads OK + every mutation 403s.
+- **Live smoke** (uvicorn :8951, scratch SQLite, `PROXY_SHARED_SECRET` set):
+  no/wrong secret → 403; owner session provisioned `ryano-k@proxy.user` and
+  created a ticket; spectator read the board/tickets but got 403 on PATCH and
+  settings GET; worker register without the secret hit its own 404, not the
+  gate.
+
+```
+$ .venv/Scripts/python -m pytest tests/ -q
+35 passed, 1 warning in 9.21s
+```
+
 
 ## Done
 
