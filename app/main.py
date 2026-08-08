@@ -626,6 +626,23 @@ def create_app(db_url: str | None = None, proxy_secret: str | None = None) -> Fa
             "dsn": dsn,
         }
 
+    @app.post("/api/workers/{worker_id}/revoke")
+    def worker_revoke(
+        worker_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)
+    ):
+        """Kill a PC's DB credentials. Enforced at the database: the role is
+        dropped, live sessions terminated. Re-enrolling restores access."""
+        worker = db.get(Worker, worker_id)
+        if worker is None:
+            raise HTTPException(404, "Worker not found")
+        require_member(db, user, worker.cluster_id)
+        worker.revoked = True
+        worker.status = "idle"
+        db.commit()
+        if worker.role_name and enrollment.can_provision(engine):
+            enrollment.revoke_role(engine, worker.role_name)
+        return {"ok": True}
+
     return app
 
 

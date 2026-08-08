@@ -66,6 +66,30 @@ def test_reenroll_same_name_reuses_worker_and_unrevokes(client, user, cluster, f
     assert workers[0]["revoked"] is False
 
 
+def test_revoke_marks_worker_and_drops_role(client, user, cluster, fake_provisioning):
+    r = client.post("/api/workers/enroll",
+                    json={"join_code": cluster["join_code"], "name": "pc1"})
+    wid = r.json()["worker_id"]
+    r = client.post(f"/api/workers/{wid}/revoke", headers=user["headers"])
+    assert r.status_code == 200
+    role = enrollment.role_name_for(cluster["id"], wid)
+    assert fake_provisioning["revoked"] == [role]
+    workers = client.get(f"/api/clusters/{cluster['id']}/workers",
+                         headers=user["headers"]).json()
+    assert workers[0]["revoked"] is True
+
+
+def test_revoke_requires_membership(client, user, cluster, fake_provisioning):
+    r = client.post("/api/workers/enroll",
+                    json={"join_code": cluster["join_code"], "name": "pc1"})
+    wid = r.json()["worker_id"]
+    r2 = client.post("/api/register",
+                     json={"email": "other@example.com", "password": "pass1234"})
+    outsider = {"Authorization": f"Bearer {r2.json()['token']}"}
+    assert client.post(f"/api/workers/{wid}/revoke", headers=outsider).status_code == 403
+    assert client.post("/api/workers/424242/revoke", headers=user["headers"]).status_code == 404
+
+
 def test_old_worker_routes_are_gone(client):
     assert client.post("/api/workers/register",
                        json={"join_code": "X", "name": "n"}).status_code in (404, 405)
