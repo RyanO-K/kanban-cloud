@@ -33,5 +33,11 @@ def test_build_worker_dsn_adds_sslmode_when_missing():
 
 def test_provision_role_rejects_bad_role_names(tmp_path):
     engine = make_engine(f"sqlite:///{tmp_path / 'e.db'}")
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError):
         enrollment.provision_role(engine, "worker_c1_w1; DROP TABLE users--")
+
+
+def test_revoke_role_rejects_bad_role_names(tmp_path):
+    engine = make_engine(f"sqlite:///{tmp_path / 'e.db'}")
+    with pytest.raises(ValueError):
+        enrollment.revoke_role(engine, "worker_c1_w1; DROP TABLE users--")

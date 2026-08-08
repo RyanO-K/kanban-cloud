@@ -5,7 +5,7 @@ enrolled PC. All worker roles inherit the kanban_worker group role, which
 carries the actual grants — future schema changes need one GRANT to the
 group, not per-PC surgery. Identifiers are interpolated into SQL text (DDL
 can't take bind params); safety comes from the strict ROLE_RE shape and the
-token_urlsafe password alphabet, both asserted.
+token_urlsafe password alphabet, both validated with explicit ValueError raises.
 """
 import re
 import secrets
@@ -57,9 +57,11 @@ def provision_role(engine, role_name: str) -> str:
     Re-enrolling an existing PC rotates the password: old backends are
     terminated and the role recreated.
     """
-    assert ROLE_RE.match(role_name), f"unsafe role name: {role_name!r}"
+    if not ROLE_RE.match(role_name):
+        raise ValueError(f"unsafe role name: {role_name!r}")
     password = secrets.token_urlsafe(24)
-    assert PASSWORD_RE.match(password)
+    if not PASSWORD_RE.match(password):
+        raise ValueError(f"unsafe password generated: {password!r}")
     with engine.begin() as conn:
         _terminate_backends(conn, role_name)
         conn.execute(text(f'DROP ROLE IF EXISTS "{role_name}"'))
@@ -69,7 +71,8 @@ def provision_role(engine, role_name: str) -> str:
 
 
 def revoke_role(engine, role_name: str) -> None:
-    assert ROLE_RE.match(role_name), f"unsafe role name: {role_name!r}"
+    if not ROLE_RE.match(role_name):
+        raise ValueError(f"unsafe role name: {role_name!r}")
     with engine.begin() as conn:
         _terminate_backends(conn, role_name)
         conn.execute(text(f'DROP ROLE IF EXISTS "{role_name}"'))
