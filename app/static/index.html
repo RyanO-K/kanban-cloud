@@ -45,6 +45,10 @@
   .comment { border-top: 1px solid var(--border); padding: 6px 0; font-size: 13px; }
   .comment .who { font-weight: 600; font-size: 12px; }
   #authView { max-width: 360px; margin: 60px auto; }
+  /* spectator (read-only) mode: hide every mutating control */
+  body.spectator .owner-only { display: none !important; }
+  #spectatorNote { display: none; font-size: 12px; color: var(--muted); }
+  body.spectator #spectatorNote { display: inline; }
   #toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--ink); color: #fff; padding: 8px 16px; border-radius: 8px; display: none; z-index: 20; }
 </style>
 </head>
@@ -66,12 +70,13 @@
     <h1>kanban-cloud</h1>
     <select id="clusterSel" onchange="switchCluster()"></select>
     <select id="boardSel" onchange="loadBoard()"></select>
-    <button class="small ghost" onclick="openClusterModal()">+ cluster</button>
-    <button class="small ghost" onclick="newBoard()">+ board</button>
-    <button class="small" onclick="openTicketModal(null)">+ ticket</button>
+    <button class="small ghost owner-only" onclick="openClusterModal()">+ cluster</button>
+    <button class="small ghost owner-only" onclick="newBoard()">+ board</button>
+    <button class="small owner-only" onclick="openTicketModal(null)">+ ticket</button>
     <div class="spacer"></div>
+    <span id="spectatorNote">viewing read-only — owner login via site</span>
     <span class="muted" id="whoami"></span>
-    <button class="small ghost" onclick="logout()">Log out</button>
+    <button class="small ghost" id="logoutBtn" onclick="logout()">Log out</button>
   </header>
   <div class="layout">
     <div class="board" id="board"></div>
@@ -79,10 +84,10 @@
       <div class="panel">
         <h3>Workers</h3>
         <div id="workersPanel" class="muted">–</div>
-        <p class="muted" style="margin-bottom:0">Join code: <b id="joinCode">–</b><br>
+        <p class="muted owner-only" style="margin-bottom:0">Join code: <b id="joinCode">–</b><br>
         Start a PC: <code style="font-size:11px">py worker.py --server &lt;url&gt; --join-code &lt;code&gt;</code></p>
       </div>
-      <div class="panel">
+      <div class="panel owner-only">
         <h3>Settings</h3>
         <label class="muted">Cluster Claude API key</label>
         <input id="apiKeyInput" type="password" placeholder="sk-ant-..." style="width:100%; margin:4px 0">
@@ -117,7 +122,7 @@
     </select>
     <label>Run on</label>
     <select id="tTarget"><option value="">any worker</option></select>
-    <div class="row">
+    <div class="row owner-only">
       <button onclick="saveTicket()">Save</button>
       <button class="ghost" id="runBtn" onclick="runTicket()">Run on agent now</button>
       <div class="spacer"></div>
@@ -126,7 +131,7 @@
     <div id="commentsWrap" style="margin-top:14px">
       <h3 style="font-size:13px; margin:0 0 4px">Comments</h3>
       <div id="comments"></div>
-      <div class="row">
+      <div class="row owner-only">
         <input id="newComment" placeholder="Add a comment..." style="flex:1">
         <button class="small" onclick="addComment()">Post</button>
       </div>
@@ -152,6 +157,9 @@ const COLS = ["todo", "ready", "doing", "review", "done", "failed"];
 let token = localStorage.getItem("kc_token") || null;
 let clusters = [], boards = [], tickets = [], workers = [];
 let currentCluster = null, currentBoard = null, editingTicket = null;
+// 'local' (dev: login UI) | 'owner' (proxy-authenticated, full rights)
+// | 'spectator' (proxy, read-only). Set once at boot from ./api/session.
+let sessionMode = "local";
 
 function toast(msg) {
   const t = document.getElementById("toast");
@@ -160,13 +168,15 @@ function toast(msg) {
 }
 
 async function api(method, path, body) {
+  // Paths are RELATIVE ("./api/...") so the app works both at "/" and when
+  // reverse-proxied under a prefix like "/board/".
   const resp = await fetch(path, {
     method,
     headers: Object.assign({"Content-Type": "application/json"},
       token ? {"Authorization": "Bearer " + token} : {}),
     body: body === undefined ? undefined : JSON.stringify(body),
   });
-  if (resp.status === 401 && path !== "/api/login") { logout(); throw new Error("unauthorized"); }
+  if (resp.status === 401 && sessionMode === "local" && path !== "./api/login") { logout(); throw new Error("unauthorized"); }
   if (!resp.ok) {
     let d = "request failed";
     try { d = (await resp.json()).detail || d; } catch {}
@@ -178,7 +188,7 @@ async function api(method, path, body) {
 // ---------- auth ----------
 async function login() {
   try {
-    const r = await api("POST", "/api/login", {
+    const r = await api("POST", "./api/login", {
       email: document.getElementById("authEmail").value,
       password: document.getElementById("authPass").value });
     token = r.token; localStorage.setItem("kc_token", token); init();
@@ -186,7 +196,7 @@ async function login() {
 }
 async function registerUser() {
   try {
-    const r = await api("POST", "/api/register", {
+    const r = await api("POST", "./api/register", {
       email: document.getElementById("authEmail").value,
       password: document.getElementById("authPass").value });
     token = r.token; localStorage.setItem("kc_token", token); init();
@@ -201,11 +211,11 @@ function logout() {
 // ---------- clusters/boards ----------
 async function init() {
   let me;
-  try { me = await api("GET", "/api/me"); } catch { return; }
+  try { me = await api("GET", "./api/me"); } catch { return; }
   document.getElementById("authView").style.display = "none";
   document.getElementById("appView").style.display = "block";
   document.getElementById("whoami").textContent = me.email;
-  clusters = await api("GET", "/api/clusters");
+  clusters = await api("GET", "./api/clusters");
   const sel = document.getElementById("clusterSel");
   sel.innerHTML = clusters.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join("");
   if (!clusters.length) { openClusterModal(); return; }
@@ -221,34 +231,36 @@ async function switchCluster() {
 }
 
 async function refreshClusterBits() {
-  document.getElementById("joinCode").textContent = currentCluster.join_code;
-  boards = await api("GET", `/api/clusters/${currentCluster.id}/boards`);
+  document.getElementById("joinCode").textContent = currentCluster.join_code || "–";
+  boards = await api("GET", `./api/clusters/${currentCluster.id}/boards`);
   const bs = document.getElementById("boardSel");
   bs.innerHTML = boards.map(b => `<option value="${b.id}">${esc(b.name)}</option>`).join("");
   currentBoard = boards[0] || null;
   if (currentBoard) bs.value = currentBoard.id;
-  await Promise.all([loadBoard(), loadWorkers(), loadSettings(), loadQueue()]);
+  const jobs = [loadBoard(), loadWorkers(), loadQueue()];
+  if (sessionMode !== "spectator") jobs.push(loadSettings());  // settings GET is 403 for spectators
+  await Promise.all(jobs);
 }
 
 function openClusterModal() { document.getElementById("clusterOverlay").classList.add("show"); }
 async function createCluster() {
   const name = document.getElementById("newClusterName").value.trim();
   if (!name) return;
-  await api("POST", "/api/clusters", {name});
+  await api("POST", "./api/clusters", {name});
   document.getElementById("clusterOverlay").classList.remove("show");
   init();
 }
 async function joinCluster() {
   const code = document.getElementById("joinCodeInput").value.trim();
   if (!code) return;
-  await api("POST", "/api/clusters/join", {join_code: code});
+  await api("POST", "./api/clusters/join", {join_code: code});
   document.getElementById("clusterOverlay").classList.remove("show");
   init();
 }
 async function newBoard() {
   const name = prompt("Board name:");
   if (!name) return;
-  await api("POST", `/api/clusters/${currentCluster.id}/boards`, {name});
+  await api("POST", `./api/clusters/${currentCluster.id}/boards`, {name});
   refreshClusterBits();
 }
 
@@ -257,11 +269,11 @@ async function loadBoard() {
   const bs = document.getElementById("boardSel");
   currentBoard = boards.find(b => b.id == bs.value) || boards[0];
   if (!currentBoard) { document.getElementById("board").innerHTML = ""; return; }
-  tickets = await api("GET", `/api/boards/${currentBoard.id}/tickets`);
+  tickets = await api("GET", `./api/boards/${currentBoard.id}/tickets`);
   const el = document.getElementById("board");
   el.innerHTML = COLS.map(col => {
     const cards = tickets.filter(t => t.status === col).map(t => `
-      <div class="card" onclick="openTicketModal(${t.id})" draggable="true"
+      <div class="card" onclick="openTicketModal(${t.id})" draggable="${sessionMode !== "spectator"}"
            ondragstart="event.dataTransfer.setData('text/plain','${t.id}')">
         <div class="tid">#${t.id}${t.target_worker ? " → " + esc(workerName(t.target_worker)) : ""}</div>
         <div>${esc(t.title)}</div>
@@ -275,8 +287,9 @@ async function loadBoard() {
 
 async function dropTicket(ev, col) {
   ev.preventDefault();
+  if (sessionMode === "spectator") return;
   const id = ev.dataTransfer.getData("text/plain");
-  await api("PATCH", `/api/tickets/${id}`, {status: col});
+  await api("PATCH", `./api/tickets/${id}`, {status: col});
   if (col === "ready") toast("Queued for agent");
   loadBoard(); loadQueue();
 }
@@ -289,6 +302,8 @@ function workerName(id) {
 // ---------- ticket modal ----------
 function openTicketModal(id) {
   editingTicket = id === null ? null : tickets.find(t => t.id === id);
+  const readOnly = sessionMode === "spectator";
+  ["tTitle", "tBody", "tStatus", "tTarget"].forEach(x => document.getElementById(x).disabled = readOnly);
   document.getElementById("ticketModalTitle").textContent = editingTicket ? `Ticket #${editingTicket.id}` : "New ticket";
   document.getElementById("tTitle").value = editingTicket ? editingTicket.title : "";
   document.getElementById("tBody").value = editingTicket ? editingTicket.body : "";
@@ -321,53 +336,53 @@ async function saveTicket() {
   const tgt = document.getElementById("tTarget").value;
   if (tgt) payload.target_worker = parseInt(tgt); else payload.clear_target = true;
   if (editingTicket) {
-    await api("PATCH", `/api/tickets/${editingTicket.id}`, payload);
+    await api("PATCH", `./api/tickets/${editingTicket.id}`, payload);
   } else {
     delete payload.clear_target;
-    await api("POST", `/api/boards/${currentBoard.id}/tickets`, payload);
+    await api("POST", `./api/boards/${currentBoard.id}/tickets`, payload);
   }
   closeTicketModal(); loadBoard(); loadQueue();
 }
 async function runTicket() {
   if (!editingTicket) return;
-  await api("POST", `/api/tickets/${editingTicket.id}/run`);
+  await api("POST", `./api/tickets/${editingTicket.id}/run`);
   toast("Queued for agent"); closeTicketModal(); loadBoard(); loadQueue();
 }
 async function deleteTicket() {
   if (!editingTicket || !confirm("Delete ticket #" + editingTicket.id + "?")) return;
-  await api("DELETE", `/api/tickets/${editingTicket.id}`);
+  await api("DELETE", `./api/tickets/${editingTicket.id}`);
   closeTicketModal(); loadBoard();
 }
 async function addComment() {
   const msg = document.getElementById("newComment").value.trim();
   if (!msg || !editingTicket) return;
-  const t = await api("POST", `/api/tickets/${editingTicket.id}/comments`, {message: msg});
+  const t = await api("POST", `./api/tickets/${editingTicket.id}/comments`, {message: msg});
   document.getElementById("newComment").value = "";
   editingTicket = t; renderComments(t); loadBoard();
 }
 
 // ---------- side panels ----------
 async function loadWorkers() {
-  workers = await api("GET", `/api/clusters/${currentCluster.id}/workers`);
+  workers = await api("GET", `./api/clusters/${currentCluster.id}/workers`);
   document.getElementById("workersPanel").innerHTML = workers.length
     ? workers.map(w => `<div class="worker-row"><span class="dot ${w.online ? "on" : ""}"></span>
         <b>${esc(w.name)}</b><span class="muted">${w.online ? w.status : "offline"}</span></div>`).join("")
     : `<span class="muted">No PCs registered yet.</span>`;
 }
 async function loadSettings() {
-  const s = await api("GET", `/api/clusters/${currentCluster.id}/settings`);
+  const s = await api("GET", `./api/clusters/${currentCluster.id}/settings`);
   document.getElementById("apiKeyState").textContent =
     s.has_key ? "Saved: " + s.claude_api_key_masked : "No key set";
 }
 async function saveApiKey() {
   const v = document.getElementById("apiKeyInput").value.trim();
   if (!v) return;
-  await api("PUT", `/api/clusters/${currentCluster.id}/settings`, {claude_api_key: v});
+  await api("PUT", `./api/clusters/${currentCluster.id}/settings`, {claude_api_key: v});
   document.getElementById("apiKeyInput").value = "";
   toast("API key saved"); loadSettings();
 }
 async function loadQueue() {
-  const q = await api("GET", `/api/clusters/${currentCluster.id}/queue`);
+  const q = await api("GET", `./api/clusters/${currentCluster.id}/queue`);
   document.getElementById("queuePanel").innerHTML = q.length
     ? q.slice(0, 10).map(i => `<div>#${i.ticket_id} — ${i.status}${i.claimed_by ? " by " + esc(workerName(i.claimed_by)) : ""}</div>`).join("")
     : "No delegations yet.";
@@ -377,15 +392,48 @@ function esc(s) {
   return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 }
 
-// periodic refresh of live bits
+// periodic refresh of live bits (spectators keep polling too — live board)
 setInterval(() => {
-  if (token && currentCluster && document.getElementById("appView").style.display !== "none") {
+  if ((token || sessionMode !== "local") && currentCluster &&
+      document.getElementById("appView").style.display !== "none") {
     loadWorkers(); loadQueue();
     if (!document.getElementById("ticketOverlay").classList.contains("show")) loadBoard();
   }
 }, 5000);
 
-if (token) init(); else logout();
+// ---------- boot ----------
+async function boot() {
+  let s = {mode: "local"};
+  try { s = await api("GET", "./api/session"); } catch (e) { /* old server: local */ }
+  sessionMode = s.mode;
+  if (sessionMode === "owner") {
+    // Trusted proxy authenticates us; no login UI, no logout.
+    document.getElementById("logoutBtn").style.display = "none";
+    init();
+    return;
+  }
+  if (sessionMode === "spectator") {
+    document.body.classList.add("spectator");
+    document.getElementById("logoutBtn").style.display = "none";
+    document.getElementById("authView").style.display = "none";
+    document.getElementById("appView").style.display = "block";
+    document.getElementById("whoami").textContent = "";
+    const sel = document.getElementById("clusterSel");
+    sel.disabled = true;
+    currentCluster = s.cluster;  // {id, name} or null — from ./api/session
+    if (!currentCluster) {
+      sel.innerHTML = "";
+      document.getElementById("board").innerHTML = `<p class="muted">Nothing to show yet.</p>`;
+      return;
+    }
+    sel.innerHTML = `<option value="${currentCluster.id}">${esc(currentCluster.name)}</option>`;
+    await refreshClusterBits();
+    return;
+  }
+  if (token) init(); else logout();
+}
+
+boot();
 </script>
 </body>
 </html>
