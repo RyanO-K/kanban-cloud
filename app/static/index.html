@@ -310,7 +310,7 @@ function openTicketModal(id) {
   document.getElementById("tStatus").value = editingTicket ? editingTicket.status : "todo";
   const tgt = document.getElementById("tTarget");
   tgt.innerHTML = `<option value="">any worker</option>` +
-    workers.map(w => `<option value="${w.id}">${esc(w.name)}${w.online ? "" : " (offline)"}</option>`).join("");
+    workers.filter(w => !w.revoked).map(w => `<option value="${w.id}">${esc(w.name)}${w.online ? "" : " (offline)"}</option>`).join("");
   tgt.value = editingTicket && editingTicket.target_worker ? editingTicket.target_worker : "";
   document.getElementById("delBtn").style.display = editingTicket ? "" : "none";
   document.getElementById("runBtn").style.display = editingTicket ? "" : "none";
@@ -365,9 +365,26 @@ async function addComment() {
 async function loadWorkers() {
   workers = await api("GET", `./api/clusters/${currentCluster.id}/workers`);
   document.getElementById("workersPanel").innerHTML = workers.length
-    ? workers.map(w => `<div class="worker-row"><span class="dot ${w.online ? "on" : ""}"></span>
-        <b>${esc(w.name)}</b><span class="muted">${w.online ? w.status : "offline"}</span></div>`).join("")
-    : `<span class="muted">No PCs registered yet.</span>`;
+    ? workers.map(w => `<div class="worker-row"><span class="dot ${w.online && !w.revoked ? "on" : ""}"></span>
+        <b>${esc(w.name)}</b>
+        ${w.revoked ? '<span class="muted">(revoked)</span>'
+          : `<span class="muted">${w.online ? w.status : "offline"}</span>
+             <button class="ghost small owner-only" onclick="revokeWorker(${w.id})">Revoke</button>`}</div>`).join("")
+    : `<span class="muted">No PCs enrolled yet. On the PC:<br>
+       <code>py worker.py --enroll --server ${esc(enrollServer())} --join-code &lt;code&gt;</code></span>`;
+}
+
+function enrollServer() {
+  // Through the proxy (owner/spectator), location.origin is okeefe.work — wrong
+  // for enrollment, which must target the Render service directly.
+  return (sessionMode === "owner" || sessionMode === "spectator")
+    ? "https://kanban-cloud.onrender.com" : location.origin;
+}
+
+async function revokeWorker(id) {
+  if (!confirm("Revoke this PC's database access? It stops working immediately; re-enrolling restores it.")) return;
+  await api("POST", `./api/workers/${id}/revoke`);
+  await loadWorkers();
 }
 async function loadSettings() {
   const s = await api("GET", `./api/clusters/${currentCluster.id}/settings`);
