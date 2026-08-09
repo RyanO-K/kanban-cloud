@@ -28,7 +28,19 @@ from pathlib import Path
 
 import psycopg
 
-CONFIG_PATH = Path(__file__).parent / ".worker_config.json"
+DEFAULT_SERVER = "https://kanban-cloud.onrender.com"
+
+
+def app_dir() -> Path:
+    """Directory the worker lives in: next to the exe when frozen by
+    PyInstaller (whose __file__ points into a temp dir deleted after each
+    run), next to the script otherwise."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).parent
+    return Path(__file__).resolve().parent
+
+
+CONFIG_PATH = app_dir() / ".worker_config.json"
 POLL_SECONDS = 10
 MAX_ATTEMPTS = 2  # keep in sync with app/models.py MAX_ATTEMPTS
 
@@ -259,6 +271,31 @@ def finish_work(conn, worker_id: int, worker_name: str, item_id: int,
         return ticket_status
 
 
+# ---------- argument parser & executor selection ----------
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="kanban-cloud worker (v2 direct-DB)")
+    parser.add_argument("--enroll", action="store_true",
+                        help="enroll this PC (needs --join-code; --server optional)")
+    parser.add_argument("--server",
+                        help=f"server base URL (default {DEFAULT_SERVER})")
+    parser.add_argument("--join-code", help="cluster join code (enrollment only)")
+    parser.add_argument("--name", help="worker name (defaults to computer name)")
+    parser.add_argument("--stub", action="store_true",
+                        help="use the stub executor instead of the Claude CLI")
+    # v1 flag; real execution is now the default, so this is a no-op alias
+    parser.add_argument("--real", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--poll", type=float, default=POLL_SECONDS,
+                        help=f"poll interval seconds (default {POLL_SECONDS})")
+    parser.add_argument("--once", action="store_true",
+                        help="poll a single time then exit (for testing)")
+    return parser
+
+
+def pick_executor(args):
+    return StubExecutor() if args.stub else ClaudeExecutor()
+
+
 # ---------- main loop ----------
 
 def main() -> int:
@@ -268,19 +305,7 @@ def main() -> int:
         except (AttributeError, ValueError):
             pass
 
-    parser = argparse.ArgumentParser(description="kanban-cloud worker (v2 direct-DB)")
-    parser.add_argument("--enroll", action="store_true",
-                        help="enroll this PC (needs --server and --join-code)")
-    parser.add_argument("--server", help="server base URL (enrollment only)")
-    parser.add_argument("--join-code", help="cluster join code (enrollment only)")
-    parser.add_argument("--name", help="worker name (defaults to computer name)")
-    parser.add_argument("--real", action="store_true",
-                        help="use the Claude CLI executor instead of the stub")
-    parser.add_argument("--poll", type=float, default=POLL_SECONDS,
-                        help=f"poll interval seconds (default {POLL_SECONDS})")
-    parser.add_argument("--once", action="store_true",
-                        help="poll a single time then exit (for testing)")
-    args = parser.parse_args()
+    args = build_parser().parse_args()
 
     if args.enroll:
         if not args.server or not args.join_code:
@@ -297,7 +322,7 @@ def main() -> int:
               "py worker.py --enroll --server <url> --join-code <code>")
         return 2
 
-    executor = ClaudeExecutor() if args.real else StubExecutor()
+    executor = pick_executor(args)
     print(f"Worker '{cfg['name']}' polling Postgres every {args.poll}s "
           f"(executor: {executor.name}). Ctrl+C to stop.")
 
