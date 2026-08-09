@@ -4,14 +4,19 @@ One-time enrollment over HTTP issues this PC its own database role; after
 that the worker never contacts the web service — polling, claiming,
 progress, results, and heartbeats are SQL against Neon.
 
-Setup (once per PC):
+Client PCs (packaged exe): download kanban-worker.exe from the latest
+worker-v* GitHub Release, put it in its own folder, and run it — on first
+run it asks for the cluster join code, then starts polling. Real ticket
+execution shells out to the `claude` CLI, which must be installed
+separately.
+
+Dev / script setup (once per PC):
     pip install "psycopg[binary]"
-    py worker.py --enroll --server https://kanban-cloud.onrender.com \
-                 --join-code ABC12345 --name ryans-pc
+    py worker.py --enroll --join-code ABC12345 --name ryans-pc
 
 Run:
-    py worker.py            # stub executor
-    py worker.py --real     # execute tickets via the Claude CLI
+    py worker.py            # real executor (Claude CLI)
+    py worker.py --stub     # stub executor for testing
 
 Note: while this worker runs, its polling keeps Neon compute awake
 (free tier autosuspends only when idle). Stop the worker when not in use.
@@ -76,7 +81,7 @@ class StubExecutor:
         return True, (
             f"[StubExecutor] Completed ticket '{ticket['title']}' (attempt "
             f"{ticket.get('attempts', '?')}). This is a placeholder result — "
-            "run the worker with --real to execute via the Claude CLI."
+            "run the worker without --stub to execute via the Claude CLI."
         )
 
 

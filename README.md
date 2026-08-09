@@ -51,8 +51,8 @@ and DSN. Everything else in the FastAPI app is the human-facing surface
  |     .worker_config.json                           |
  |   - thereafter: SQL claim (SKIP LOCKED), SQL       |
  |     heartbeat, SQL result-post — no HTTP           |
- |   - StubExecutor (default) | ClaudeExecutor       |
- |     (--real: `claude -p ...` with cluster key)    |
+ |   - ClaudeExecutor (default) | StubExecutor       |
+ |     (--stub: fake results for testing)            |
  +---------------------------------------------------+
 ```
 
@@ -125,6 +125,28 @@ admin role for creating and dropping per-PC worker roles.
 
 ## Start a worker on another PC
 
+### Client PC install (.exe)
+
+1. Download `kanban-worker.exe` from the latest `worker-v*` GitHub Release
+   (repo is private — download while signed in and copy it to the PC).
+2. Put the exe in a folder of its own (it writes `.worker_config.json`
+   next to itself).
+3. Double-click it. On first run it asks for the cluster join code (shown
+   in the board's workers panel), enrolls, and starts polling.
+4. For real ticket execution, install the Claude CLI on the PC (`claude`
+   must be on PATH). Pass `--stub` to test without it.
+
+First-run notes: Windows SmartScreen will warn about the unsigned exe
+(More info → Run anyway). To decommission a PC: click **Revoke** in the
+board UI, then delete the exe's folder (the config, including the DB
+credential, lives there).
+
+Releasing a new version: `git tag worker-vX.Y.Z && git push origin
+worker-vX.Y.Z` — CI builds the exe and attaches it to the release. Tag
+pushes do not trigger the Render deploy.
+
+### Dev / script setup
+
 Copy `worker.py` to the PC and install its one dependency (Python 3.10+):
 
 ```powershell
@@ -132,17 +154,18 @@ pip install "psycopg[binary]"
 
 # one-time enrollment: trades the join code (shown in the UI) for this PC's
 # own Postgres role + DSN, saved to .worker_config.json
-py worker.py --enroll --server https://kanban-cloud.onrender.com --join-code <CODE> --name my-pc
+py worker.py --enroll --join-code <CODE> --name my-pc
 
 # later runs reuse .worker_config.json and talk SQL directly — no HTTP:
-py worker.py            # stub executor
-py worker.py --real     # execute tickets via the Claude CLI
+py worker.py            # real executor (Claude CLI)
+py worker.py --stub     # stub executor for testing
 ```
 
-`--real` needs `claude` on PATH; the cluster's Claude API key (Settings
-panel) is read straight from `cluster_settings` on claim and exported as
-`ANTHROPIC_API_KEY` for the CLI. Default poll interval is 10s (`--poll N` to
-change it, `--once` to poll a single time and exit).
+The Claude CLI is required for real ticket execution (`claude` must be on PATH);
+the cluster's Claude API key (Settings panel) is read straight from
+`cluster_settings` on claim and exported as `ANTHROPIC_API_KEY` for the CLI.
+Default poll interval is 10s (`--poll N` to change it, `--once` to poll a
+single time and exit).
 
 The workers panel in the UI shows each PC and whether it is online (heartbeat
 within 30s), and has an owner-only **revoke** button per worker (see

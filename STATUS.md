@@ -1,6 +1,21 @@
 # STATUS — kanban-cloud MVP
 
-Last updated: 2026-08-08
+Last updated: 2026-08-09
+
+## Worker .exe packaging (2026-08-09)
+
+`worker.py` is now packageable as a portable single-file Windows exe:
+PyInstaller onefile via `.github/workflows/worker-exe.yml` (tag
+`worker-v*` → GitHub Release with `kanban-worker.exe`; manual
+`workflow_dispatch` → artifact). Runtime changes: config resolves next to
+the exe when frozen; first run with no config prompts for the join code
+and enrolls against https://kanban-cloud.onrender.com; the real Claude
+executor is now the default (`--stub` for testing, `--real` kept as a
+hidden no-op alias); fatal exits pause for Enter when frozen so
+double-click users can read the error. Caveats: exe is unsigned
+(SmartScreen warning), `claude` CLI not bundled, config holds the DB
+credential next to the exe. Spec:
+`docs/superpowers/specs/2026-08-08-worker-exe-packaging-design.md`.
 
 ## 2026-08-08 — v2: DB-centric workers
 
