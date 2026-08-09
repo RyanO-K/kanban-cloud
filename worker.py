@@ -125,7 +125,12 @@ def load_config() -> dict | None:
 
 
 def save_config(cfg: dict) -> None:
-    CONFIG_PATH.write_text(json.dumps(cfg, indent=2))
+    try:
+        CONFIG_PATH.write_text(json.dumps(cfg, indent=2))
+    except OSError as e:
+        print(f"Cannot write config at {CONFIG_PATH}: {e}\n"
+              "Move the exe to a writable folder and run it again.")
+        raise
     print(f"Saved worker config to {CONFIG_PATH}")
 
 
@@ -149,6 +154,47 @@ def enroll(server: str, join_code: str, name: str) -> dict:
     save_config(cfg)
     print(f"Enrolled worker '{name}' in cluster '{cfg['cluster_name']}'")
     return cfg
+
+
+def pause_if_frozen() -> None:
+    """Double-clicked exes close their console on exit; hold it open so
+    the user can read a fatal error. No-op for the script version."""
+    if getattr(sys, "frozen", False) and sys.stdin is not None and sys.stdin.isatty():
+        try:
+            input("Press Enter to close...")
+        except EOFError:
+            pass
+
+
+def first_run_enroll(args) -> dict | None:
+    """No saved config: prompt for a join code and enroll interactively.
+    Returns the saved config, or None if enrollment failed/was cancelled."""
+    server = args.server or DEFAULT_SERVER
+    name = (args.name or os.environ.get("COMPUTERNAME")
+            or os.environ.get("HOSTNAME") or "worker")
+    print(f"No worker config found - enrolling this PC against {server}")
+    print(f"Worker name: {name}")
+    try:
+        code = ""
+        while not code:
+            code = input("Cluster join code: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print("\nEnrollment cancelled.")
+        return None
+    try:
+        return enroll(server, code, name)
+    except urllib.error.HTTPError as e:
+        try:
+            detail = json.loads(e.read().decode()).get("detail", "")
+        except Exception:
+            detail = ""
+        print(f"Enrollment failed ({e.code}): {detail or e.reason}")
+        return None
+    except urllib.error.URLError as e:
+        print(f"Enrollment failed: could not reach {server} ({e.reason})")
+        return None
+    except OSError:
+        return None  # save_config already printed the fix
 
 
 # ---------- direct-SQL work protocol ----------
@@ -308,19 +354,20 @@ def main() -> int:
     args = build_parser().parse_args()
 
     if args.enroll:
-        if not args.server or not args.join_code:
-            print("--enroll needs --server and --join-code")
+        if not args.join_code:
+            print("--enroll needs --join-code")
             return 2
         name = (args.name or os.environ.get("COMPUTERNAME")
                 or os.environ.get("HOSTNAME") or "worker")
-        enroll(args.server, args.join_code, name)
+        enroll(args.server or DEFAULT_SERVER, args.join_code, name)
         return 0
 
     cfg = load_config()
     if cfg is None:
-        print("No saved config. Enroll first: "
-              "py worker.py --enroll --server <url> --join-code <code>")
-        return 2
+        cfg = first_run_enroll(args)
+        if cfg is None:
+            pause_if_frozen()
+            return 2
 
     executor = pick_executor(args)
     print(f"Worker '{cfg['name']}' polling Postgres every {args.poll}s "
@@ -352,6 +399,7 @@ def main() -> int:
             print(f"Database unreachable ({msg[:200]}); retrying...")
             if "password authentication failed" in msg or "does not exist" in msg:
                 print("Credentials rejected — this PC may be revoked. Re-enroll.")
+                pause_if_frozen()
                 return 1
             conn = None
         except KeyboardInterrupt:
