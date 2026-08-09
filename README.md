@@ -255,11 +255,11 @@ location /board/ {
   **any enrolled worker role via direct SQL** (`SELECT` on `cluster_settings`
   is part of the `kanban_worker` group grants) — not just the worker that
   claims a given ticket. This is by design (any worker in the cluster may
-  need it to run `--real`), but it means the blast radius of one compromised
-  PC's Postgres credentials includes the key. Anyone with a cluster join code
-  can enroll a worker and get DB access to the key — treat join codes as
-  secrets, revoke a PC's role the moment it's no longer trusted, and rotate
-  the API key if a code leaks.
+  need it to execute tickets via the Claude CLI), but it means the blast radius
+  of one compromised PC's Postgres credentials includes the key. Anyone with a
+  cluster join code can enroll a worker and get DB access to the key — treat
+  join codes as secrets, revoke a PC's role the moment it's no longer trusted,
+  and rotate the API key if a code leaks.
 - Any cluster member can change settings or delete tickets; there are no
   roles/permissions.
 - No stale-claim reaper: if a worker dies mid-ticket, the `work_queue` row
