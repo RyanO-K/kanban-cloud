@@ -4,6 +4,8 @@ Run:  py -m uvicorn app.main:app --host 0.0.0.0 --port 8900
 Env:  DATABASE_URL (optional; Neon Postgres). Falls back to ./kanban_cloud.db.
       PROXY_SHARED_SECRET (optional; enables trusted-reverse-proxy mode — see
       "Deploying behind a reverse proxy" in README.md).
+      PROXY_LOGIN_URL (optional; a site-relative URL the spectator UI offers as
+      a "Sign in with GitHub" button — e.g. /auth/github?return=/board/).
 """
 import hmac
 import os
@@ -115,7 +117,11 @@ class WorkerEnrollBody(BaseModel):
 
 # ---------- app factory ----------
 
-def create_app(db_url: str | None = None, proxy_secret: str | None = None) -> FastAPI:
+def create_app(
+    db_url: str | None = None,
+    proxy_secret: str | None = None,
+    proxy_login_url: str | None = None,
+) -> FastAPI:
     engine = make_engine(db_url)
     Base.metadata.create_all(engine)
     run_migrations(engine)
@@ -127,6 +133,15 @@ def create_app(db_url: str | None = None, proxy_secret: str | None = None) -> Fa
     # behaves exactly as before (local dev login/register).
     proxy_secret = proxy_secret if proxy_secret is not None else os.environ.get("PROXY_SHARED_SECRET")
     proxy_secret = proxy_secret or None
+
+    # Where the spectator UI points its sign-in button. Site-specific, so it is
+    # configuration rather than a hardcoded path: kanban-cloud does not know or
+    # care that the proxy in front of it is a portfolio site.
+    proxy_login_url = (
+        proxy_login_url
+        if proxy_login_url is not None
+        else os.environ.get("PROXY_LOGIN_URL")
+    ) or None
 
     app = FastAPI(title="kanban-cloud")
     app.state.engine = engine
@@ -170,6 +185,19 @@ def create_app(db_url: str | None = None, proxy_secret: str | None = None) -> Fa
         """The instance's default cluster: the oldest one (a proxy deployment
         is single-tenant, so the first cluster ever created is 'the' board)."""
         return db.scalar(select(Cluster).order_by(Cluster.id).limit(1))
+
+    def default_board(db: Session, cluster: Cluster | None) -> Board | None:
+        """The board a visitor should land on: the demo board when one exists,
+        otherwise the cluster's first board."""
+        if cluster is None:
+            return None
+        boards = db.scalars(
+            select(Board).where(Board.cluster_id == cluster.id).order_by(Board.id)
+        ).all()
+        for board in boards:
+            if board.name.strip().lower() == "demo":
+                return board
+        return boards[0] if boards else None
 
     def get_or_create_proxy_user(
         db: Session, login: str, *, create_default_cluster: bool
@@ -295,8 +323,11 @@ def create_app(db_url: str | None = None, proxy_secret: str | None = None) -> Fa
         - {"mode": "local"} — no PROXY_SHARED_SECRET; normal login UI applies.
         - {"mode": "owner", "user": {"id", "email"}} — trusted proxy supplied
           X-Proxy-User; account auto-provisioned, full rights, no login UI.
-        - {"mode": "spectator", "cluster": {"id", "name"} | null} — read-only;
-          `cluster` is the default cluster to render (null if none exists yet).
+        - {"mode": "spectator", "cluster": {...}|null, "board": {...}|null,
+          "login_url": str|null} — read-only; `cluster` is the default cluster
+          to render (null if none exists yet), `board` is the board to land on
+          (the demo board if there is one), and `login_url`, when set, is where
+          the sign-in button sends the visitor.
         """
         if proxy_secret is None:
             return {"mode": "local"}
@@ -307,9 +338,12 @@ def create_app(db_url: str | None = None, proxy_secret: str | None = None) -> Fa
             )
             return {"mode": "owner", "user": {"id": user.id, "email": user.email}}
         cluster = default_cluster(db)
+        board = default_board(db, cluster)
         return {
             "mode": "spectator",
             "cluster": {"id": cluster.id, "name": cluster.name} if cluster else None,
+            "board": {"id": board.id, "name": board.name} if board else None,
+            "login_url": proxy_login_url,
         }
 
     # ----- auth -----

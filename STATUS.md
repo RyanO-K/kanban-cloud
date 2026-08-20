@@ -1,6 +1,41 @@
 # STATUS — kanban-cloud MVP
 
-Last updated: 2026-08-09
+Last updated: 2026-08-19
+
+## Public board polish (2026-08-19)
+
+Spectators arriving at `https://www.okeefe.work/board/` now get a way in and
+something to look at. Spec:
+`docs/superpowers/specs/2026-08-19-board-signin-and-demo-board-design.md`,
+plan: `docs/superpowers/plans/2026-08-19-board-signin-and-demo-board.md`.
+
+- **Sign-in button**: new optional env `PROXY_LOGIN_URL` is echoed to the
+  browser as `login_url` on `GET /api/session`; the spectator UI turns it into
+  a "Sign in with GitHub" button. In `site-page`, `/auth/github?return=<path>`
+  carries a validated same-site path through the OAuth state so `/auth/callback`
+  returns the browser to `/board/` instead of `/#projects`. Rejected return
+  values (`//evil.com`, `/\evil.com`, absolute URLs, anything over 200 chars)
+  fall back to the old destination.
+- **Demo board**: `GET /api/session` also returns the `board` a spectator should
+  land on — the board named `Demo` when one exists, else the first board — and
+  `scripts/seed_demo.py "<dsn>"` populates it with eight example tickets and
+  four agent comments lifted from the animated `/kanban` showcase. The seeder is
+  idempotent and writes no `work_queue` rows, so its two `ready` tickets are
+  inert and no enrolled worker can claim them.
+- **Tests**: 73 passed (59 baseline → +6 session, +5 seeder, +3 markup). One
+  pre-existing assertion in `test_session_modes` was updated: the spectator
+  payload gained `board` and `login_url`. Verified end to end against a local
+  uvicorn in proxy mode — gate 403s without the secret, owner provisions the
+  cluster, spectator sees `login_url`, the seeder reports
+  `SEED OK - board 2 "Demo": 8 tickets, 4 comments` and is a no-op on rerun,
+  and the spectator session then points at the Demo board.
+- **Not done here**: `site-page` sessions are still an in-memory `Map` (a
+  redeploy or idle sleep logs the owner out — deliberate), and the 15s
+  `BOARD_UPSTREAM_TIMEOUT_MS` in the proxy is still shorter than the ~32s
+  free-tier cold start, so the first visitor after an idle period gets a 502.
+- **Operator steps** (not automated): set `PROXY_LOGIN_URL=/auth/github?return=/board/`
+  on the Render `kanban-cloud` service, sign in once to create the cluster, then
+  run the seeder against the Neon DSN.
 
 ## Worker .exe packaging (2026-08-09)
 
