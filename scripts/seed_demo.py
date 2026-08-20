@@ -112,7 +112,7 @@ def seed(db: Session, board_name: str = "Demo") -> str:
     cluster = db.scalar(select(Cluster).order_by(Cluster.id).limit(1))
     if cluster is None:
         raise SeedError(
-            "no cluster yet — sign in to the board once first; the cluster is "
+            "no cluster yet - sign in to the board once first; the cluster is "
             "created on the owner's first request"
         )
 
@@ -125,7 +125,7 @@ def seed(db: Session, board_name: str = "Demo") -> str:
     )
     if owner is None:
         raise SeedError(
-            "cluster has no members — sign in to the board once first; the "
+            "cluster has no members - sign in to the board once first; the "
             "owner account is provisioned on that request"
         )
 
@@ -144,7 +144,7 @@ def seed(db: Session, board_name: str = "Demo") -> str:
         select(func.count()).select_from(Ticket).where(Ticket.board_id == board.id)
     )
     if existing:
-        return f"already seeded ({existing} tickets) — nothing to do"
+        return f"already seeded ({existing} tickets) - nothing to do"
 
     now = utcnow()
     comments = 0
@@ -176,7 +176,7 @@ def seed(db: Session, board_name: str = "Demo") -> str:
 
     db.commit()
     return (
-        f'SEED OK — board {board.id} "{board.name}": '
+        f'SEED OK - board {board.id} "{board.name}": '
         f"{len(DEMO_TICKETS)} tickets, {comments} comments"
     )
 

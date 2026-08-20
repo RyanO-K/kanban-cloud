@@ -74,7 +74,8 @@
     <button class="small ghost owner-only" onclick="newBoard()">+ board</button>
     <button class="small owner-only" onclick="openTicketModal(null)">+ ticket</button>
     <div class="spacer"></div>
-    <span id="spectatorNote">viewing read-only — owner login via site</span>
+    <span id="spectatorNote">viewing read-only</span>
+    <button class="small" id="signInBtn" style="display:none">Sign in with GitHub</button>
     <span class="muted" id="whoami"></span>
     <button class="small ghost" id="logoutBtn" onclick="logout()">Log out</button>
   </header>
@@ -160,6 +161,9 @@ let currentCluster = null, currentBoard = null, editingTicket = null;
 // 'local' (dev: login UI) | 'owner' (proxy-authenticated, full rights)
 // | 'spectator' (proxy, read-only). Set once at boot from ./api/session.
 let sessionMode = "local";
+// Board the server told a spectator to land on (the demo board when one
+// exists). Null in owner/local mode, where the first board still wins.
+let sessionBoardId = null;
 
 function toast(msg) {
   const t = document.getElementById("toast");
@@ -235,7 +239,7 @@ async function refreshClusterBits() {
   boards = await api("GET", `./api/clusters/${currentCluster.id}/boards`);
   const bs = document.getElementById("boardSel");
   bs.innerHTML = boards.map(b => `<option value="${b.id}">${esc(b.name)}</option>`).join("");
-  currentBoard = boards[0] || null;
+  currentBoard = boards.find(b => b.id === sessionBoardId) || boards[0] || null;
   if (currentBoard) bs.value = currentBoard.id;
   const jobs = [loadBoard(), loadWorkers(), loadQueue()];
   if (sessionMode !== "spectator") jobs.push(loadSettings());  // settings GET is 403 for spectators
@@ -431,6 +435,14 @@ async function boot() {
   }
   if (sessionMode === "spectator") {
     document.body.classList.add("spectator");
+    sessionBoardId = s.board ? s.board.id : null;
+    if (s.login_url) {
+      // A root-relative site path, deliberately not a ./api/ call: this
+      // navigates out of the /board/ prefix to the site's own OAuth route.
+      const signIn = document.getElementById("signInBtn");
+      signIn.onclick = function () { location.href = s.login_url; };
+      signIn.style.display = "";
+    }
     document.getElementById("logoutBtn").style.display = "none";
     document.getElementById("authView").style.display = "none";
     document.getElementById("appView").style.display = "block";
