@@ -241,6 +241,20 @@ headers before injecting its own):
 // named "Demo" when it exists, else the cluster's first board.
 ```
 
+### Demo board
+
+Anonymous visitors land on a board named `Demo` when one exists (that is what
+`board` on `GET /api/session` selects), so the public view shows example work
+instead of an empty column set. Populate it once, after signing in for the
+first time:
+
+    py scripts/seed_demo.py "<neon-dsn>"
+
+The script is idempotent — if the demo board already holds a ticket it writes
+nothing, so cards you delete stay deleted. Seeded tickets never enter the work
+queue, so an enrolled worker cannot claim one even though two of them sit in
+`ready`.
+
 Example nginx-ish proxy config:
 
 ```
