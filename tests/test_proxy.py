@@ -117,9 +117,10 @@ def test_proxy_account_has_no_usable_password(pclient):
 
 def test_session_modes(client, pclient):
     assert client.get("/api/session").json() == {"mode": "local"}
-    # Spectator before anything exists: cluster is null.
+    # Spectator before anything exists: cluster and board are null, and this
+    # deployment has no sign-in URL configured.
     s = pclient.get("/api/session", headers=SPECTATOR).json()
-    assert s == {"mode": "spectator", "cluster": None}
+    assert s == {"mode": "spectator", "cluster": None, "board": None, "login_url": None}
     seed = owner_seed(pclient)
     s = pclient.get("/api/session", headers=SPECTATOR).json()
     assert s["mode"] == "spectator"
@@ -192,3 +193,55 @@ def test_spectator_every_mutation_403(pclient):
     assert [t["id"] for t in tickets] == [tid]
     assert tickets[0]["status"] == "todo"
     assert tickets[0]["comments"] == []
+
+
+# ---------- session: login_url + landing board ----------
+
+def test_session_reports_login_url_when_configured(tmp_path):
+    app = create_app(
+        f"sqlite:///{tmp_path / 'login.db'}",
+        proxy_secret=SECRET,
+        proxy_login_url="/auth/github?return=/board/",
+    )
+    with TestClient(app) as c:
+        s = c.get("/api/session", headers=SPECTATOR).json()
+        assert s["mode"] == "spectator"
+        assert s["login_url"] == "/auth/github?return=/board/"
+
+
+def test_session_login_url_is_null_when_unconfigured(pclient):
+    s = pclient.get("/api/session", headers=SPECTATOR).json()
+    assert s["login_url"] is None
+
+
+def test_owner_and_local_session_payloads_unchanged(pclient, client):
+    """The new keys are spectator-only; owner and local shapes are untouched."""
+    owner = pclient.get("/api/session", headers=OWNER).json()
+    assert set(owner) == {"mode", "user"}
+    assert client.get("/api/session").json() == {"mode": "local"}
+
+
+def test_spectator_lands_on_the_demo_board(pclient):
+    """A board named Demo wins over the lower-id default board."""
+    seed = owner_seed(pclient)
+    cluster_id = seed["cluster"]["id"]
+    r = pclient.post(f"/api/clusters/{cluster_id}/boards", json={"name": "Demo"}, headers=OWNER)
+    assert r.status_code == 200, r.text
+    listing = pclient.get(f"/api/clusters/{cluster_id}/boards", headers=OWNER).json()
+    demo_id = next(b["id"] for b in listing if b["name"] == "Demo")
+    assert demo_id != seed["board"]["id"]
+
+    s = pclient.get("/api/session", headers=SPECTATOR).json()
+    assert s["board"] == {"id": demo_id, "name": "Demo"}
+
+
+def test_spectator_board_falls_back_to_first_board(pclient):
+    seed = owner_seed(pclient)
+    s = pclient.get("/api/session", headers=SPECTATOR).json()
+    assert s["board"]["id"] == seed["board"]["id"]
+
+
+def test_spectator_board_is_null_without_a_cluster(pclient):
+    s = pclient.get("/api/session", headers=SPECTATOR).json()
+    assert s["cluster"] is None
+    assert s["board"] is None

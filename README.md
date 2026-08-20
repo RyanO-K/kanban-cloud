@@ -208,6 +208,12 @@ can reach the app around the proxy. The one exempt route:
 Note `GET /api/health` is *behind* the gate too — platform health checks must
 send the secret header (or probe a TCP connect).
 
+**Env var: `PROXY_LOGIN_URL`** (optional) is a site-relative URL the spectator
+UI turns into a "Sign in with GitHub" button — for the portfolio deployment,
+`/auth/github?return=/board/`. Unset means no button is shown, which is the
+right behaviour for a local run where there is no site in front. It is returned
+to the browser as `login_url` on `GET /api/session`.
+
 **Identity headers** (the proxy must strip any client-supplied `X-Proxy-*`
 headers before injecting its own):
 
@@ -221,15 +227,18 @@ headers before injecting its own):
   tickets + comments, workers status, delegation queue, health, session);
   the cluster list (join codes!) and cluster settings are denied, and every
   non-GET returns 403. The UI renders the default cluster's board live
-  (polling stays on) with all mutating controls hidden and a
-  "viewing read-only — owner login via site" note.
+  (polling stays on) with all mutating controls hidden, a "viewing read-only"
+  note, and — when `PROXY_LOGIN_URL` is set — a sign-in button.
 
 **`GET /api/session`** tells the frontend which world it is in:
 
 ```jsonc
 {"mode": "local"}                                        // no PROXY_SHARED_SECRET
 {"mode": "owner", "user": {"id": 1, "email": "ryan@proxy.user"}}
-{"mode": "spectator", "cluster": {"id": 1, "name": "Main"}}  // cluster null if none yet
+{"mode": "spectator", "cluster": {"id": 1, "name": "Main"}, "board": {"id": 2, "name": "Demo"}, "login_url": "/auth/github?return=/board/"}
+// spectator: cluster/board are null if none exist yet; login_url is null
+// unless PROXY_LOGIN_URL is set. `board` is the board to land on — the one
+// named "Demo" when it exists, else the cluster's first board.
 ```
 
 Example nginx-ish proxy config:
