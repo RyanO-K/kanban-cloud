@@ -13,9 +13,14 @@ plan: `docs/superpowers/plans/2026-08-19-board-signin-and-demo-board.md`.
   browser as `login_url` on `GET /api/session`; the spectator UI turns it into
   a "Sign in with GitHub" button. In `site-page`, `/auth/github?return=<path>`
   carries a validated same-site path through the OAuth state so `/auth/callback`
-  returns the browser to `/board/` instead of `/#projects`. Rejected return
-  values (`//evil.com`, `/\evil.com`, absolute URLs, anything over 200 chars)
-  fall back to the old destination.
+  returns the browser to `/board/` instead of `/#projects`. Validation is an
+  RFC 3986 character allowlist plus a URL-parser same-origin check; anything
+  else (`//evil.com`, absolute URLs, over 200 chars) falls back to the old
+  destination. The first cut denylisted `//` and `/\` prefixes only, which a
+  code review broke with `?return=/%09/evil.com`: browsers strip ASCII tab and
+  newline before parsing, so the tab-smuggled form resolved to `https://evil.com`.
+  Fixed in site-page 3da9beb before anyone could reach it — `PROXY_LOGIN_URL`
+  was still unset, so nothing had ever sent a `return=` parameter.
 - **Demo board**: `GET /api/session` also returns the `board` a spectator should
   land on — the board named `Demo` when one exists, else the first board — and
   `scripts/seed_demo.py "<dsn>"` populates it with eight example tickets and
