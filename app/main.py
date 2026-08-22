@@ -60,6 +60,7 @@ WORKER_EXEMPT_RE = re.compile(r"^/api/workers/enroll$")
 # from /api/session instead.
 SPECTATOR_ALLOWED_RE = re.compile(
     r"^(?:/"
+    r"|/b/\d+"
     r"|/api/health"
     r"|/api/session"
     r"|/api/clusters/\d+/(?:boards|workers|queue|blocked)"
@@ -400,6 +401,7 @@ def create_app(
     def board_json(b: Board) -> dict:
         return {
             "id": b.id,
+            "cluster_id": b.cluster_id,
             "name": b.name,
             "description": b.description,
             "out_of_scope": b.out_of_scope,
@@ -572,6 +574,13 @@ def create_app(
 
     @app.get("/")
     def index():
+        return FileResponse(STATIC_DIR / "index.html")
+
+    @app.get("/b/{board_id}")
+    def board_page(board_id: int):
+        """Same SPA shell as '/' — the frontend reads the board id from the
+        URL on boot so a refresh (or a shared link) lands back on this board
+        instead of whatever was first alphabetically."""
         return FileResponse(STATIC_DIR / "index.html")
 
     @app.get("/api/health")
@@ -885,6 +894,16 @@ def create_app(
         board = Board(cluster_id=cluster_id, name=body.name.strip() or "Board")
         db.add(board)
         db.commit()
+        return board_json(board)
+
+    @app.get("/api/boards/{board_id}")
+    def get_board(
+        board_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)
+    ):
+        """A single board's metadata, including its cluster — how the
+        frontend resolves a `/b/{id}` URL to a cluster it may not have
+        selected yet."""
+        board = board_for_user(db, user, board_id)
         return board_json(board)
 
     @app.patch("/api/boards/{board_id}")

@@ -335,6 +335,41 @@ let sessionMode = "local";
 // exists). Null in owner/local mode, where the first board still wins.
 let sessionBoardId = null;
 
+// ---------- routing (/b/{board_id}?ticket={ticket_id}) ----------
+// The board and ticket a direct link or a refresh should land on, and the
+// directory the SPA is mounted at ("/" locally, "/board/" behind the
+// portfolio-site proxy) — all derived from ONE match against the page's
+// actual load path so they agree on the proxy prefix, whatever it is. Each
+// pending value is consumed once (then cleared) the first time it can be
+// applied, so later navigation is driven by clicks, not the initial URL.
+const ROUTE_MATCH = location.pathname.match(/^(.*\/)b\/(\d+)\/?$/);
+const APP_ROOT = ROUTE_MATCH ? ROUTE_MATCH[1] : location.pathname.replace(/[^/]*$/, "");
+let pendingBoardId = ROUTE_MATCH ? Number(ROUTE_MATCH[2]) : null;
+let pendingTicketId = (() => {
+  const t = new URLSearchParams(location.search).get("ticket");
+  return t && /^\d+$/.test(t) ? Number(t) : null;
+})();
+
+// Keeps the address bar in sync with what's on screen (no new history entry
+// per board/ticket — this mirrors state, it isn't a back/forward stack).
+function syncRoute() {
+  if (!currentBoard) return;
+  const params = new URLSearchParams();
+  if (editingTicket) params.set("ticket", editingTicket.id);
+  const qs = params.toString();
+  const target = `${APP_ROOT}b/${currentBoard.id}${qs ? "?" + qs : ""}`;
+  if (target !== location.pathname + location.search) history.replaceState(null, "", target);
+}
+
+// Which of the user's clusters a URL-supplied board id belongs to, so a
+// direct link can select the right cluster before loading its boards.
+async function resolveClusterForBoard(boardId) {
+  try {
+    const b = await api("GET", `./api/boards/${boardId}`);
+    return clusters.find(c => c.id === b.cluster_id) || null;
+  } catch { return null; }
+}
+
 // ---------- theme ----------
 function applyDarkMode(on) {
   document.body.classList.toggle("dark", on);
@@ -372,9 +407,12 @@ function toast(msg) {
 }
 
 async function api(method, path, body) {
-  // Paths are RELATIVE ("./api/...") so the app works both at "/" and when
-  // reverse-proxied under a prefix like "/board/".
-  const resp = await fetch(path, {
+  // Paths are written RELATIVE ("./api/...") so the app works both at "/" and
+  // when reverse-proxied under a prefix like "/board/"; resolved against
+  // APP_ROOT (not location.pathname) so a "/b/{id}" board route doesn't
+  // change where they point.
+  const url = path.startsWith("./") ? APP_ROOT + path.slice(2) : path;
+  const resp = await fetch(url, {
     method,
     headers: Object.assign({"Content-Type": "application/json"},
       token ? {"Authorization": "Bearer " + token} : {}),
@@ -424,7 +462,9 @@ async function init() {
   const sel = document.getElementById("clusterSel");
   sel.innerHTML = clusters.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join("");
   if (!clusters.length) { openClusterModal(); return; }
-  currentCluster = clusters.find(c => c.id == (localStorage.getItem("kc_cluster") || clusters[0].id)) || clusters[0];
+  const linkedCluster = pendingBoardId ? await resolveClusterForBoard(pendingBoardId) : null;
+  currentCluster = linkedCluster ||
+    clusters.find(c => c.id == (localStorage.getItem("kc_cluster") || clusters[0].id)) || clusters[0];
   sel.value = currentCluster.id;
   await refreshClusterBits();
 }
@@ -440,10 +480,19 @@ async function refreshClusterBits() {
   boards = await api("GET", `./api/clusters/${currentCluster.id}/boards`);
   const bs = document.getElementById("boardSel");
   bs.innerHTML = boards.map(b => `<option value="${b.id}">${esc(b.name)}</option>`).join("");
-  currentBoard = boards.find(b => b.id === sessionBoardId) || boards[0] || null;
+  currentBoard = boards.find(b => b.id === pendingBoardId) || boards.find(b => b.id === sessionBoardId)
+    || boards[0] || null;
+  pendingBoardId = null;
   if (currentBoard) bs.value = currentBoard.id;
   const jobs = [loadBoard(), loadWorkers(), loadQueue(), loadBlocked(), loadProfiles()];
   await Promise.all(jobs);
+  if (pendingTicketId) {
+    const id = pendingTicketId;
+    pendingTicketId = null;
+    const t = tickets.find(x => x.id === id);
+    if (t) openTicketModal(t.id);
+  }
+  syncRoute();
 }
 
 function openClusterModal() { document.getElementById("clusterOverlay").classList.add("show"); }
@@ -778,6 +827,7 @@ async function loadBoard() {
     return `<div class="col" ondragover="event.preventDefault()" ondrop="dropTicket(event,'${col}')">
       <h3><span>${col}</span><span>${tickets.filter(t => t.status === col).length}</span></h3>${cards}</div>`;
   }).join("");
+  syncRoute();
 }
 
 async function dropTicket(ev, col) {
@@ -857,10 +907,13 @@ function openTicketModal(id) {
   document.getElementById("chatWrap").style.display = editingTicket ? "" : "none";
   document.getElementById("ticketOverlay").classList.add("show");
   if (editingTicket) startLivePoll(); else stopLivePoll();
+  syncRoute();
 }
 function closeTicketModal() {
   document.getElementById("ticketOverlay").classList.remove("show");
   stopLivePoll();
+  editingTicket = null;
+  syncRoute();
 }
 
 // ---------- live agent output + chat (polls independently of the board's
