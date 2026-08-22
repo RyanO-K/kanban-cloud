@@ -166,6 +166,7 @@
     <label>Depends on <span class="muted" style="font-weight:normal">(ctrl/cmd-click to select several; must all reach review/done before this ticket is claimed)</span></label>
     <select id="tDeps" multiple size="4"></select>
     <div id="tBlockedNote" class="badge blocked" style="display:none; margin-top:4px">Blocked — waiting on dependencies</div>
+    <div id="tCommitGate" style="display:none; margin-top:4px; font-size:12px"></div>
     <div class="row owner-only">
       <button onclick="saveTicket()">Save</button>
       <button class="ghost" id="runBtn" onclick="runTicket()">Run on agent now</button>
@@ -231,6 +232,12 @@
     <select id="bDefaultProfile"><option value="">(none — falls back to the worker's own --allowed-tools)</option></select>
     <p class="muted" style="font-size:12px">Used for every ticket on this board that doesn't pick its own profile.
       Manage profiles from the <b>Profiles</b> button in the header.</p>
+    <label style="display:flex; align-items:center; gap:6px; margin-top:8px">
+      <input type="checkbox" id="bAutoPush"> Auto-push a finished ticket's branch to origin
+    </label>
+    <p class="muted" style="font-size:12px">Off by default. When on, a worker only pushes
+      if there are no commit requirements, or the agent's own commit gate reported them met.
+      Push credentials are the worker PC's own ambient git auth and never reach this server.</p>
     <div class="row">
       <button onclick="saveBoardSettings()">Save</button>
       <button class="ghost" onclick="document.getElementById('boardOverlay').classList.remove('show')">Cancel</button>
@@ -477,6 +484,7 @@ function openBoardSettings() {
   sel.innerHTML = `<option value="">(none — falls back to the worker's own --allowed-tools)</option>` +
     profiles.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join("");
   sel.value = b.default_profile_id || "";
+  document.getElementById("bAutoPush").checked = !!b.auto_push;
   document.getElementById("boardOverlay").classList.add("show");
 }
 
@@ -490,6 +498,7 @@ async function saveBoardSettings() {
     commit_requirements: document.getElementById("bCommitReq").value,
     use_worktrees: document.getElementById("bUseWorktrees").checked,
     repo_url: document.getElementById("bRepoUrl").value,
+    auto_push: document.getElementById("bAutoPush").checked,
   };
   if (profileVal) payload.default_profile_id = parseInt(profileVal);
   else payload.clear_default_profile = true;
@@ -831,6 +840,14 @@ function openTicketModal(id) {
   deps.innerHTML = tickets.filter(t => !editingTicket || t.id !== editingTicket.id)
     .map(t => `<option value="${t.id}" ${dependsOn.includes(t.id) ? "selected" : ""}>#${t.id} ${esc(t.title)}</option>`).join("");
   document.getElementById("tBlockedNote").style.display = editingTicket && editingTicket.blocked ? "" : "none";
+  const gate = editingTicket && editingTicket.commit_gate;
+  const gateEl = document.getElementById("tCommitGate");
+  gateEl.style.display = gate ? "" : "none";
+  if (gate) {
+    gateEl.innerHTML = `<span class="badge ${gate.requirements_met ? "" : "blocked"}">` +
+      `commit gate: ${gate.requirements_met ? "met" : "not met"}</span>` +
+      (gate.summary ? ` ${esc(gate.summary)}` : "");
+  }
   document.getElementById("delBtn").style.display = editingTicket ? "" : "none";
   document.getElementById("runBtn").style.display = editingTicket ? "" : "none";
   document.getElementById("killBtn").style.display = editingTicket && editingTicket.status === "doing" ? "" : "none";

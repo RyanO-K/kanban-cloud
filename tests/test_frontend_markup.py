@@ -220,3 +220,17 @@ def test_board_settings_has_a_default_profile_picker(markup):
 def test_ticket_modal_has_a_profile_picker(markup):
     assert 'id="tProfile"' in markup
     assert "payload.profile_id" in markup
+
+
+# ---------- commit gate + auto-push (ticket #15) ----------
+
+def test_auto_push_checkbox_present_and_wired(markup):
+    assert 'id="bAutoPush"' in markup
+    assert 'document.getElementById("bAutoPush").checked = !!b.auto_push' in markup
+    assert 'auto_push: document.getElementById("bAutoPush").checked' in markup
+
+
+def test_ticket_modal_shows_the_commit_gate(markup):
+    assert 'id="tCommitGate"' in markup
+    assert "editingTicket.commit_gate" in markup
+    assert "requirements_met" in markup

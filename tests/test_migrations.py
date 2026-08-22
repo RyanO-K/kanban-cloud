@@ -281,6 +281,56 @@ def test_desired_concurrency_defaults_to_none_for_pre_ticket_18_rows(tmp_path):
         assert w.desired_concurrency is None
 
 
+def test_models_have_phase5_columns():
+    """Ticket #15: commit gate + auto-commit/push."""
+    from app.models import Board, Ticket
+
+    assert "auto_push" in {c.name for c in Board.__table__.columns}
+    assert "commit_gate" in {c.name for c in Ticket.__table__.columns}
+
+
+def test_migration_adds_phase5_columns_to_an_existing_db(tmp_path):
+    """A database created before the commit gate / auto-push columns existed
+    must reach the new shape too."""
+    from app.db import _PHASE6_COLUMNS
+
+    engine = make_engine(f"sqlite:///{tmp_path / 'old5.db'}")
+    Base.metadata.create_all(engine)
+    with engine.begin() as conn:
+        for table, ddl in _PHASE6_COLUMNS:
+            conn.execute(sa.text(f"ALTER TABLE {table} DROP COLUMN {ddl.split()[0]}"))
+
+    run_migrations(engine)
+    run_migrations(engine)  # idempotent
+
+    insp = sa.inspect(engine)
+    for table, ddl in _PHASE6_COLUMNS:
+        assert ddl.split()[0] in {c["name"] for c in insp.get_columns(table)}, ddl
+
+
+def test_auto_push_defaults_to_false_for_pre_ticket_15_rows(tmp_path):
+    """A board row written before this column existed must read as 'never
+    pushes', not as an error or an accidental opt-in."""
+    from app.models import Cluster, User
+
+    engine = make_engine(f"sqlite:///{tmp_path / 'd5.db'}")
+    Base.metadata.create_all(engine)
+    run_migrations(engine)
+    with Session(engine) as db:
+        db.add(User(id=1, email="a@b.co", password_hash="x"))
+        db.add(Cluster(id=1, name="T", join_code="J", created_by=1))
+        db.commit()
+    with engine.begin() as conn:
+        conn.execute(sa.text(
+            "INSERT INTO boards (id, cluster_id, name, created_at) VALUES"
+            " (1, 1, 'old-board', '2020-01-01')"
+        ))
+    from app.models import Board
+    with Session(engine) as db:
+        b = db.get(Board, 1)
+        assert b.auto_push is False
+
+
 def test_phase1_boolean_defaults_are_postgres_legal():
     """Regression: `BOOLEAN NOT NULL DEFAULT 0` deployed green and then broke
     startup on Neon — "column is of type boolean but default expression is of
@@ -291,6 +341,18 @@ def test_phase1_boolean_defaults_are_postgres_legal():
     from app.db import _PHASE1_COLUMNS
 
     for table, ddl in _PHASE1_COLUMNS:
+        if "BOOLEAN" not in ddl.upper():
+            continue
+        default = ddl.upper().split("DEFAULT", 1)[1].strip() if "DEFAULT" in ddl.upper() else ""
+        assert default in ("", "TRUE", "FALSE"), f"{table}.{ddl}: use TRUE/FALSE, not {default}"
+
+
+def test_phase5_boolean_defaults_are_postgres_legal():
+    """Same regression guard as test_phase1_boolean_defaults_are_postgres_legal,
+    for auto_push."""
+    from app.db import _PHASE6_COLUMNS
+
+    for table, ddl in _PHASE6_COLUMNS:
         if "BOOLEAN" not in ddl.upper():
             continue
         default = ddl.upper().split("DEFAULT", 1)[1].strip() if "DEFAULT" in ddl.upper() else ""

@@ -106,6 +106,7 @@ class BoardPatch(BaseModel):
     repo_url: str | None = None
     default_profile_id: int | None = None
     clear_default_profile: bool = False
+    auto_push: bool | None = None
 
 
 class ProfileBody(BaseModel):
@@ -406,6 +407,7 @@ def create_app(
             "use_worktrees": bool(b.use_worktrees),
             "repo_url": b.repo_url,
             "default_profile_id": b.default_profile_id,
+            "auto_push": bool(b.auto_push),
         }
 
     def ensure_cluster_settings(db: Session, cluster_id: int) -> ClusterSettings:
@@ -555,6 +557,7 @@ def create_app(
             "blocks": blocks_ids(db, t.id),
             "blocked": is_blocked(db, t.id),
             "question": ticket_question_json(question) if question else None,
+            "commit_gate": json.loads(t.commit_gate) if t.commit_gate else None,
             "comments": [
                 {
                     "writer": c.writer,
@@ -897,7 +900,7 @@ def create_app(
         """
         board = board_for_user(db, user, board_id)
         for field in ("description", "out_of_scope", "commit_requirements",
-                      "use_worktrees", "repo_url"):
+                      "use_worktrees", "repo_url", "auto_push"):
             value = getattr(body, field)
             if value is not None:
                 setattr(board, field, value)

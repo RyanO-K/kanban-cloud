@@ -5,7 +5,12 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from app.prompt import build_agent_prompt, slugify  # noqa: E402
+from app.prompt import (  # noqa: E402
+    COMMIT_GATE_MARKER,
+    build_agent_prompt,
+    parse_commit_gate,
+    slugify,
+)
 
 TICKET = {"id": 12, "title": "Fix the footer", "body": "It overlaps on mobile."}
 BOARD = {"name": "site-page", "description": "The portfolio site.",
@@ -79,6 +84,71 @@ def test_slugify():
 def test_slugify_caps_length():
     assert slugify("one two three four five six seven eight") == \
         "one-two-three-four-five-six"
+
+
+def test_commit_requirements_ask_for_a_gate_verdict():
+    p = build_agent_prompt(TICKET, BOARD, "/repo")
+    assert COMMIT_GATE_MARKER in p
+    assert "requirements_met" in p
+
+
+def test_no_commit_requirements_means_no_gate_instruction():
+    p = build_agent_prompt(TICKET, BARE, "/repo")
+    assert COMMIT_GATE_MARKER not in p
+
+
+# ---------- parse_commit_gate ----------
+
+def test_parse_commit_gate_extracts_marker_json():
+    text = (f'All tests passed.\n\n{COMMIT_GATE_MARKER} '
+            '{"requirements_met": true, "summary": "Ran the suite, all green."}')
+    gate = parse_commit_gate(text)
+    assert gate == {"requirements_met": True, "summary": "Ran the suite, all green."}
+
+
+def test_parse_commit_gate_reports_unmet_requirements():
+    text = (f'Could not get tests passing.\n\n{COMMIT_GATE_MARKER} '
+            '{"requirements_met": false, "summary": "Two tests still fail."}')
+    gate = parse_commit_gate(text)
+    assert gate == {"requirements_met": False, "summary": "Two tests still fail."}
+
+
+def test_parse_commit_gate_returns_none_without_marker():
+    assert parse_commit_gate("Done, all good.") is None
+
+
+def test_parse_commit_gate_returns_none_on_empty_text():
+    assert parse_commit_gate("") is None
+    assert parse_commit_gate(None) is None
+
+
+def test_parse_commit_gate_returns_none_on_malformed_json():
+    assert parse_commit_gate(f"{COMMIT_GATE_MARKER} not json") is None
+
+
+def test_parse_commit_gate_returns_none_when_requirements_met_is_missing():
+    """No verdict is not the same as a reported one — must not be silently
+    treated as met."""
+    gate = parse_commit_gate(f'{COMMIT_GATE_MARKER} {{"summary": "checked it"}}')
+    assert gate is None
+
+
+def test_parse_commit_gate_returns_none_when_requirements_met_is_not_a_bool():
+    gate = parse_commit_gate(f'{COMMIT_GATE_MARKER} {{"requirements_met": "yes"}}')
+    assert gate is None
+
+
+def test_parse_commit_gate_summary_defaults_to_empty_string():
+    gate = parse_commit_gate(f'{COMMIT_GATE_MARKER} {{"requirements_met": true}}')
+    assert gate == {"requirements_met": True, "summary": ""}
+
+
+def test_parse_commit_gate_uses_the_last_marker_occurrence():
+    """The guidance text itself contains the marker as an example; a real
+    verdict must win over any incidental earlier mention."""
+    text = (f'Earlier I might write {COMMIT_GATE_MARKER} {{"requirements_met": false}} '
+            f'but the real verdict is: {COMMIT_GATE_MARKER} {{"requirements_met": true}}')
+    assert parse_commit_gate(text)["requirements_met"] is True
 
 
 def test_module_is_stdlib_only():

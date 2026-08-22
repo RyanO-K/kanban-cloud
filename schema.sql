@@ -68,7 +68,11 @@ CREATE TABLE IF NOT EXISTS profiles (
 -- deliberately NOT here: it is per-PC and lives in each worker's own
 -- .worker_config.json (or is derived from repo_url). default_profile_id is
 -- this board's fallback agent profile, used when a ticket names none of its
--- own (see tickets.profile_id).
+-- own (see tickets.profile_id). auto_push is an opt-in switch (default off):
+-- a worker only pushes a finished ticket's branch to origin when this is
+-- true, and even then only if the ticket's commit_gate (see tickets below)
+-- reports requirements_met — push credentials are the worker PC's own
+-- ambient git auth and never reach this server either way.
 CREATE TABLE IF NOT EXISTS boards (
     id                  SERIAL PRIMARY KEY,
     cluster_id          INTEGER NOT NULL REFERENCES clusters(id),
@@ -79,6 +83,7 @@ CREATE TABLE IF NOT EXISTS boards (
     use_worktrees       BOOLEAN NOT NULL DEFAULT FALSE,
     repo_url            TEXT,
     default_profile_id  INTEGER,
+    auto_push           BOOLEAN NOT NULL DEFAULT FALSE,
     created_at          TIMESTAMP NOT NULL DEFAULT now()
 );
 
@@ -129,6 +134,12 @@ CREATE TABLE IF NOT EXISTS tickets (
     -- triage_todo_tickets), which promotes the ticket todo -> ready in the
     -- same guarded UPDATE; never overwritten afterward.
     model           VARCHAR(32),
+    -- The agent's self-reported verdict on the board's commit_requirements,
+    -- JSON-encoded {"requirements_met": bool, "summary": str}. Written by the
+    -- worker (worker.py's finish_work) from the KANBAN_COMMIT_GATE: marker in
+    -- its captured output (see app/prompt.py's parse_commit_gate); NULL when
+    -- the board has no commit_requirements or the agent never reported one.
+    commit_gate     TEXT,
     created_at      TIMESTAMP NOT NULL DEFAULT now(),
     updated_at      TIMESTAMP NOT NULL DEFAULT now()
 );

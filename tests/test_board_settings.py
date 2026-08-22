@@ -110,3 +110,32 @@ def test_patch_board_repo_url_is_partial_like_the_other_fields(client, user, clu
                    headers=user["headers"]).json()[0]
     assert r["repo_url"] == "https://github.com/org/repo.git"
     assert r["use_worktrees"] is True
+
+
+# ---------- auto_push (ticket #15: commit gate / auto-commit) ----------
+
+def test_list_boards_includes_auto_push_off_by_default(client, user, cluster):
+    boards = client.get(f"/api/clusters/{cluster['id']}/boards",
+                        headers=user["headers"]).json()
+    assert boards[0]["auto_push"] is False
+
+
+def test_patch_board_sets_auto_push(client, user, cluster):
+    r = client.patch(f"/api/boards/{cluster['board_id']}", headers=user["headers"],
+                     json={"auto_push": True})
+    assert r.status_code == 200, r.text
+    assert r.json()["auto_push"] is True
+    boards = client.get(f"/api/clusters/{cluster['id']}/boards",
+                        headers=user["headers"]).json()
+    assert boards[0]["auto_push"] is True
+
+
+def test_patch_board_auto_push_is_partial_like_the_other_fields(client, user, cluster):
+    bid = cluster["board_id"]
+    client.patch(f"/api/boards/{bid}", headers=user["headers"], json={"auto_push": True})
+    client.patch(f"/api/boards/{bid}", headers=user["headers"],
+                 json={"description": "keep auto_push as-is"})
+    r = client.get(f"/api/clusters/{cluster['id']}/boards",
+                   headers=user["headers"]).json()[0]
+    assert r["auto_push"] is True
+    assert r["description"] == "keep auto_push as-is"
