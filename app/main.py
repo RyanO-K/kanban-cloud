@@ -152,6 +152,16 @@ class WorkerEnrollBody(BaseModel):
     name: str
 
 
+class WorkerPatch(BaseModel):
+    """Rename a PC and/or set the concurrency limit the website wants it to
+    run at. Partial like BoardPatch: a field absent from the request keeps
+    its stored value. `clear_desired_concurrency` hands the limit back to the
+    PC's own local config/flag (the pre-ticket-#18 default)."""
+    name: str | None = None
+    desired_concurrency: int | None = None
+    clear_desired_concurrency: bool = False
+
+
 # ---------- app factory ----------
 
 def create_app(
@@ -317,6 +327,28 @@ def create_app(
             raise HTTPException(404, "Ticket not found")
         board_for_user(db, user, ticket.board_id)
         return ticket
+
+    def worker_for_user(db: Session, user: User, worker_id: int) -> Worker:
+        worker = db.get(Worker, worker_id)
+        if worker is None:
+            raise HTTPException(404, "Worker not found")
+        require_member(db, user, worker.cluster_id)
+        return worker
+
+    def worker_json(w: Worker, now=None) -> dict:
+        return {
+            "id": w.id,
+            "name": w.name,
+            "status": w.status,
+            # The PC's own limit and current load, as last reported.
+            "concurrency": w.concurrency,
+            "running": w.running,
+            # Website-set request; None = the PC picks its own limit.
+            "desired_concurrency": w.desired_concurrency,
+            "online": w.is_online(now),
+            "last_seen": w.last_seen.isoformat(),
+            "revoked": w.revoked,
+        }
 
     def board_json(b: Board) -> dict:
         return {
@@ -567,21 +599,7 @@ def create_app(
         workers = db.scalars(
             select(Worker).where(Worker.cluster_id == cluster_id).order_by(Worker.name)
         ).all()
-        return [
-            {
-                "id": w.id,
-                "name": w.name,
-                "status": w.status,
-                # The PC's own limit and current load. Advisory: the server
-                # displays these, it does not schedule on them.
-                "concurrency": w.concurrency,
-                "running": w.running,
-                "online": w.is_online(now),
-                "last_seen": w.last_seen.isoformat(),
-                "revoked": w.revoked,
-            }
-            for w in workers
-        ]
+        return [worker_json(w, now) for w in workers]
 
     @app.get("/api/clusters/{cluster_id}/queue")
     def cluster_queue(
@@ -1001,16 +1019,47 @@ def create_app(
     ):
         """Kill a PC's DB credentials. Enforced at the database: the role is
         dropped, live sessions terminated. Re-enrolling restores access."""
-        worker = db.get(Worker, worker_id)
-        if worker is None:
-            raise HTTPException(404, "Worker not found")
-        require_member(db, user, worker.cluster_id)
+        worker = worker_for_user(db, user, worker_id)
         worker.revoked = True
         worker.status = "idle"
         db.commit()
         if worker.role_name and enrollment.can_provision(engine):
             enrollment.revoke_role(engine, worker.role_name)
         return {"ok": True}
+
+    @app.patch("/api/workers/{worker_id}")
+    def patch_worker(
+        worker_id: int,
+        body: WorkerPatch,
+        user: User = Depends(current_user),
+        db: Session = Depends(get_db),
+    ):
+        """Rename a PC and/or set the concurrency limit the website wants it
+        to run at (ticket #18). The worker itself picks up a new name/limit
+        the next time it starts — see worker.py's fetch_worker_settings."""
+        worker = worker_for_user(db, user, worker_id)
+        if body.name is not None:
+            name = body.name.strip()
+            if not name:
+                raise HTTPException(400, "worker name required")
+            clash = db.scalar(
+                select(Worker).where(
+                    Worker.cluster_id == worker.cluster_id,
+                    Worker.name == name,
+                    Worker.id != worker.id,
+                )
+            )
+            if clash is not None:
+                raise HTTPException(400, "a worker with that name already exists")
+            worker.name = name
+        if body.clear_desired_concurrency:
+            worker.desired_concurrency = None
+        elif body.desired_concurrency is not None:
+            if body.desired_concurrency < 1:
+                raise HTTPException(400, "desired_concurrency must be at least 1")
+            worker.desired_concurrency = body.desired_concurrency
+        db.commit()
+        return worker_json(worker)
 
     return app
 

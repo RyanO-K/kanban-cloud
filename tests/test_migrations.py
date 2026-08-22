@@ -182,6 +182,50 @@ def test_migration_adds_phase3_columns_to_an_existing_db(tmp_path):
         assert ddl.split()[0] in {c["name"] for c in insp.get_columns(table)}, ddl
 
 
+def test_migration_adds_phase4_columns_to_an_existing_db(tmp_path):
+    """A database created before website-side worker control (ticket #18)
+    must reach the new shape too."""
+    from app.db import _PHASE4_COLUMNS
+
+    engine = make_engine(f"sqlite:///{tmp_path / 'old4.db'}")
+    Base.metadata.create_all(engine)
+    with engine.begin() as conn:
+        for table, ddl in _PHASE4_COLUMNS:
+            conn.execute(sa.text(f"ALTER TABLE {table} DROP COLUMN {ddl.split()[0]}"))
+
+    run_migrations(engine)
+    run_migrations(engine)  # idempotent
+
+    insp = sa.inspect(engine)
+    for table, ddl in _PHASE4_COLUMNS:
+        assert ddl.split()[0] in {c["name"] for c in insp.get_columns(table)}, ddl
+
+
+def test_desired_concurrency_defaults_to_none_for_pre_ticket_18_rows(tmp_path):
+    """A worker row written before this column existed must read as
+    'no website override' rather than erroring or defaulting to 0."""
+    from sqlalchemy.orm import Session
+
+    from app.models import Cluster, User
+
+    engine = make_engine(f"sqlite:///{tmp_path / 'd4.db'}")
+    Base.metadata.create_all(engine)
+    run_migrations(engine)
+    with Session(engine) as db:
+        db.add(User(id=1, email="a@b.co", password_hash="x"))
+        db.add(Cluster(id=1, name="T", join_code="J", created_by=1))
+        db.commit()
+    with engine.begin() as conn:
+        conn.execute(sa.text(
+            "INSERT INTO workers (id, cluster_id, name, revoked, status,"
+            " last_seen, created_at) VALUES"
+            " (1,1,'old-pc',0,'idle','2020-01-01','2020-01-01')"
+        ))
+    with Session(engine) as db:
+        w = db.get(Worker, 1)
+        assert w.desired_concurrency is None
+
+
 def test_phase1_boolean_defaults_are_postgres_legal():
     """Regression: `BOOLEAN NOT NULL DEFAULT 0` deployed green and then broke
     startup on Neon — "column is of type boolean but default expression is of

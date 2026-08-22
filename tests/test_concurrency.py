@@ -33,6 +33,74 @@ def test_resolve_concurrency_survives_a_junk_config_value():
     assert worker.resolve_concurrency(args, {"concurrency": "lots"}) == 1
 
 
+# ---------- website-set desired_concurrency (ticket #18) ----------
+
+def test_resolve_concurrency_uses_the_website_value_over_local_config():
+    args = worker.build_parser().parse_args([])
+    assert worker.resolve_concurrency(args, {"concurrency": 2}, desired=5) == 5
+
+
+def test_resolve_concurrency_flag_still_beats_the_website_value():
+    """An explicit --concurrency on this run is a deliberate human override
+    for this run and wins even over a server-set desired_concurrency."""
+    args = worker.build_parser().parse_args(["--concurrency", "4"])
+    assert worker.resolve_concurrency(args, {"concurrency": 2}, desired=5) == 4
+
+
+def test_resolve_concurrency_ignores_a_none_website_value():
+    args = worker.build_parser().parse_args([])
+    assert worker.resolve_concurrency(args, {"concurrency": 3}, desired=None) == 3
+
+
+def test_resolve_concurrency_floors_the_website_value_at_one():
+    args = worker.build_parser().parse_args([])
+    assert worker.resolve_concurrency(args, {}, desired=0) == 1
+
+
+class _FakeSettingsCursor:
+    def __init__(self, row):
+        self._row = row
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, *a, **k):
+        pass
+
+    def fetchone(self):
+        return self._row
+
+
+class _FakeSettingsConn:
+    def __init__(self, row):
+        self._row = row
+
+    def cursor(self):
+        return _FakeSettingsCursor(self._row)
+
+
+def test_fetch_worker_settings_reads_name_and_desired_concurrency():
+    conn = _FakeSettingsConn(("renamed-pc", 5))
+    assert worker.fetch_worker_settings(conn, 1) == {
+        "name": "renamed-pc", "desired_concurrency": 5
+    }
+
+
+def test_fetch_worker_settings_handles_no_override_set():
+    conn = _FakeSettingsConn(("pc", None))
+    assert worker.fetch_worker_settings(conn, 1) == {
+        "name": "pc", "desired_concurrency": None
+    }
+
+
+def test_fetch_worker_settings_handles_a_missing_row():
+    conn = _FakeSettingsConn(None)
+    assert worker.fetch_worker_settings(conn, 1) == {}
+
+
 def _fake_connect(collect=None):
     def _connect(dsn, **kw):
         class C:

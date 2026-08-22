@@ -123,14 +123,19 @@ class Worker(Base):
     revoked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="idle")  # idle | working
     # How many tickets this PC will run at once, and how many are running now.
-    # The PC owns the limit; the server only displays it. Defaults keep rows
-    # written by exes that predate these columns readable.
+    # Reported by the worker itself every heartbeat; defaults keep rows written
+    # by exes that predate these columns readable.
     concurrency: Mapped[int] = mapped_column(
         Integer, default=1, nullable=False, server_default="1"
     )
     running: Mapped[int] = mapped_column(
         Integer, default=0, nullable=False, server_default="0"
     )
+    # Website-set concurrency request (ticket #18). NULL = the PC picks its own
+    # limit (flag/local config), same as before this column existed. When set,
+    # the worker honors it ahead of its local config the next time it starts
+    # — see worker.py's resolve_concurrency/fetch_worker_settings.
+    desired_concurrency: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_seen: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow)
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow)
 

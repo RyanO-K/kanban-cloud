@@ -1211,9 +1211,28 @@ def set_slot_counts(conn, worker_id: int, concurrency: int, running: int) -> Non
         )
 
 
-def resolve_concurrency(args, cfg: dict) -> int:
-    """Flag beats saved config beats 1. Never below 1."""
-    value = args.concurrency if args.concurrency is not None else cfg.get("concurrency")
+def fetch_worker_settings(conn, worker_id: int) -> dict:
+    """This PC's current name and website-set concurrency request (ticket
+    #18's `workers.desired_concurrency`; NULL there means "PC decides")."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT name, desired_concurrency FROM workers WHERE id=%s", (worker_id,)
+        )
+        row = cur.fetchone()
+    if row is None:
+        return {}
+    return {"name": row[0], "desired_concurrency": row[1]}
+
+
+def resolve_concurrency(args, cfg: dict, desired: int | None = None) -> int:
+    """Flag beats the website-set `desired` value beats saved config beats 1.
+
+    `desired` is None unless the site has an explicit override on file, so an
+    unconfigured worker behaves exactly as before this parameter existed.
+    """
+    value = args.concurrency
+    if value is None:
+        value = desired if desired is not None else cfg.get("concurrency")
     try:
         return max(1, int(value))
     except (TypeError, ValueError):
@@ -1455,7 +1474,25 @@ def main() -> int:
         return 0
 
     executor = pick_executor(args)
-    concurrency = resolve_concurrency(args, cfg)
+
+    # Pick up a website-set rename/concurrency request (ticket #18) before
+    # deciding how many slots to run. Best-effort: offline at startup just
+    # means falling back to the local flag/config, same as before this call
+    # existed.
+    settings = {}
+    try:
+        settings_conn = psycopg.connect(cfg["dsn"], connect_timeout=15)
+        try:
+            settings = fetch_worker_settings(settings_conn, cfg["worker_id"])
+        finally:
+            settings_conn.close()
+    except psycopg.OperationalError:
+        pass
+    if settings.get("name") and settings["name"] != cfg.get("name"):
+        cfg["name"] = settings["name"]
+        save_config(cfg)
+
+    concurrency = resolve_concurrency(args, cfg, settings.get("desired_concurrency"))
     if concurrency != cfg.get("concurrency"):
         cfg["concurrency"] = concurrency
         save_config(cfg)

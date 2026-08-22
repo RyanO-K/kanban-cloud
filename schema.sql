@@ -57,10 +57,13 @@ CREATE TABLE IF NOT EXISTS workers (
     role_name  VARCHAR(64),
     revoked    BOOLEAN NOT NULL DEFAULT FALSE,
     status     VARCHAR(32) NOT NULL DEFAULT 'idle',   -- idle | working
-    -- Slots this PC runs at once, and how many are busy. Set by the worker
-    -- itself; the server only displays them.
+    -- Slots this PC runs at once, and how many are busy. Reported by the
+    -- worker itself every heartbeat.
     concurrency INTEGER NOT NULL DEFAULT 1,
     running     INTEGER NOT NULL DEFAULT 0,
+    -- Website-set concurrency request (ticket #18). NULL = the PC picks its
+    -- own limit; when set, the worker honors it ahead of local config.
+    desired_concurrency INTEGER,
     last_seen  TIMESTAMP NOT NULL DEFAULT now(),
     created_at TIMESTAMP NOT NULL DEFAULT now(),
     UNIQUE (cluster_id, name)

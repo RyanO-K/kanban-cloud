@@ -92,6 +92,27 @@ def test_workers_panel_renders_slot_counts(markup):
     assert "w.concurrency" in markup
 
 
+# ---------- website-side worker control (ticket #18) ----------
+
+def test_worker_settings_modal_markup_present(markup):
+    for token in ("workerOverlay", 'id="wName"', 'id="wConcurrency"',
+                  "openWorkerSettings", "saveWorkerSettings"):
+        assert token in markup, token
+
+
+def test_worker_edit_button_is_owner_only(markup):
+    """Spectators must not see it: the endpoint would 403 anyway."""
+    assert 'owner-only" onclick="openWorkerSettings(' in markup
+
+
+def test_save_worker_settings_patches_the_worker_endpoint(markup):
+    body = markup[markup.index("async function saveWorkerSettings"):]
+    body = body[:body.index("\n}\n")]
+    assert '"PATCH", `./api/workers/${editingWorker.id}`' in body
+    assert "desired_concurrency" in body
+    assert "clear_desired_concurrency" in body
+
+
 # ---------- ticket dependencies ----------
 
 def test_deps_picker_present_in_ticket_modal(markup):

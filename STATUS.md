@@ -2,6 +2,35 @@
 
 Last updated: 2026-08-22
 
+## Website-side worker control: rename a PC, cap its concurrency (ticket #18, 2026-08-22)
+
+Concurrency used to be worker-local only ("Agents do real repo work, and PCs
+limit their own concurrency" below) — the server displayed `concurrency`, but
+had no way to change it. `workers` gained a nullable `desired_concurrency`
+column: NULL (the default, and what every pre-existing row reads as) means
+"the PC still decides for itself"; once the website sets it, `worker.py`
+honors it ahead of the PC's own saved config the next time the process
+starts (`resolve_concurrency`'s precedence is now flag > site value > local
+config > 1 — an explicit `--concurrency` on a given run is still a deliberate
+local override and wins). Slot thread count is fixed for the life of a
+worker process, same as before this change, so a new limit takes effect on
+the worker's next start, not instantly.
+
+Renaming is simpler: `workers.name` was already just a display column the
+worker never rewrites after enrollment, so `PATCH /api/workers/{id}` can set
+it directly; the worker fetches its current name at startup
+(`fetch_worker_settings`) and refreshes its local config if the site changed
+it, so progress-comment authorship stays in sync too.
+
+`PATCH /api/workers/{id}` (owner only, cluster-scoped like `revoke`) takes
+`name` / `desired_concurrency` / `clear_desired_concurrency`, partial like
+`PATCH /api/boards/{id}`. Validates name non-blank and unique within the
+cluster, and concurrency >= 1. The Workers panel grew an "Edit" button next
+to "Revoke" opening a small modal.
+
+Tests: 300 → 322 (10 worker-control API, 7 concurrency/settings precedence,
+2 migration, 3 markup).
+
 ## Ticket dependencies gate claiming (2026-08-22)
 
 Phase 2 of the gap analysis (`docs/2026-08-22-local-vs-cloud-gap-analysis.md`,

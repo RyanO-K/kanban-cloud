@@ -216,6 +216,24 @@
   </div>
 </div>
 
+<!-- worker settings modal: rename a PC, cap its concurrency from the site -->
+<div class="overlay" id="workerOverlay" onclick="if(event.target===this) this.classList.remove('show')">
+  <div class="modal">
+    <h2>Worker settings</h2>
+    <label>Name</label>
+    <input id="wName">
+    <label>Concurrency limit</label>
+    <input id="wConcurrency" type="number" min="1" step="1" placeholder="PC decides (leave blank)">
+    <p class="muted" style="font-size:12px">How many tickets this PC runs at once. Leave
+      blank to let the PC keep deciding for itself (its own <code>--concurrency</code>
+      flag or saved config). Takes effect the next time the worker starts.</p>
+    <div class="row">
+      <button onclick="saveWorkerSettings()">Save</button>
+      <button class="ghost" onclick="document.getElementById('workerOverlay').classList.remove('show')">Cancel</button>
+    </div>
+  </div>
+</div>
+
 <!-- notification bell: blocked tickets awaiting a human answer -->
 <div class="overlay" id="blockedOverlay" onclick="if(event.target===this) this.classList.remove('show')">
   <div class="modal">
@@ -700,9 +718,37 @@ async function loadWorkers() {
         ${w.revoked ? '<span class="muted">(revoked)</span>'
           : `<span class="muted">${w.online
                 ? `${w.running || 0}/${w.concurrency || 1} running` : "offline"}</span>
+             ${w.desired_concurrency ? `<span class="muted">(site limit ${w.desired_concurrency})</span>` : ""}
+             <button class="ghost small owner-only" onclick="openWorkerSettings(${w.id})">Edit</button>
              <button class="ghost small owner-only" onclick="revokeWorker(${w.id})">Revoke</button>`}</div>`).join("")
     : `<span class="muted">No PCs enrolled yet. On the PC:<br>
        <code>py worker.py --enroll --server ${esc(enrollServer())} --join-code &lt;code&gt;</code></span>`;
+}
+
+// ---------- worker settings: rename / concurrency cap (ticket #18) ----------
+let editingWorker = null;
+
+function openWorkerSettings(id) {
+  const w = workers.find(x => x.id === id);
+  if (!w) return;
+  editingWorker = w;
+  document.getElementById("wName").value = w.name;
+  document.getElementById("wConcurrency").value = w.desired_concurrency || "";
+  document.getElementById("workerOverlay").classList.add("show");
+}
+
+async function saveWorkerSettings() {
+  if (!editingWorker) return;
+  const name = document.getElementById("wName").value.trim();
+  if (!name) return toast("Name is required");
+  const raw = document.getElementById("wConcurrency").value.trim();
+  const payload = { name };
+  if (raw) payload.desired_concurrency = parseInt(raw, 10);
+  else payload.clear_desired_concurrency = true;
+  await api("PATCH", `./api/workers/${editingWorker.id}`, payload);
+  document.getElementById("workerOverlay").classList.remove("show");
+  await loadWorkers();
+  toast("Worker settings saved");
 }
 
 function enrollServer() {
