@@ -27,6 +27,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -484,6 +485,92 @@ def finish_work(conn, worker_id: int, worker_name: str, item_id: int,
 
 # ---------- argument parser & executor selection ----------
 
+# ---------- concurrency slots ----------
+#
+# How much this PC runs at once is the PC's own business: the server never
+# schedules, it only publishes queued work. Each slot is an independent
+# claim->run->finish loop with its own connection, so a slot sitting in a
+# 30-minute agent run never holds up its neighbors.
+
+_SLOT_LOCK = threading.Lock()
+_RUNNING = {"n": 0}
+
+
+def running_count() -> int:
+    """How many slots are inside an executor run right now."""
+    with _SLOT_LOCK:
+        return _RUNNING["n"]
+
+
+def set_slot_counts(conn, worker_id: int, concurrency: int, running: int) -> None:
+    """Publish this PC's limit and current load. Advisory only — the server
+    reads these to draw the Workers panel; nothing schedules on them."""
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            f"UPDATE workers SET concurrency=%s, running=%s, "
+            f"status=%s, last_seen={UTC_NOW} WHERE id=%s",
+            (concurrency, running, "working" if running else "idle", worker_id),
+        )
+
+
+def resolve_concurrency(args, cfg: dict) -> int:
+    """Flag beats saved config beats 1. Never below 1."""
+    value = args.concurrency if args.concurrency is not None else cfg.get("concurrency")
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return 1
+
+
+def run_slot(cfg, args, executor, stop_event, slot_no: int) -> None:
+    """One independent claim->run->finish loop with its own DB connection.
+
+    Slots share nothing but the config dict (read-only) and the stop event.
+    """
+    boards = None if isinstance(executor, StubExecutor) else configured_board_ids(cfg)
+    paths = board_paths(cfg)
+    conn = None
+    while not stop_event.is_set():
+        try:
+            if conn is None or conn.closed:
+                conn = psycopg.connect(cfg["dsn"], connect_timeout=15)
+            work = claim_next(conn, cfg["worker_id"], cfg["cluster_id"], boards)
+            if work:
+                ticket = work["ticket"]
+                with _SLOT_LOCK:
+                    _RUNNING["n"] += 1
+                print(f"[slot {slot_no}] claimed #{ticket['id']} '{ticket['title']}'")
+                try:
+                    ok, comment = executor.run(
+                        ticket, work.get("claude_api_key"),
+                        board=work.get("board"),
+                        directory=paths.get(str(ticket["board_id"])),
+                        session_id=work.get("session_id"))
+                except Exception as exc:
+                    ok, comment = False, f"Executor error: {exc!r}"
+                finally:
+                    with _SLOT_LOCK:
+                        _RUNNING["n"] -= 1
+                status = finish_work(conn, cfg["worker_id"], cfg["name"],
+                                     work["assignment_id"], ticket["id"], ok, comment)
+                print(f"[slot {slot_no}] #{ticket['id']} -> {status}")
+        except psycopg.OperationalError as e:
+            msg = str(e)
+            print(f"[slot {slot_no}] database unreachable ({msg[:150]}); retrying...")
+            if "password authentication failed" in msg or "does not exist" in msg:
+                print("Credentials rejected — this PC may be revoked. Re-enroll.")
+                stop_event.set()  # one slot learning this is enough for all of them
+                return
+            conn = None
+        except Exception as exc:  # a slot must never die silently
+            print(f"[slot {slot_no}] unexpected error: {exc!r}")
+        if args.once:
+            break
+        stop_event.wait(args.poll)
+    if conn is not None and not conn.closed:
+        conn.close()
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="kanban-cloud worker (v2 direct-DB)")
     parser.add_argument("--enroll", action="store_true",
@@ -505,6 +592,9 @@ def build_parser() -> argparse.ArgumentParser:
                              "repeatable")
     parser.add_argument("--list-boards", action="store_true",
                         help="list this cluster's boards and their configured paths")
+    parser.add_argument("--concurrency", type=int, default=None,
+                        help="tickets this PC runs at once (default 1; saved to "
+                             "the config so it sticks)")
     parser.add_argument("--allowed-tools", default=DEFAULT_ALLOWED_TOOLS,
                         help=f"comma-separated tools the agent may use "
                              f"(default: {DEFAULT_ALLOWED_TOOLS})")
@@ -573,58 +663,54 @@ def main() -> int:
         return 0
 
     executor = pick_executor(args)
-    # The stub needs no repo, so it opts out of the board filter entirely.
-    board_ids = None if args.stub else configured_board_ids(cfg)
+    concurrency = resolve_concurrency(args, cfg)
+    if concurrency != cfg.get("concurrency"):
+        cfg["concurrency"] = concurrency
+        save_config(cfg)
+
+    if not isinstance(executor, StubExecutor) and not configured_board_ids(cfg):
+        print("WARNING: no board folders configured on this PC, so nothing will "
+              "be claimed.\n         Fix with: --list-boards, then "
+              "--set-path <board>=<path>")
+
     print(f"Worker '{cfg['name']}' polling Postgres every {args.poll}s "
-          f"(executor: {executor.name}). Ctrl+C to stop.")
-    if board_ids is not None and not board_ids:
-        print("No board folders configured — this PC will claim nothing. "
-              "Run with --set-path <board>=<path> first.")
+          f"({concurrency} slot{'s' if concurrency > 1 else ''}, "
+          f"executor: {executor.name}). Ctrl+C to stop.")
 
-    conn = None
-    while True:
-        try:
-            if conn is None or conn.closed:
-                conn = psycopg.connect(cfg["dsn"], connect_timeout=15)
-            work = claim_next(conn, cfg["worker_id"], cfg["cluster_id"], board_ids)
-            if work:
-                ticket = work["ticket"]
-                item_id = work["assignment_id"]
-                print(f"Claimed ticket #{ticket['id']} '{ticket['title']}' "
-                      f"(assignment {item_id})")
-                try:
-                    ok, comment = executor.run(
-                        ticket, work.get("claude_api_key"),
-                        board=work.get("board"),
-                        directory=board_paths(cfg).get(str(ticket["board_id"])),
-                        session_id=work.get("session_id"))
-                except Exception as exc:
-                    ok, comment = False, f"Executor error: {exc!r}"
-                status = finish_work(conn, cfg["worker_id"], cfg["name"],
-                                     item_id, ticket["id"], ok, comment)
-                print(f"  reported {'success' if ok else 'FAILURE'} -> "
-                      f"ticket status: {status}")
-            else:
-                heartbeat(conn, cfg["worker_id"])
-        except psycopg.OperationalError as e:
-            msg = str(e)
-            print(f"Database unreachable ({msg[:200]}); retrying...")
-            if "password authentication failed" in msg or "does not exist" in msg:
-                print("Credentials rejected — this PC may be revoked. Re-enroll.")
-                pause_if_frozen()
-                return 1
-            conn = None
-        except KeyboardInterrupt:
-            print("\nStopping worker.")
-            return 0
+    stop_event = threading.Event()
+    slots = [threading.Thread(target=run_slot, name=f"slot-{i}",
+                              args=(cfg, args, executor, stop_event, i),
+                              daemon=True)
+             for i in range(concurrency)]
+    for t in slots:
+        t.start()
 
-        if args.once:
-            return 0
-        try:
+    # The heartbeat lives on the main thread so a PC with every slot busy in a
+    # 30-minute agent run still reports online — it used to ride on the claim
+    # query, which is exactly what a busy worker stops issuing.
+    hb_conn = None
+    try:
+        while any(t.is_alive() for t in slots):
+            try:
+                if hb_conn is None or hb_conn.closed:
+                    hb_conn = psycopg.connect(cfg["dsn"], connect_timeout=15)
+                set_slot_counts(hb_conn, cfg["worker_id"], concurrency,
+                                running_count())
+            except psycopg.OperationalError:
+                hb_conn = None
+            except Exception:
+                pass
+            if args.once:
+                break
             time.sleep(args.poll)
-        except KeyboardInterrupt:
-            print("\nStopping worker.")
-            return 0
+    except KeyboardInterrupt:
+        print("\nStopping worker; slots will finish the ticket in hand.")
+    stop_event.set()
+    for t in slots:
+        t.join(timeout=30 if args.once else None)
+    if hb_conn is not None and not hb_conn.closed:
+        hb_conn.close()
+    return 0
 
 
 if __name__ == "__main__":
