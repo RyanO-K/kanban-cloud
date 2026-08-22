@@ -87,13 +87,14 @@ def test_workers_endpoint_works_on_a_v1_sqlite_db(tmp_path, monkeypatch):
 
 
 def test_models_have_phase1_columns():
-    from app.models import Board, Ticket
+    from app.models import Board, Ticket, WorkItem
     board_cols = {c.name for c in Board.__table__.columns}
     assert {"description", "out_of_scope", "commit_requirements",
             "use_worktrees", "repo_url"} <= board_cols
     assert "directory" not in board_cols  # per-PC, never a server column
     assert "session_id" in {c.name for c in Ticket.__table__.columns}
     assert {"concurrency", "running"} <= {c.name for c in Worker.__table__.columns}
+    assert "kill_requested" in {c.name for c in WorkItem.__table__.columns}
 
 
 def test_migration_adds_phase1_columns_to_an_existing_db(tmp_path):

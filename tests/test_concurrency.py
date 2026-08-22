@@ -69,7 +69,8 @@ def test_slots_run_concurrently_and_never_exceed_the_limit(monkeypatch, tmp_path
     class SlowExecutor:
         name = "slow"
 
-        def run(self, ticket, board=None, directory=None, session_id=None):
+        def run(self, ticket, board=None, directory=None, session_id=None,
+                should_kill=None):
             with lock:
                 live.append(ticket["id"])
                 peak["n"] = max(peak["n"], len(live))
@@ -210,7 +211,8 @@ def test_real_slots_auto_clone_when_no_set_path_is_configured(monkeypatch, tmp_p
     class RecordingExecutor:
         name = "recording"
 
-        def run(self, ticket, board=None, directory=None, session_id=None):
+        def run(self, ticket, board=None, directory=None, session_id=None,
+                should_kill=None):
             seen["directory"] = directory
             return True, "ok"
 
@@ -244,8 +246,8 @@ def test_resolve_error_skips_the_executor_entirely(monkeypatch, tmp_path):
         def run(self, *a, **k):
             raise AssertionError("executor.run must not be called")
 
-    def fake_finish(conn, wname, wid, item_id, ticket_id, ok, comment):
-        finished["ok"], finished["comment"] = ok, comment
+    def fake_finish(conn, wname, wid, item_id, ticket_id, ok, comment, killed=False):
+        finished["ok"], finished["comment"], finished["killed"] = ok, comment, killed
         return "failed"
 
     monkeypatch.setattr(worker.psycopg, "connect", _fake_connect())
@@ -259,6 +261,77 @@ def test_resolve_error_skips_the_executor_entirely(monkeypatch, tmp_path):
     worker.run_slot(cfg, args, Unreachable(), threading.Event(), 0)
     assert finished["ok"] is False
     assert finished["comment"] == "no folder configured, no repo_url"
+
+
+def test_run_slot_reports_a_kill_as_the_distinct_status(monkeypatch, tmp_path):
+    """When the executor raises KilledByRequest, run_slot must call
+    finish_work with killed=True (not a plain failure) and pass through
+    whatever distinct status finish_work reports."""
+    finished = {}
+
+    def fake_claim(conn, wid, cid, boards):
+        return {"assignment_id": 1, "session_id": "s",
+                "board": {"id": 9, "name": "site-page"},
+                "ticket": {"id": 1, "board_id": 9, "title": "t", "body": "",
+                           "status": "doing", "attempts": 1}}
+
+    class KilledExecutor:
+        name = "killed"
+
+        def run(self, *a, **k):
+            raise worker.KilledByRequest("Killed by request.")
+
+    def fake_finish(conn, wid, wname, item_id, ticket_id, ok, comment, killed=False):
+        finished["ok"], finished["comment"], finished["killed"] = ok, comment, killed
+        return "killed"
+
+    monkeypatch.setattr(worker.psycopg, "connect", _fake_connect())
+    monkeypatch.setattr(worker, "claim_next", fake_claim)
+    monkeypatch.setattr(worker, "finish_work", fake_finish)
+    monkeypatch.setattr(worker, "resolve_directory",
+                        lambda board, cfg: (str(tmp_path), None))
+
+    cfg = {"dsn": "x", "worker_id": 1, "cluster_id": 1, "name": "pc"}
+    args = worker.build_parser().parse_args(["--poll", "0.01", "--once"])
+    worker.run_slot(cfg, args, KilledExecutor(), threading.Event(), 0)
+    assert finished["ok"] is False
+    assert finished["killed"] is True
+
+
+def test_run_slot_passes_a_live_kill_check_into_the_executor(monkeypatch, tmp_path):
+    """The should_kill callback handed to the executor must reflect the
+    *current* work_queue.kill_requested value, not a snapshot taken at claim
+    time — the whole point is that it is polled while the agent is running."""
+    seen = {}
+    flag = {"kill": False}
+
+    def fake_claim(conn, wid, cid, boards):
+        return {"assignment_id": 1, "session_id": "s",
+                "board": {"id": 9, "name": "site-page"},
+                "ticket": {"id": 1, "board_id": 9, "title": "t", "body": "",
+                           "status": "doing", "attempts": 1}}
+
+    class RecordingExecutor:
+        name = "recording"
+
+        def run(self, ticket, board=None, directory=None, session_id=None,
+                should_kill=None):
+            flag["kill"] = True  # flips only after the executor started
+            seen["should_kill"] = should_kill()
+            return True, "ok"
+
+    monkeypatch.setattr(worker.psycopg, "connect", _fake_connect())
+    monkeypatch.setattr(worker, "claim_next", fake_claim)
+    monkeypatch.setattr(worker, "finish_work", lambda *a, **k: "review")
+    monkeypatch.setattr(worker, "resolve_directory",
+                        lambda board, cfg: (str(tmp_path), None))
+    monkeypatch.setattr(worker, "kill_requested",
+                        lambda conn, item_id: flag["kill"])
+
+    cfg = {"dsn": "x", "worker_id": 1, "cluster_id": 1, "name": "pc"}
+    args = worker.build_parser().parse_args(["--poll", "0.01", "--once"])
+    worker.run_slot(cfg, args, RecordingExecutor(), threading.Event(), 0)
+    assert seen["should_kill"] is True
 
 
 def test_stub_slots_never_call_resolve_directory(monkeypatch, tmp_path):

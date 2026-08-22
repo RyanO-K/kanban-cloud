@@ -104,12 +104,42 @@ RETURNING id, ticket_id
 
 # ---------- executors ----------
 
+class KilledByRequest(RuntimeError):
+    """Raised by an executor when it terminates its own child process because
+    work_queue.kill_requested was set for the in-flight claim. Distinct from
+    a genuine executor failure so run_slot can report it as such."""
+
+
+# How often a running agent's Popen is polled for exit and for a kill
+# request. Small enough to feel responsive; large enough not to hammer the
+# DB with a SELECT every run of the loop.
+KILL_POLL_SECONDS = 2
+
+AGENT_TIMEOUT_SECONDS = 1800
+
+
+def _terminate_process_tree(proc: subprocess.Popen) -> None:
+    """Kill the CLI and any child processes it spawned. A plain terminate()
+    only signals the immediate child; the Claude CLI's own subprocesses (the
+    tools it shells out to) would otherwise survive it."""
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                       capture_output=True)
+    else:
+        proc.kill()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
 class StubExecutor:
     """Fake executor: waits a moment and produces a canned result."""
 
     name = "stub"
 
-    def run(self, ticket, board=None, directory=None, session_id=None):
+    def run(self, ticket, board=None, directory=None, session_id=None,
+            should_kill=None):
         print(f"  [stub] pretending to work on ticket #{ticket['id']}: {ticket['title']}")
         time.sleep(2)
         return True, (
@@ -132,9 +162,11 @@ class ClaudeExecutor:
     def __init__(self, allowed_tools: str = DEFAULT_ALLOWED_TOOLS):
         self.allowed_tools = allowed_tools
 
-    def run(self, ticket, board=None, directory=None, session_id=None):
+    def run(self, ticket, board=None, directory=None, session_id=None,
+            should_kill=None):
         board = board or {}
         name = board.get("name", "?")
+        should_kill = should_kill or (lambda: False)
         if not directory:
             return False, (
                 f"This PC has no folder configured for board '{name}'. Set one "
@@ -161,13 +193,37 @@ class ClaudeExecutor:
             cmd += ["--session-id", session_id]
         print(f"  [claude] running in {directory} for ticket #{ticket['id']}")
         try:
-            proc = subprocess.run(cmd, cwd=directory,
-                                  capture_output=True, text=True, timeout=1800)
+            proc = subprocess.Popen(cmd, cwd=directory, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, text=True)
         except FileNotFoundError:
             return False, "`claude` CLI not found on this PC's PATH."
-        except subprocess.TimeoutExpired:
-            return False, "Claude CLI timed out after 30 minutes."
-        output = (proc.stdout or "").strip() or (proc.stderr or "").strip()
+
+        # Popen (not run): a blocking subprocess.run gives no handle to the
+        # child until it exits, so a kill request could never reach it mid-run.
+        # communicate(timeout=...) is polled in a loop instead of a single
+        # blocking wait so should_kill() gets a chance to fire; calling it
+        # repeatedly is the documented-safe way to poll a Popen with a live
+        # timeout — its reader threads/selectors keep draining stdout/stderr
+        # between calls, so a chatty child can't deadlock the pipes.
+        deadline = time.monotonic() + AGENT_TIMEOUT_SECONDS
+        while True:
+            try:
+                stdout_data, stderr_data = proc.communicate(timeout=KILL_POLL_SECONDS)
+                break
+            except subprocess.TimeoutExpired:
+                pass
+            # Only ever consulted while still waiting on the child: once it
+            # has exited above, a kill_requested flag that arrives too late
+            # to matter is never even read, let alone acted on.
+            if should_kill():
+                _terminate_process_tree(proc)
+                proc.communicate()
+                raise KilledByRequest("Killed by request.")
+            if time.monotonic() >= deadline:
+                _terminate_process_tree(proc)
+                proc.communicate()
+                return False, "Claude CLI timed out after 30 minutes."
+        output = (stdout_data or "").strip() or (stderr_data or "").strip()
         if proc.returncode != 0:
             return False, f"Claude CLI exited {proc.returncode}: {output[:2000]}"
         return True, output[:10000] or "(no output)"
@@ -594,17 +650,38 @@ def add_progress(conn, worker_id: int, worker_name: str, ticket_id: int, message
         )
 
 
+def kill_requested(conn, item_id: int) -> bool:
+    """Live read of one in-flight claim's kill flag, via the slot's own
+    connection (same thread, sequential with everything else the slot does —
+    no concurrent use of `conn`). A transient DB hiccup here must not abort
+    an otherwise-healthy agent run, so it fails open (treated as "no kill")."""
+    try:
+        with conn.transaction(), conn.cursor() as cur:
+            cur.execute("SELECT kill_requested FROM work_queue WHERE id=%s", (item_id,))
+            row = cur.fetchone()
+            return bool(row and row[0])
+    except psycopg.OperationalError:
+        return False
+
+
 def finish_work(conn, worker_id: int, worker_name: str, item_id: int,
-                ticket_id: int, ok: bool, comment: str | None) -> str:
+                ticket_id: int, ok: bool, comment: str | None,
+                killed: bool = False) -> str:
     """Record the result. Mirrors v1 delegation.finish_work: success ->
-    review; failure -> requeue until MAX_ATTEMPTS then failed. The rowcount
-    guard on the first UPDATE preserves v1's 409-on-superseded semantics:
-    if the claim was superseded while we worked, nothing else is written."""
+    review; failure -> requeue until MAX_ATTEMPTS then failed. A kill (owner
+    request, not a genuine failure) -> killed, with the claim-time attempt
+    charge refunded so it does not burn the ticket's retry budget, and no
+    auto-requeue (unlike a failure, restarting it is the owner's call). The
+    rowcount guard on the first UPDATE preserves v1's 409-on-superseded
+    semantics: if the claim was superseded while we worked — including a kill
+    request that lands after this ticket already finished — nothing else is
+    written, so a late kill can never masquerade as a fresh failure."""
+    wq_status = "done" if ok else ("killed" if killed else "failed")
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             f"UPDATE work_queue SET status=%s, finished_at={UTC_NOW}, result=%s "
             f"WHERE id=%s AND status='claimed' AND claimed_by=%s",
-            ("done" if ok else "failed", (comment or "")[:10000], item_id, worker_id),
+            (wq_status, (comment or "")[:10000], item_id, worker_id),
         )
         if cur.rowcount != 1:
             cur.execute(
@@ -622,6 +699,14 @@ def finish_work(conn, worker_id: int, worker_name: str, item_id: int,
             ticket_status = "review"
             cur.execute(
                 f"UPDATE tickets SET status='review', updated_at={UTC_NOW} WHERE id=%s",
+                (ticket_id,),
+            )
+        elif killed:
+            ticket_status = "killed"
+            cur.execute(
+                f"UPDATE tickets SET status='killed', "
+                f"attempts=GREATEST(COALESCE(attempts,0)-1, 0), "
+                f"updated_at={UTC_NOW} WHERE id=%s",
                 (ticket_id,),
             )
         else:
@@ -711,12 +796,15 @@ def run_slot(cfg, args, executor, stop_event, slot_no: int) -> None:
                 with _SLOT_LOCK:
                     _RUNNING["n"] += 1
                 print(f"[slot {slot_no}] claimed #{ticket['id']} '{ticket['title']}'")
+                should_kill = lambda: kill_requested(conn, work["assignment_id"])  # noqa: E731
+                killed = False
                 try:
                     if isinstance(executor, StubExecutor):
                         ok, comment = executor.run(
                             ticket, board=work.get("board"),
                             directory=paths.get(str(ticket["board_id"])),
-                            session_id=work.get("session_id"))
+                            session_id=work.get("session_id"),
+                            should_kill=should_kill)
                     else:
                         directory, resolve_error = resolve_directory(
                             work.get("board") or {}, cfg)
@@ -726,14 +814,18 @@ def run_slot(cfg, args, executor, stop_event, slot_no: int) -> None:
                             ok, comment = executor.run(
                                 ticket, board=work.get("board"),
                                 directory=directory,
-                                session_id=work.get("session_id"))
+                                session_id=work.get("session_id"),
+                                should_kill=should_kill)
+                except KilledByRequest as exc:
+                    ok, comment, killed = False, str(exc), True
                 except Exception as exc:
                     ok, comment = False, f"Executor error: {exc!r}"
                 finally:
                     with _SLOT_LOCK:
                         _RUNNING["n"] -= 1
                 status = finish_work(conn, cfg["worker_id"], cfg["name"],
-                                     work["assignment_id"], ticket["id"], ok, comment)
+                                     work["assignment_id"], ticket["id"], ok, comment,
+                                     killed=killed)
                 print(f"[slot {slot_no}] #{ticket['id']} -> {status}")
         except psycopg.OperationalError as e:
             msg = str(e)

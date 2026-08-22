@@ -489,6 +489,7 @@ def create_app(
                 "ticket_id": i.ticket_id,
                 "status": i.status,
                 "claimed_by": i.claimed_by,
+                "kill_requested": bool(i.kill_requested),
                 "queued_at": i.queued_at.isoformat(),
                 "claimed_at": i.claimed_at.isoformat() if i.claimed_at else None,
                 "finished_at": i.finished_at.isoformat() if i.finished_at else None,
@@ -706,6 +707,27 @@ def create_app(
     ):
         ticket = ticket_for_user(db, user, ticket_id)
         delegation.enqueue_ticket(db, ticket)
+        return ticket_json(db, ticket)
+
+    @app.post("/api/tickets/{ticket_id}/kill")
+    def kill_ticket(
+        ticket_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)
+    ):
+        """Ask the worker holding this ticket's active claim to stop.
+
+        A no-op (not an error) when there is no outstanding claim — e.g. the
+        agent already finished, or the ticket was never running — so a kill
+        that loses the race never turns into a spurious failure.
+        """
+        ticket = ticket_for_user(db, user, ticket_id)
+        item = db.scalar(
+            select(WorkItem).where(
+                WorkItem.ticket_id == ticket.id, WorkItem.status == "claimed"
+            )
+        )
+        if item is not None:
+            item.kill_requested = True
+            db.commit()
         return ticket_json(db, ticket)
 
     @app.post("/api/tickets/{ticket_id}/comments")

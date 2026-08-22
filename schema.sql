@@ -66,7 +66,7 @@ CREATE TABLE IF NOT EXISTS workers (
     UNIQUE (cluster_id, name)
 );
 
--- status: todo | ready | doing | review | done | failed
+-- status: todo | ready | doing | review | done | failed | killed
 -- target_worker NULL = any worker in the cluster may claim.
 CREATE TABLE IF NOT EXISTS tickets (
     id              SERIAL PRIMARY KEY,
@@ -99,8 +99,11 @@ CREATE TABLE IF NOT EXISTS work_queue (
     id          SERIAL PRIMARY KEY,
     ticket_id   INTEGER NOT NULL REFERENCES tickets(id),
     cluster_id  INTEGER NOT NULL REFERENCES clusters(id),
-    status      VARCHAR(32) NOT NULL DEFAULT 'queued',  -- queued | claimed | done | failed
+    status      VARCHAR(32) NOT NULL DEFAULT 'queued',  -- queued | claimed | done | failed | killed
     claimed_by  INTEGER REFERENCES workers(id),
+    -- Owner-requested cancellation of the in-flight claim; the worker polls
+    -- this while the agent runs and terminates the child process when set.
+    kill_requested BOOLEAN NOT NULL DEFAULT FALSE,
     queued_at   TIMESTAMP NOT NULL DEFAULT now(),
     claimed_at  TIMESTAMP,
     finished_at TIMESTAMP,

@@ -90,3 +90,29 @@ def test_workers_panel_renders_slot_counts(markup):
     """A PC's own concurrency limit and current load are shown next to it."""
     assert "w.running" in markup
     assert "w.concurrency" in markup
+
+
+# ---------- kill a running ticket ----------
+
+def test_kill_button_exists_and_is_owner_only(markup):
+    """Spectators must not see it: the endpoint would 403 anyway. The modal
+    button sits inside the same '.row owner-only' wrapper as Save/Run/Delete;
+    the per-card button on the board carries the class directly."""
+    assert 'id="killBtn"' in markup
+    row = markup[markup.index('<div class="row owner-only">'):]
+    assert 'id="killBtn"' in row[:row.index("</div>")]
+    assert 'owner-only" style="color:var(--bad)' in markup  # the card button
+
+
+def test_kill_route_targets_the_kill_endpoint(markup):
+    assert "/api/tickets/${" in markup and "/kill`" in markup
+
+
+def test_kill_button_only_shown_for_in_progress_tickets(markup):
+    assert 'editingTicket.status === "doing"' in markup
+    assert 'killTicket(' in markup
+
+
+def test_killed_is_a_board_column_and_ticket_status_option(markup):
+    assert '"killed"' in markup
+    assert '<option value="killed">killed</option>' in markup
