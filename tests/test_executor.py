@@ -27,7 +27,7 @@ def test_executor_runs_in_the_board_directory(monkeypatch, tmp_path):
     captured = {}
     monkeypatch.setattr(subprocess, "run", fake_run(captured))
     ok, out = worker.ClaudeExecutor().run(
-        TICKET, "sk-ant-x", board=BOARD, directory=str(tmp_path), session_id="sid-1")
+        TICKET, board=BOARD, directory=str(tmp_path), session_id="sid-1")
     assert ok and out == "done"
     assert captured["kwargs"]["cwd"] == str(tmp_path)
 
@@ -35,7 +35,7 @@ def test_executor_runs_in_the_board_directory(monkeypatch, tmp_path):
 def test_executor_passes_allowed_tools_and_session_id(monkeypatch, tmp_path):
     captured = {}
     monkeypatch.setattr(subprocess, "run", fake_run(captured))
-    worker.ClaudeExecutor().run(TICKET, "k", board=BOARD,
+    worker.ClaudeExecutor().run(TICKET, board=BOARD,
                                 directory=str(tmp_path), session_id="sid-1")
     cmd = captured["cmd"]
     assert "--allowedTools" in cmd
@@ -47,7 +47,7 @@ def test_executor_passes_allowed_tools_and_session_id(monkeypatch, tmp_path):
 def test_executor_prompt_carries_project_context(monkeypatch, tmp_path):
     captured = {}
     monkeypatch.setattr(subprocess, "run", fake_run(captured))
-    worker.ClaudeExecutor().run(TICKET, "k", board=BOARD,
+    worker.ClaudeExecutor().run(TICKET, board=BOARD,
                                 directory=str(tmp_path), session_id="s")
     prompt = captured["cmd"][captured["cmd"].index("-p") + 1]
     assert "The site." in prompt
@@ -62,7 +62,7 @@ def test_never_uses_shell_true(monkeypatch, tmp_path):
     needing a shell."""
     captured = {}
     monkeypatch.setattr(subprocess, "run", fake_run(captured))
-    worker.ClaudeExecutor().run(TICKET, "k", board=BOARD,
+    worker.ClaudeExecutor().run(TICKET, board=BOARD,
                                 directory=str(tmp_path), session_id="s")
     assert captured["kwargs"].get("shell") in (None, False)
     prompt = captured["cmd"][captured["cmd"].index("-p") + 1]
@@ -75,7 +75,7 @@ def test_resolves_the_cli_through_which(monkeypatch, tmp_path):
     monkeypatch.setattr(subprocess, "run", fake_run(captured))
     monkeypatch.setattr(worker.shutil, "which",
                         lambda name: r"C:\tools\claude.CMD")
-    worker.ClaudeExecutor().run(TICKET, "k", board=BOARD,
+    worker.ClaudeExecutor().run(TICKET, board=BOARD,
                                 directory=str(tmp_path), session_id="s")
     assert captured["cmd"][0] == r"C:\tools\claude.CMD"
 
@@ -85,7 +85,7 @@ def test_missing_cli_is_reported_without_running(monkeypatch, tmp_path):
     monkeypatch.setattr(subprocess, "run",
                         lambda *a, **k: called.setdefault("ran", True))
     monkeypatch.setattr(worker.shutil, "which", lambda name: None)
-    ok, msg = worker.ClaudeExecutor().run(TICKET, "k", board=BOARD,
+    ok, msg = worker.ClaudeExecutor().run(TICKET, board=BOARD,
                                           directory=str(tmp_path), session_id="s")
     assert ok is False
     assert "not found" in msg
@@ -97,7 +97,7 @@ def test_executor_refuses_to_run_without_a_directory(monkeypatch):
     called = {}
     monkeypatch.setattr(subprocess, "run",
                         lambda *a, **k: called.setdefault("ran", True))
-    ok, msg = worker.ClaudeExecutor().run(TICKET, "k", board=BOARD,
+    ok, msg = worker.ClaudeExecutor().run(TICKET, board=BOARD,
                                           directory=None, session_id="s")
     assert ok is False
     assert "--set-path" in msg
@@ -109,29 +109,22 @@ def test_executor_fails_clearly_when_the_directory_is_gone(monkeypatch, tmp_path
     monkeypatch.setattr(subprocess, "run",
                         lambda *a, **k: called.setdefault("ran", True))
     ok, msg = worker.ClaudeExecutor().run(
-        TICKET, "k", board=BOARD, directory=str(tmp_path / "gone"), session_id="s")
+        TICKET, board=BOARD, directory=str(tmp_path / "gone"), session_id="s")
     assert ok is False
     assert "no longer exists" in msg
     assert "ran" not in called
-
-
-def test_missing_api_key_is_reported(monkeypatch, tmp_path):
-    ok, msg = worker.ClaudeExecutor().run(TICKET, None, board=BOARD,
-                                          directory=str(tmp_path), session_id="s")
-    assert ok is False
-    assert "API key" in msg
 
 
 def test_custom_allowed_tools(monkeypatch, tmp_path):
     captured = {}
     monkeypatch.setattr(subprocess, "run", fake_run(captured))
     worker.ClaudeExecutor(allowed_tools="Read,Grep").run(
-        TICKET, "k", board=BOARD, directory=str(tmp_path), session_id="s")
+        TICKET, board=BOARD, directory=str(tmp_path), session_id="s")
     cmd = captured["cmd"]
     assert cmd[cmd.index("--allowedTools") + 1] == "Read,Grep"
 
 
 def test_stub_executor_still_takes_the_new_kwargs():
-    ok, out = worker.StubExecutor().run(TICKET, None, board=None,
+    ok, out = worker.StubExecutor().run(TICKET, board=None,
                                         directory=None, session_id=None)
     assert ok and "StubExecutor" in out

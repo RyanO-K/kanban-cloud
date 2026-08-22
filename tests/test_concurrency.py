@@ -61,7 +61,7 @@ def test_slots_run_concurrently_and_never_exceed_the_limit(monkeypatch, tmp_path
                 n = next(claims)
             except StopIteration:
                 return None
-        return {"assignment_id": n, "claude_api_key": "k", "session_id": "s",
+        return {"assignment_id": n, "session_id": "s",
                 "board": {"id": 1, "name": "b"},
                 "ticket": {"id": n, "board_id": 1, "title": "t", "body": "",
                            "status": "doing", "attempts": 1}}
@@ -69,7 +69,7 @@ def test_slots_run_concurrently_and_never_exceed_the_limit(monkeypatch, tmp_path
     class SlowExecutor:
         name = "slow"
 
-        def run(self, ticket, key, board=None, directory=None, session_id=None):
+        def run(self, ticket, board=None, directory=None, session_id=None):
             with lock:
                 live.append(ticket["id"])
                 peak["n"] = max(peak["n"], len(live))
@@ -110,7 +110,7 @@ def test_running_count_returns_to_zero(monkeypatch, tmp_path):
             n = next(claims)
         except StopIteration:
             return None
-        return {"assignment_id": n, "claude_api_key": "k", "session_id": "s",
+        return {"assignment_id": n, "session_id": "s",
                 "board": {"id": 1, "name": "b"},
                 "ticket": {"id": n, "board_id": 1, "title": "t", "body": "",
                            "status": "doing", "attempts": 1}}

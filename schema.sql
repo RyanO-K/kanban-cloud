@@ -32,14 +32,6 @@ CREATE TABLE IF NOT EXISTS cluster_members (
     UNIQUE (cluster_id, user_id)
 );
 
--- claude_api_key: stored server-side; masked in every browser-facing response;
--- delivered in full only to the worker that claims a work item.
-CREATE TABLE IF NOT EXISTS cluster_settings (
-    cluster_id     INTEGER PRIMARY KEY REFERENCES clusters(id),
-    claude_api_key TEXT,
-    updated_at     TIMESTAMP NOT NULL DEFAULT now()
-);
-
 -- description/out_of_scope/commit_requirements/use_worktrees are the project
 -- context injected into every agent prompt built for this board. The folder the
 -- code lives in is deliberately NOT here: it is per-PC and lives in each

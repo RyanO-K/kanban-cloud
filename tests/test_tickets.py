@@ -38,7 +38,7 @@ def test_cluster_scoping_blocks_outsiders(client, user, cluster):
     other = {"Authorization": f"Bearer {r.json()['token']}"}
     assert client.get(f"/api/boards/{cluster['board_id']}/tickets", headers=other).status_code == 403
     assert client.patch(f"/api/tickets/{t['id']}", json={"status": "done"}, headers=other).status_code == 403
-    assert client.get(f"/api/clusters/{cluster['id']}/settings", headers=other).status_code == 403
+    assert client.get(f"/api/clusters/{cluster['id']}/workers", headers=other).status_code == 403
 
     # joining with the code grants access
     j = client.post("/api/clusters/join", json={"join_code": cluster["join_code"]}, headers=other)
@@ -82,15 +82,3 @@ def test_create_ticket_rejects_foreign_target_worker(client, user, cluster):
     assert r.status_code == 400
 
 
-def test_api_key_masked_in_browser_responses(client, user, cluster):
-    key = "sk-ant-api03-verysecretkey-abcd"
-    r = client.put(f"/api/clusters/{cluster['id']}/settings", json={"claude_api_key": key},
-                   headers=user["headers"])
-    assert r.status_code == 200
-    assert key not in r.text  # masked even in the save response
-
-    g = client.get(f"/api/clusters/{cluster['id']}/settings", headers=user["headers"])
-    body = g.json()
-    assert body["has_key"] is True
-    assert key not in g.text
-    assert body["claude_api_key_masked"].endswith("abcd")

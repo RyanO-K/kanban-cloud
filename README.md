@@ -19,16 +19,13 @@ and DSN. Everything else in the FastAPI app is the human-facing surface
 (login, boards, tickets, settings, the workers panel).
 
 ```
-            browsers (login / boards / settings)
+            browsers (login / boards)
                         |
                         v  HTTPS + bearer token
  +---------------------------------------------------+
  |  FastAPI server (app/main.py)                     |
  |   - auth: email+password, PBKDF2, token table     |
  |   - clusters (join codes), boards, tickets        |
- |   - cluster_settings: Claude API key (masked      |
- |     to browsers; readable by any enrolled worker  |
- |     role via direct SQL — by design, see caveats) |
  |   - work_queue: atomic claim via SQL              |
  |   - POST /api/workers/enroll: the ONLY             |
  |     worker-facing HTTP route (provisions a         |
@@ -51,7 +48,8 @@ and DSN. Everything else in the FastAPI app is the human-facing surface
  |     .worker_config.json                           |
  |   - thereafter: SQL claim (SKIP LOCKED), SQL       |
  |     heartbeat, SQL result-post — no HTTP           |
- |   - ClaudeExecutor (default) | StubExecutor       |
+ |   - ClaudeExecutor (default, uses this PC's own   |
+ |     local `claude` CLI auth) | StubExecutor        |
  |     (--stub: fake results for testing)            |
  +---------------------------------------------------+
 ```
@@ -62,8 +60,8 @@ Every per-PC role inherits one shared, `NOLOGIN` group role
 (`kanban_worker`); schema changes touch its grants once instead of every PC
 role individually:
 
-- **SELECT** on `tickets`, `boards`, `clusters`, `cluster_settings`,
-  `workers`, `work_queue`, `comments`.
+- **SELECT** on `tickets`, `boards`, `clusters`, `workers`, `work_queue`,
+  `comments`.
 - **INSERT** on `comments`, `work_queue` (the failure-requeue path inserts
   its own retry row).
 - **UPDATE** on `work_queue`, `tickets`, `workers`.
@@ -161,9 +159,11 @@ py worker.py            # real executor (Claude CLI)
 py worker.py --stub     # stub executor for testing
 ```
 
-The Claude CLI is required for real ticket execution (`claude` must be on PATH);
-the cluster's Claude API key (Settings panel) is read straight from
-`cluster_settings` on claim and exported as `ANTHROPIC_API_KEY` for the CLI.
+The Claude CLI is required for real ticket execution (`claude` must be on PATH
+**and already authenticated on this PC** — run `claude login` once, or set
+your own `ANTHROPIC_API_KEY` in the environment the worker runs in). The
+cluster does not store or forward a key; each worker uses whatever local
+Claude Code configuration already exists on that machine.
 Default poll interval is 10s (`--poll N` to change it, `--once` to poll a
 single time and exit).
 
@@ -231,7 +231,7 @@ aren't actively using if you want the DB to suspend.
 ```
 
 Runs against the SQLite fallback; covers auth, ticket CRUD + cluster scoping,
-API-key masking, atomic claim/double-claim guard, target-worker routing,
+atomic claim/double-claim guard, target-worker routing,
 offline-target queuing, cross-cluster isolation, and failure/retry handling.
 
 ## Deploying behind a reverse proxy (portfolio-site mode)
@@ -363,18 +363,12 @@ location /board/ {
   password) transit the wire.
 - Bearer tokens are random 256-bit strings in the DB, but they never expire
   and there is no logout-everywhere or rate limiting.
-- The cluster Claude API key is stored **in plaintext in the DB**, masked in
-  browser-facing API responses. In v2 it is also readable, in plaintext, by
-  **any enrolled worker role via direct SQL** (`SELECT` on `cluster_settings`
-  is part of the `kanban_worker` group grants) — not just the worker that
-  claims a given ticket. This is by design (any worker in the cluster may
-  need it to execute tickets via the Claude CLI), but it means the blast radius
-  of one compromised PC's Postgres credentials includes the key. Anyone with a
-  cluster join code can enroll a worker and get DB access to the key — treat
-  join codes as secrets, revoke a PC's role the moment it's no longer trusted,
-  and rotate the API key if a code leaks.
-- Any cluster member can change settings or delete tickets; there are no
-  roles/permissions.
+- There is no cluster-stored Claude API key. Each worker PC authenticates the
+  `claude` CLI with its own local configuration (a `claude login` session or
+  the operator's own `ANTHROPIC_API_KEY`), so there is nothing for the
+  server, the DB, or a compromised worker's Postgres role to leak — a key
+  simply never crosses the wire or lands in a table.
+- Any cluster member can delete tickets; there are no roles/permissions.
 - No stale-claim reaper: if a worker dies mid-ticket, the `work_queue` row
   stays `claimed` forever. Nothing times it out automatically — dragging the
   ticket back to `ready` (or "Run now") supersedes the stale claim and

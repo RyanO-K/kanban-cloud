@@ -8,6 +8,8 @@ import os
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
 
+from .models import Worker
+
 DEFAULT_SQLITE_URL = "sqlite:///./kanban_cloud.db"
 
 # (table, column DDL) pairs added by the "agents do real repo work" change.
@@ -52,20 +54,72 @@ def make_session_factory(engine):
 
 
 def run_migrations(engine) -> None:
-    """Idempotent v2 schema fixes for existing Postgres DBs.
+    """Idempotent v2 schema fixes for DBs created before the v2 rewrite.
 
-    No alembic: the prod DB predates these columns but is (near-)empty, so a
-    few guarded ALTERs at startup are enough. SQLite DBs are scratch files —
-    delete and let create_all rebuild them instead.
+    No alembic: the DBs that predate these columns are (near-)empty, so a few
+    guarded statements at startup are enough. Both backends get the same
+    treatment — a local SQLite dev DB from v1 has to reach the v2 shape too,
+    or every ``workers`` query 500s with "no such column: workers.role_name".
     """
-    if engine.url.get_backend_name() == "postgresql":
+    backend = engine.url.get_backend_name()
+    if backend == "postgresql":
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE workers ADD COLUMN IF NOT EXISTS role_name VARCHAR(64)"))
             conn.execute(text(
                 "ALTER TABLE workers ADD COLUMN IF NOT EXISTS revoked BOOLEAN NOT NULL DEFAULT FALSE"
             ))
             conn.execute(text("ALTER TABLE workers DROP COLUMN IF EXISTS token"))
+    elif backend == "sqlite":
+        _migrate_sqlite_workers(engine)
+    else:
+        return
+    # create_all() skips a table that already exists, indexes included, so DBs
+    # older than 627ce17 never got the claim index declared on WorkItem.
+    with engine.begin() as conn:
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_work_queue_claim "
+            "ON work_queue (cluster_id, status, queued_at)"
+        ))
+        # Workers now authenticate the Claude CLI with their own local config
+        # instead of a cluster-stored key; drop the table (and, on Postgres,
+        # the kanban_worker group's SELECT grant on it) from DBs created
+        # before this change.
+        conn.execute(text("DROP TABLE IF EXISTS cluster_settings"))
     _add_missing_columns(engine)
+
+
+def _migrate_sqlite_workers(engine) -> None:
+    """The v1 -> v2 `workers` changes, SQLite flavor.
+
+    SQLite can add columns but cannot DROP the v1 `token` column (it sits under
+    a UNIQUE constraint, which its DROP COLUMN refuses), so a v1 table is
+    rebuilt from the model instead. Row ids are carried over, keeping
+    tickets.assigned_worker / target_worker and work_queue.claimed_by valid.
+    """
+    insp = inspect(engine)
+    if "workers" not in insp.get_table_names():
+        return  # brand-new DB: create_all() already built the v2 shape
+    columns = {c["name"] for c in insp.get_columns("workers")}
+    with engine.begin() as conn:
+        if "token" in columns:
+            # legacy_alter_table keeps the rename from rewriting the FK clauses
+            # in tickets/work_queue to point at the temporary table name.
+            conn.execute(text("PRAGMA legacy_alter_table=ON"))
+            conn.execute(text("ALTER TABLE workers RENAME TO workers_v1"))
+            Worker.__table__.create(conn)
+            conn.execute(text(
+                "INSERT INTO workers "
+                "(id, cluster_id, name, role_name, revoked, status, last_seen, created_at) "
+                "SELECT id, cluster_id, name, NULL, 0, status, last_seen, created_at "
+                "FROM workers_v1"
+            ))
+            conn.execute(text("DROP TABLE workers_v1"))
+            conn.execute(text("PRAGMA legacy_alter_table=OFF"))
+            return
+        if "role_name" not in columns:
+            conn.execute(text("ALTER TABLE workers ADD COLUMN role_name VARCHAR(64)"))
+        if "revoked" not in columns:
+            conn.execute(text("ALTER TABLE workers ADD COLUMN revoked BOOLEAN NOT NULL DEFAULT 0"))
 
 
 def _add_missing_columns(engine) -> None:

@@ -8,7 +8,8 @@ Client PCs (packaged exe): download kanban-worker.exe from the latest
 worker-v* GitHub Release, put it in its own folder, and run it — on first
 run it asks for the cluster join code, then starts polling. Real ticket
 execution shells out to the `claude` CLI, which must be installed
-separately.
+separately and already authenticated on this PC (`claude login`, or your
+own ANTHROPIC_API_KEY) — the cluster does not store or forward a key.
 
 Dev / script setup (once per PC):
     pip install "psycopg[binary]"
@@ -100,7 +101,7 @@ class StubExecutor:
 
     name = "stub"
 
-    def run(self, ticket, api_key, board=None, directory=None, session_id=None):
+    def run(self, ticket, board=None, directory=None, session_id=None):
         print(f"  [stub] pretending to work on ticket #{ticket['id']}: {ticket['title']}")
         time.sleep(2)
         return True, (
@@ -111,19 +112,21 @@ class StubExecutor:
 
 
 class ClaudeExecutor:
-    """Real executor: runs the Claude CLI inside the board's checkout."""
+    """Real executor: runs the Claude CLI inside the board's checkout.
+
+    The CLI authenticates from whatever local configuration this PC already
+    has — a `claude login` session, or the operator's own ANTHROPIC_API_KEY.
+    The cluster neither stores nor forwards a key.
+    """
 
     name = "claude"
 
     def __init__(self, allowed_tools: str = DEFAULT_ALLOWED_TOOLS):
         self.allowed_tools = allowed_tools
 
-    def run(self, ticket, api_key, board=None, directory=None, session_id=None):
+    def run(self, ticket, board=None, directory=None, session_id=None):
         board = board or {}
         name = board.get("name", "?")
-        if not api_key:
-            return False, ("No Claude API key configured for this cluster "
-                           "(set it in Settings).")
         if not directory:
             return False, (
                 f"This PC has no folder configured for board '{name}'. Set one "
@@ -145,14 +148,12 @@ class ClaudeExecutor:
             return False, "`claude` CLI not found on this PC's PATH."
 
         prompt = build_agent_prompt(ticket, board, directory)
-        env = dict(os.environ)
-        env["ANTHROPIC_API_KEY"] = api_key
         cmd = [exe, "-p", prompt, "--allowedTools", self.allowed_tools]
         if session_id:
             cmd += ["--session-id", session_id]
         print(f"  [claude] running in {directory} for ticket #{ticket['id']}")
         try:
-            proc = subprocess.run(cmd, cwd=directory, env=env,
+            proc = subprocess.run(cmd, cwd=directory,
                                   capture_output=True, text=True, timeout=1800)
         except FileNotFoundError:
             return False, "`claude` CLI not found on this PC's PATH."
@@ -366,7 +367,7 @@ def claim_next(conn, worker_id: int, cluster_id: int, board_ids=None) -> dict | 
     `board_ids` limits the claim to boards this PC has a checkout for. None
     means no limit, which is what the stub executor uses — it needs no repo.
 
-    One transaction: claim + ticket flip + board read + key read.
+    One transaction: claim + ticket flip + board read.
     """
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(CLAIM_SQL, {"wid": worker_id, "cid": cluster_id,
@@ -401,14 +402,8 @@ def claim_next(conn, worker_id: int, cluster_id: int, board_ids=None) -> dict | 
             (board_id,),
         )
         b = cur.fetchone()
-        cur.execute(
-            "SELECT claude_api_key FROM cluster_settings WHERE cluster_id=%s",
-            (cluster_id,),
-        )
-        key_row = cur.fetchone()
         return {
             "assignment_id": item_id,
-            "claude_api_key": key_row[0] if key_row else None,
             "session_id": session_id,
             "board": {
                 "id": board_id, "name": b[0], "description": b[1],
@@ -553,7 +548,7 @@ def run_slot(cfg, args, executor, stop_event, slot_no: int) -> None:
                 print(f"[slot {slot_no}] claimed #{ticket['id']} '{ticket['title']}'")
                 try:
                     ok, comment = executor.run(
-                        ticket, work.get("claude_api_key"),
+                        ticket,
                         board=work.get("board"),
                         directory=paths.get(str(ticket["board_id"])),
                         session_id=work.get("session_id"))
