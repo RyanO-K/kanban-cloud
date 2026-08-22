@@ -1,14 +1,15 @@
 """SQLAlchemy ORM models for kanban-cloud.
 
 Status vocabulary (borrowed/adapted from the local .kanban tool):
-  todo   - backlog
-  ready  - queued for an agent (all prerequisites met; enqueued in work_queue)
-  doing  - claimed / in progress (worker or human)
-  review - agent finished, awaiting human review
-  done   - completed
-  failed - agent gave up after max attempts
-  killed - owner terminated a running attempt; distinct from failed, so it
-           does not consume a retry attempt
+  todo    - backlog
+  ready   - queued for an agent (all prerequisites met; enqueued in work_queue)
+  doing   - claimed / in progress (worker or human)
+  blocked - agent raised a question and is parked awaiting a human answer
+  review  - agent finished, awaiting human review
+  done    - completed
+  failed  - agent gave up after max attempts
+  killed  - owner terminated a running attempt; distinct from failed, so it
+            does not consume a retry attempt
 """
 import datetime
 import secrets
@@ -26,7 +27,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-TICKET_STATUSES = ["todo", "ready", "doing", "review", "done", "failed", "killed"]
+TICKET_STATUSES = ["todo", "ready", "doing", "blocked", "review", "done", "failed", "killed"]
 # Moving a ticket into this status queues it for an agent.
 AGENT_READY_STATUS = "ready"
 MAX_ATTEMPTS = 2  # keep in sync with worker.py MAX_ATTEMPTS
@@ -212,3 +213,25 @@ class WorkItem(Base):
     heartbeat_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
     result: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class TicketQuestion(Base):
+    """An agent's human-in-the-loop escalation (cloud counterpart of the local
+    tool's `orchestrator.question`). Raised by the worker when the agent's
+    reply carries the `KANBAN_QUESTION:` marker (see app/prompt.parse_question);
+    answering it is what auto-requeues the ticket (see delegation.py).
+    """
+    __tablename__ = "ticket_questions"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ticket_id: Mapped[int] = mapped_column(ForeignKey("tickets.id"), nullable=False)
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    # input | choice
+    type: Mapped[str] = mapped_column(String(16), default="input", nullable=False)
+    format: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # JSON-encoded list of strings; only meaningful for type="choice".
+    options: Mapped[str | None] = mapped_column(Text, nullable=True)
+    multi: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    answer_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    answer_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow)
+    answered_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)

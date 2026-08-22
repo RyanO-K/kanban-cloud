@@ -50,7 +50,7 @@ except ImportError as exc:
         'Then re-run: py worker.py --enroll --join-code ABC12345'
     )
 
-from app.prompt import build_agent_prompt, ticket_branch_name
+from app.prompt import build_agent_prompt, parse_question, ticket_branch_name
 
 DEFAULT_SERVER = "https://kanban-cloud.onrender.com"
 TEST_SERVER = "http://localhost:8900"
@@ -940,6 +940,44 @@ def finish_work(conn, worker_id: int, worker_name: str, item_id: int,
         return ticket_status
 
 
+def raise_question(conn, worker_id: int, worker_name: str, item_id: int,
+                   ticket_id: int, question: dict, comment: str | None) -> str:
+    """Record an agent's escalation: park the ticket blocked and release the
+    work_queue slot. Mirrors finish_work's rowcount guard against a claim that
+    was superseded (e.g. a human dragged the ticket back to ready) while the
+    agent was still running — in that case nothing here is written."""
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            f"UPDATE work_queue SET status='blocked', finished_at={UTC_NOW}, result=%s "
+            f"WHERE id=%s AND status='claimed' AND claimed_by=%s",
+            ((comment or "")[:10000], item_id, worker_id),
+        )
+        if cur.rowcount != 1:
+            cur.execute(
+                f"UPDATE workers SET status='idle', last_seen={UTC_NOW} WHERE id=%s",
+                (worker_id,),
+            )
+            return "superseded"
+        cur.execute(
+            f"INSERT INTO ticket_questions "
+            f"(ticket_id, question, type, format, options, multi, created_at) "
+            f"VALUES (%s, %s, %s, %s, %s, %s, {UTC_NOW})",
+            (ticket_id, question["question"], question["type"], question["format"],
+             json.dumps(question["options"]) if question["options"] is not None else None,
+             question["multi"]),
+        )
+        cur.execute(
+            f"UPDATE tickets SET status='blocked', assigned_worker=NULL, "
+            f"updated_at={UTC_NOW} WHERE id=%s",
+            (ticket_id,),
+        )
+        cur.execute(
+            f"UPDATE workers SET status='idle', last_seen={UTC_NOW} WHERE id=%s",
+            (worker_id,),
+        )
+        return "blocked"
+
+
 # ---------- stale-claim reaper ----------
 #
 # The cloud analogue of the local tool's reap_decision: if a worker PC dies
@@ -1115,7 +1153,10 @@ def run_slot(cfg, args, executor, stop_event, slot_no: int) -> None:
                                 directory=directory,
                                 session_id=work.get("session_id"),
                                 progress_cb=progress_cb, should_kill=should_kill)
-                            if ok:
+                            # A question isn't a finished attempt — nothing to
+                            # push yet, and (in tests especially) `directory`
+                            # may not even be a real git checkout.
+                            if ok and not parse_question(comment):
                                 push_note = push_ticket_branch(
                                     directory, ticket_branch_name(ticket))
                                 if push_note:
@@ -1129,9 +1170,21 @@ def run_slot(cfg, args, executor, stop_event, slot_no: int) -> None:
                     hb_thread.join(timeout=5)
                     with _SLOT_LOCK:
                         _RUNNING["n"] -= 1
-                status = finish_work(conn, cfg["worker_id"], cfg["name"],
-                                     work["assignment_id"], ticket["id"], ok, comment,
-                                     killed=killed)
+                # A clean (ok) run whose entire reply is the escalation marker
+                # is a question, not a completion — park it blocked instead of
+                # landing it in review. A non-zero exit is never treated as a
+                # question even if its error text happens to contain the
+                # marker (e.g. echoed back from a crashed prior attempt), and
+                # neither is a kill: the run was cut short, not concluded.
+                question = parse_question(comment) if ok and not killed else None
+                if question:
+                    status = raise_question(conn, cfg["worker_id"], cfg["name"],
+                                            work["assignment_id"], ticket["id"],
+                                            question, comment)
+                else:
+                    status = finish_work(conn, cfg["worker_id"], cfg["name"],
+                                         work["assignment_id"], ticket["id"], ok, comment,
+                                         killed=killed)
                 print(f"[slot {slot_no}] #{ticket['id']} -> {status}")
         except psycopg.OperationalError as e:
             msg = str(e)

@@ -19,11 +19,15 @@ ROLE_RE = re.compile(r"^worker_c\d+_w\d+$")
 PASSWORD_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 # INSERT on work_queue is required by the failure-requeue path (worker inserts
-# the retry row itself). No DELETE anywhere; users/auth_tokens untouched.
+# the retry row itself); INSERT on ticket_questions is the blocked-status
+# equivalent (worker inserts the question itself when an agent escalates).
+# No DELETE/UPDATE on ticket_questions — answering is a human, browser-side
+# action through the server's own DB session, never the worker role. No
+# DELETE anywhere; users/auth_tokens untouched.
 GROUP_GRANTS = [
     f"GRANT SELECT ON tickets, boards, clusters, workers, "
-    f"work_queue, comments, ticket_deps TO {GROUP_ROLE}",
-    f"GRANT INSERT ON comments, work_queue TO {GROUP_ROLE}",
+    f"work_queue, comments, ticket_deps, ticket_questions TO {GROUP_ROLE}",
+    f"GRANT INSERT ON comments, work_queue, ticket_questions TO {GROUP_ROLE}",
     f"GRANT UPDATE ON work_queue, tickets, workers TO {GROUP_ROLE}",
     f"GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {GROUP_ROLE}",
 ]
