@@ -398,7 +398,7 @@ def claim_next(conn, worker_id: int, cluster_id: int, board_ids=None) -> dict | 
         )
         cur.execute(
             "SELECT name, description, out_of_scope, commit_requirements, "
-            "use_worktrees FROM boards WHERE id=%s",
+            "use_worktrees, repo_url FROM boards WHERE id=%s",
             (board_id,),
         )
         b = cur.fetchone()
@@ -408,7 +408,7 @@ def claim_next(conn, worker_id: int, cluster_id: int, board_ids=None) -> dict | 
             "board": {
                 "id": board_id, "name": b[0], "description": b[1],
                 "out_of_scope": b[2], "commit_requirements": b[3],
-                "use_worktrees": bool(b[4]),
+                "use_worktrees": bool(b[4]), "repo_url": b[5],
             } if b else None,
             "ticket": {
                 "id": ticket_id, "board_id": board_id, "title": title,

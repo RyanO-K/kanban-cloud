@@ -172,3 +172,40 @@ def test_claim_next_with_none_boards_disables_the_filter():
     conn = FakeConn()
     worker.claim_next(conn, 3, 1, None)
     assert conn.cursors[0].calls[0][1]["boards"] is None
+
+
+# ---------- claim_next board row ----------
+
+
+class FakeCursorWithBoardRow(FakeCursor):
+    """Like FakeCursor, but claim_next's several fetchone() calls need to
+    return a fixed sequence: the claim row, the ticket-flip row, then the
+    board row."""
+
+    def __init__(self, fetchone_sequence):
+        super().__init__(rows=())
+        self._sequence = list(fetchone_sequence)
+
+    def fetchone(self):
+        return self._sequence.pop(0) if self._sequence else None
+
+
+class FakeConnWithBoardRow(FakeConn):
+    def __init__(self, fetchone_sequence):
+        super().__init__()
+        self._sequence = fetchone_sequence
+
+    def cursor(self):
+        cur = FakeCursorWithBoardRow(self._sequence)
+        self.cursors.append(cur)
+        return cur
+
+
+def test_claim_next_returns_repo_url_on_the_board_dict():
+    conn = FakeConnWithBoardRow([
+        (5, 9),                                             # claim: item_id, ticket_id
+        (2, "Fix the thing", "Details.", 1),                 # ticket flip: board_id, title, body, attempts
+        ("site-page", "Desc", None, None, False, "https://github.com/org/repo.git"),  # board row
+    ])
+    work = worker.claim_next(conn, worker_id=1, cluster_id=1, board_ids=None)
+    assert work["board"]["repo_url"] == "https://github.com/org/repo.git"
