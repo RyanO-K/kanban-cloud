@@ -137,3 +137,19 @@ def test_phase1_slot_defaults_are_backward_compatible(tmp_path):
     with Session(engine) as db:
         w = db.get(Worker, 1)
         assert (w.concurrency, w.running) == (1, 0)
+
+
+def test_phase1_boolean_defaults_are_postgres_legal():
+    """Regression: `BOOLEAN NOT NULL DEFAULT 0` deployed green and then broke
+    startup on Neon — "column is of type boolean but default expression is of
+    type integer". SQLite accepts the integer, so the SQLite-only migration
+    tests below could never catch it. One DDL string serves both backends, so
+    the spelling has to be the one both accept.
+    """
+    from app.db import _PHASE1_COLUMNS
+
+    for table, ddl in _PHASE1_COLUMNS:
+        if "BOOLEAN" not in ddl.upper():
+            continue
+        default = ddl.upper().split("DEFAULT", 1)[1].strip() if "DEFAULT" in ddl.upper() else ""
+        assert default in ("", "TRUE", "FALSE"), f"{table}.{ddl}: use TRUE/FALSE, not {default}"

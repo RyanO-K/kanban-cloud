@@ -15,11 +15,13 @@ DEFAULT_SQLITE_URL = "sqlite:///./kanban_cloud.db"
 # (table, column DDL) pairs added by the "agents do real repo work" change.
 # Every entry is nullable or carries a DEFAULT: existing rows back-fill from
 # the default, and already-deployed workers never write these columns.
+# One DDL string has to satisfy both backends, so boolean defaults are spelled
+# FALSE, not 0 — SQLite takes either, Postgres rejects the integer outright.
 _PHASE1_COLUMNS = [
     ("boards", "description TEXT"),
     ("boards", "out_of_scope TEXT"),
     ("boards", "commit_requirements TEXT"),
-    ("boards", "use_worktrees BOOLEAN NOT NULL DEFAULT 0"),
+    ("boards", "use_worktrees BOOLEAN NOT NULL DEFAULT FALSE"),
     ("tickets", "session_id VARCHAR(64)"),
     ("workers", "concurrency INTEGER NOT NULL DEFAULT 1"),
     ("workers", "running INTEGER NOT NULL DEFAULT 0"),
