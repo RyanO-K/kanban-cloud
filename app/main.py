@@ -92,6 +92,15 @@ class BoardBody(BaseModel):
     name: str
 
 
+class BoardPatch(BaseModel):
+    """A board's project metadata. Every field is optional so patches are
+    partial — one panel saving must not blank a field it did not send."""
+    description: str | None = None
+    out_of_scope: str | None = None
+    commit_requirements: str | None = None
+    use_worktrees: bool | None = None
+
+
 class ImportBody(BaseModel):
     """A local .kanban board folder, as read and key-whitelisted by the browser.
 
@@ -291,6 +300,16 @@ def create_app(
             raise HTTPException(404, "Ticket not found")
         board_for_user(db, user, ticket.board_id)
         return ticket
+
+    def board_json(b: Board) -> dict:
+        return {
+            "id": b.id,
+            "name": b.name,
+            "description": b.description,
+            "out_of_scope": b.out_of_scope,
+            "commit_requirements": b.commit_requirements,
+            "use_worktrees": bool(b.use_worktrees),
+        }
 
     def ticket_json(db: Session, t: Ticket) -> dict:
         comments = db.scalars(
@@ -515,7 +534,7 @@ def create_app(
         boards = db.scalars(
             select(Board).where(Board.cluster_id == cluster_id).order_by(Board.id)
         ).all()
-        return [{"id": b.id, "name": b.name} for b in boards]
+        return [board_json(b) for b in boards]
 
     @app.post("/api/clusters/{cluster_id}/boards")
     def create_board(
@@ -528,7 +547,28 @@ def create_app(
         board = Board(cluster_id=cluster_id, name=body.name.strip() or "Board")
         db.add(board)
         db.commit()
-        return {"id": board.id, "name": board.name}
+        return board_json(board)
+
+    @app.patch("/api/boards/{board_id}")
+    def patch_board(
+        board_id: int,
+        body: BoardPatch,
+        user: User = Depends(current_user),
+        db: Session = Depends(get_db),
+    ):
+        """Edit a board's project metadata — the context agents are given.
+
+        Partial by design: a field absent from the request keeps its stored
+        value, while an explicit empty string clears it.
+        """
+        board = board_for_user(db, user, board_id)
+        for field in ("description", "out_of_scope", "commit_requirements",
+                      "use_worktrees"):
+            value = getattr(body, field)
+            if value is not None:
+                setattr(board, field, value)
+        db.commit()
+        return board_json(board)
 
     @app.post("/api/clusters/{cluster_id}/import")
     def import_board(
