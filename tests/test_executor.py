@@ -1,8 +1,11 @@
-"""The executor's contract with the Claude CLI: right folder, right permissions.
+"""The executor's contract with the Claude CLI: right folder, right
+permissions, and (Phase 3) incremental streaming instead of an
+all-or-nothing block on process exit.
 
 The prompt is multi-line, which is exactly what `shell=True` destroys on
 Windows — see test_never_uses_shell_true.
 """
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -15,17 +18,71 @@ BOARD = {"name": "site-page", "description": "The site.", "out_of_scope": None,
          "commit_requirements": None, "use_worktrees": False}
 
 
-def fake_run(captured):
-    def _run(cmd, **kwargs):
+def text_line(text):
+    return json.dumps({"type": "assistant",
+                        "message": {"content": [{"type": "text", "text": text}]}}) + "\n"
+
+
+def tool_line(name):
+    return json.dumps({"type": "assistant",
+                        "message": {"content": [{"type": "tool_use", "name": name}]}}) + "\n"
+
+
+def result_line(text):
+    return json.dumps({"type": "result", "result": text}) + "\n"
+
+
+class _FakeStdout:
+    """Iterates a canned list of stdout lines, optionally raising partway
+    through to simulate a crashed/broken subprocess pipe."""
+
+    def __init__(self, lines, crash_after=None, crash_exc=None):
+        self._lines = list(lines)
+        self._crash_after = crash_after
+        self._crash_exc = crash_exc or OSError("pipe broke")
+        self._i = 0
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._crash_after is not None and self._i == self._crash_after:
+            raise self._crash_exc
+        if self._i >= len(self._lines):
+            raise StopIteration
+        line = self._lines[self._i]
+        self._i += 1
+        return line
+
+    def close(self):
+        pass
+
+
+class FakeProc:
+    def __init__(self, lines, returncode=0, crash_after=None, crash_exc=None):
+        self.stdout = _FakeStdout(lines, crash_after, crash_exc)
+        self.returncode = returncode
+        self.killed = False
+
+    def wait(self):
+        return self.returncode
+
+    def kill(self):
+        self.killed = True
+
+
+def fake_popen(proc, captured):
+    def _popen(cmd, **kwargs):
         captured["cmd"] = cmd
         captured["kwargs"] = kwargs
-        return subprocess.CompletedProcess(cmd, 0, stdout="done", stderr="")
-    return _run
+        return proc
+    return _popen
 
 
 def test_executor_runs_in_the_board_directory(monkeypatch, tmp_path):
     captured = {}
-    monkeypatch.setattr(subprocess, "run", fake_run(captured))
+    proc = FakeProc([result_line("done")])
+    monkeypatch.setattr(subprocess, "Popen", fake_popen(proc, captured))
     ok, out = worker.ClaudeExecutor().run(
         TICKET, board=BOARD, directory=str(tmp_path), session_id="sid-1")
     assert ok and out == "done"
@@ -34,7 +91,8 @@ def test_executor_runs_in_the_board_directory(monkeypatch, tmp_path):
 
 def test_executor_passes_allowed_tools_and_session_id(monkeypatch, tmp_path):
     captured = {}
-    monkeypatch.setattr(subprocess, "run", fake_run(captured))
+    proc = FakeProc([result_line("done")])
+    monkeypatch.setattr(subprocess, "Popen", fake_popen(proc, captured))
     worker.ClaudeExecutor().run(TICKET, board=BOARD,
                                 directory=str(tmp_path), session_id="sid-1")
     cmd = captured["cmd"]
@@ -44,9 +102,25 @@ def test_executor_passes_allowed_tools_and_session_id(monkeypatch, tmp_path):
     assert cmd[cmd.index("--session-id") + 1] == "sid-1"
 
 
+def test_executor_requests_stream_json(monkeypatch, tmp_path):
+    """Streaming output requires asking the CLI for it — the same format the
+    local orchestrator's log viewer already consumes."""
+    captured = {}
+    proc = FakeProc([result_line("done")])
+    monkeypatch.setattr(subprocess, "Popen", fake_popen(proc, captured))
+    worker.ClaudeExecutor().run(TICKET, board=BOARD,
+                                directory=str(tmp_path), session_id="s")
+    cmd = captured["cmd"]
+    assert "--output-format" in cmd
+    assert cmd[cmd.index("--output-format") + 1] == "stream-json"
+    assert captured["kwargs"]["stdout"] == subprocess.PIPE
+    assert "timeout" not in captured["kwargs"]  # no more all-or-nothing timeout
+
+
 def test_executor_prompt_carries_project_context(monkeypatch, tmp_path):
     captured = {}
-    monkeypatch.setattr(subprocess, "run", fake_run(captured))
+    proc = FakeProc([result_line("done")])
+    monkeypatch.setattr(subprocess, "Popen", fake_popen(proc, captured))
     worker.ClaudeExecutor().run(TICKET, board=BOARD,
                                 directory=str(tmp_path), session_id="s")
     prompt = captured["cmd"][captured["cmd"].index("-p") + 1]
@@ -61,7 +135,8 @@ def test_never_uses_shell_true(monkeypatch, tmp_path):
     is resolved with shutil.which instead, which finds the .CMD shim without
     needing a shell."""
     captured = {}
-    monkeypatch.setattr(subprocess, "run", fake_run(captured))
+    proc = FakeProc([result_line("done")])
+    monkeypatch.setattr(subprocess, "Popen", fake_popen(proc, captured))
     worker.ClaudeExecutor().run(TICKET, board=BOARD,
                                 directory=str(tmp_path), session_id="s")
     assert captured["kwargs"].get("shell") in (None, False)
@@ -72,7 +147,8 @@ def test_never_uses_shell_true(monkeypatch, tmp_path):
 def test_resolves_the_cli_through_which(monkeypatch, tmp_path):
     """A bare 'claude' with shell=False misses the Windows .CMD/.EXE shim."""
     captured = {}
-    monkeypatch.setattr(subprocess, "run", fake_run(captured))
+    proc = FakeProc([result_line("done")])
+    monkeypatch.setattr(subprocess, "Popen", fake_popen(proc, captured))
     monkeypatch.setattr(worker.shutil, "which",
                         lambda name: r"C:\tools\claude.CMD")
     worker.ClaudeExecutor().run(TICKET, board=BOARD,
@@ -82,7 +158,7 @@ def test_resolves_the_cli_through_which(monkeypatch, tmp_path):
 
 def test_missing_cli_is_reported_without_running(monkeypatch, tmp_path):
     called = {}
-    monkeypatch.setattr(subprocess, "run",
+    monkeypatch.setattr(subprocess, "Popen",
                         lambda *a, **k: called.setdefault("ran", True))
     monkeypatch.setattr(worker.shutil, "which", lambda name: None)
     ok, msg = worker.ClaudeExecutor().run(TICKET, board=BOARD,
@@ -95,7 +171,7 @@ def test_missing_cli_is_reported_without_running(monkeypatch, tmp_path):
 def test_executor_refuses_to_run_without_a_directory(monkeypatch):
     """Better to fail the attempt than run an agent in a random folder."""
     called = {}
-    monkeypatch.setattr(subprocess, "run",
+    monkeypatch.setattr(subprocess, "Popen",
                         lambda *a, **k: called.setdefault("ran", True))
     ok, msg = worker.ClaudeExecutor().run(TICKET, board=BOARD,
                                           directory=None, session_id="s")
@@ -106,7 +182,7 @@ def test_executor_refuses_to_run_without_a_directory(monkeypatch):
 
 def test_executor_fails_clearly_when_the_directory_is_gone(monkeypatch, tmp_path):
     called = {}
-    monkeypatch.setattr(subprocess, "run",
+    monkeypatch.setattr(subprocess, "Popen",
                         lambda *a, **k: called.setdefault("ran", True))
     ok, msg = worker.ClaudeExecutor().run(
         TICKET, board=BOARD, directory=str(tmp_path / "gone"), session_id="s")
@@ -117,7 +193,8 @@ def test_executor_fails_clearly_when_the_directory_is_gone(monkeypatch, tmp_path
 
 def test_custom_allowed_tools(monkeypatch, tmp_path):
     captured = {}
-    monkeypatch.setattr(subprocess, "run", fake_run(captured))
+    proc = FakeProc([result_line("done")])
+    monkeypatch.setattr(subprocess, "Popen", fake_popen(proc, captured))
     worker.ClaudeExecutor(allowed_tools="Read,Grep").run(
         TICKET, board=BOARD, directory=str(tmp_path), session_id="s")
     cmd = captured["cmd"]
@@ -126,5 +203,99 @@ def test_custom_allowed_tools(monkeypatch, tmp_path):
 
 def test_stub_executor_still_takes_the_new_kwargs():
     ok, out = worker.StubExecutor().run(TICKET, board=None,
-                                        directory=None, session_id=None)
+                                        directory=None, session_id=None,
+                                        progress_cb=None)
     assert ok and "StubExecutor" in out
+
+
+def test_partial_output_streamed_before_process_exits(monkeypatch, tmp_path):
+    """The whole point of switching from subprocess.run(capture_output=True)
+    to Popen with incremental reads: progress must reach the caller as each
+    turn comes off stdout, not only in one lump after the process exits."""
+    captured = {}
+    lines = [text_line("first update"), text_line("second update"),
+             tool_line("Read"), result_line("all done")]
+    proc = FakeProc(lines, returncode=0)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen(proc, captured))
+
+    seen = []
+    ok, out = worker.ClaudeExecutor(progress_batch=1).run(
+        TICKET, board=BOARD, directory=str(tmp_path), session_id="s",
+        progress_cb=seen.append)
+
+    assert ok
+    # More than one flush proves turns were handed off as they arrived,
+    # not batched into a single post-exit call.
+    assert len(seen) >= 2
+    assert "first update" in seen[0]
+    assert "second update" not in seen[0]
+    assert any("second update" in s for s in seen[1:])
+
+
+def test_progress_batches_before_flushing(monkeypatch, tmp_path):
+    """A larger batch size groups several turns into one comment instead of
+    posting one per line."""
+    captured = {}
+    lines = [text_line("a"), text_line("b"), text_line("c"), result_line("done")]
+    proc = FakeProc(lines, returncode=0)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen(proc, captured))
+
+    seen = []
+    worker.ClaudeExecutor(progress_batch=3).run(
+        TICKET, board=BOARD, directory=str(tmp_path), session_id="s",
+        progress_cb=seen.append)
+
+    assert seen[0] == "a\nb\nc"
+
+
+def test_crashed_agent_leaves_partial_log(monkeypatch, tmp_path):
+    """If the CLI process dies mid-stream, whatever was read before the
+    crash must already have reached progress_cb (so it is attached to the
+    ticket as a comment even though the run ultimately fails) and must also
+    come back in the failure comment rather than being silently dropped."""
+    captured = {}
+    lines = [text_line("step one"), text_line("step two")]
+    proc = FakeProc(lines, returncode=-9, crash_after=2,
+                    crash_exc=OSError("pipe broke"))
+    monkeypatch.setattr(subprocess, "Popen", fake_popen(proc, captured))
+
+    seen = []
+    ok, comment = worker.ClaudeExecutor(progress_batch=1).run(
+        TICKET, board=BOARD, directory=str(tmp_path), session_id="s",
+        progress_cb=seen.append)
+
+    assert ok is False
+    assert "step one" in comment
+    assert "step two" in comment
+    assert proc.killed
+    assert any("step one" in s for s in seen)
+    assert any("step two" in s for s in seen)
+
+
+def test_nonzero_exit_reports_partial_output(monkeypatch, tmp_path):
+    captured = {}
+    lines = [text_line("partial work"), ]
+    proc = FakeProc(lines, returncode=1)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen(proc, captured))
+    ok, comment = worker.ClaudeExecutor().run(
+        TICKET, board=BOARD, directory=str(tmp_path), session_id="s")
+    assert ok is False
+    assert "exited 1" in comment
+    assert "partial work" in comment
+
+
+def test_progress_callback_error_does_not_abort_the_run(monkeypatch, tmp_path):
+    """A DB hiccup while posting a progress comment must not take down an
+    otherwise-healthy agent run."""
+    captured = {}
+    lines = [text_line("a"), result_line("done")]
+    proc = FakeProc(lines, returncode=0)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen(proc, captured))
+
+    def flaky(_msg):
+        raise RuntimeError("db is down")
+
+    ok, out = worker.ClaudeExecutor(progress_batch=1).run(
+        TICKET, board=BOARD, directory=str(tmp_path), session_id="s",
+        progress_cb=flaky)
+    assert ok and out == "a\ndone"
