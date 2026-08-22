@@ -212,6 +212,10 @@ class Ticket(Base):
     session_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # Drag-order rank, ascending; see CLAIM_ORDER_BY in worker.py.
     order: Mapped[int] = mapped_column(Integer, default=0, nullable=False, server_default="0")
+    # NULL = not yet triaged (or a pre-triage row). Set once, by initial triage
+    # (worker.triage_todo_tickets), which also promotes the ticket to ready;
+    # never overwritten afterward. See app/triage.py.
+    model: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 

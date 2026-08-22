@@ -201,6 +201,30 @@ def test_migration_adds_phase4_columns_to_an_existing_db(tmp_path):
         assert ddl.split()[0] in {c["name"] for c in insp.get_columns(table)}, ddl
 
 
+def test_ticket_model_has_triage_column():
+    from app.models import Ticket
+
+    assert "model" in {c.name for c in Ticket.__table__.columns}
+
+
+def test_migration_adds_triage_columns_to_an_existing_db(tmp_path):
+    """A database created before initial triage must reach the new shape too."""
+    from app.db import _TRIAGE_COLUMNS
+
+    engine = make_engine(f"sqlite:///{tmp_path / 'old_triage.db'}")
+    Base.metadata.create_all(engine)
+    with engine.begin() as conn:
+        for table, ddl in _TRIAGE_COLUMNS:
+            conn.execute(sa.text(f"ALTER TABLE {table} DROP COLUMN {ddl.split()[0]}"))
+
+    run_migrations(engine)
+    run_migrations(engine)  # idempotent
+
+    insp = sa.inspect(engine)
+    for table, ddl in _TRIAGE_COLUMNS:
+        assert ddl.split()[0] in {c["name"] for c in insp.get_columns(table)}, ddl
+
+
 def test_cluster_settings_table_is_created(tmp_path):
     engine = make_engine(f"sqlite:///{tmp_path / 'cs.db'}")
     Base.metadata.create_all(engine)

@@ -51,6 +51,7 @@ except ImportError as exc:
     )
 
 from app.prompt import build_agent_prompt, parse_question, ticket_branch_name
+from app.triage import build_triage_prompt, parse_triage_result
 
 DEFAULT_SERVER = "https://kanban-cloud.onrender.com"
 TEST_SERVER = "http://localhost:8900"
@@ -1406,6 +1407,116 @@ def _reap_one(conn, item_id: int, stale_after_seconds: float):
     return (item_id, ticket_id, new_status)
 
 
+# ---------- initial triage ----------
+#
+# Cloud analogue of the local tool's initial triage (_real_sonnet_triage /
+# apply_initial_triage): a `todo` ticket with no model yet gets one inferred,
+# plus inferred dependencies on other tickets on its board, and is promoted to
+# `ready`. Runs opportunistically in every worker, once per poll cycle,
+# piggybacked on the same main-loop tick as reap_stale_claims — no elected
+# leader, no Render cron, no new credential. See
+# docs/superpowers/specs/2026-08-22-triage-design.md for why: this PC's own
+# already-authenticated `claude` CLI does the inference, and the guarded
+# UPDATE below (`WHERE status='todo' AND model IS NULL`) makes two workers
+# racing the same ticket, or a second pass over an already-triaged one, a
+# no-op for every writer but the first — same pattern _reap_one/finish_work
+# already rely on.
+
+TRIAGE_TIMEOUT_SECONDS = 120
+
+
+def run_triage_cli(prompt: str) -> str:
+    """Ask the local `claude` CLI for one triage reply. Raises on anything
+    that keeps the CLI from producing output; the caller treats that as a
+    triage failure, same as a reply that fails to parse."""
+    exe = shutil.which("claude")
+    if not exe:
+        raise RuntimeError("`claude` CLI not found on this PC's PATH.")
+    proc = subprocess.run([exe, "-p", prompt], capture_output=True, text=True,
+                          timeout=TRIAGE_TIMEOUT_SECONDS)
+    if proc.returncode != 0:
+        raise RuntimeError(f"claude CLI exited {proc.returncode}: {proc.stderr[:500]}")
+    return proc.stdout
+
+
+def _triage_candidates(conn, board_id: int, ticket_id: int) -> list:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, title, status FROM tickets WHERE board_id=%s AND id != %s "
+            "ORDER BY id",
+            (board_id, ticket_id),
+        )
+        return [{"id": r[0], "title": r[1], "status": r[2]} for r in cur.fetchall()]
+
+
+def _apply_triage_one(conn, ticket_id: int, cluster_id: int, model: str,
+                      depends_on: list):
+    """Atomically promote one triaged ticket, or no-op if it was already
+    triaged/promoted (by another worker, or a stale scan) between the
+    candidate scan and here. Returns (ticket_id, model, depends_on) if this
+    call actually applied it, else None."""
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            f"UPDATE tickets SET model=%s, status='ready', assigned_worker=NULL, "
+            f"updated_at={UTC_NOW} WHERE id=%s AND status='todo' AND model IS NULL",
+            (model, ticket_id),
+        )
+        if cur.rowcount != 1:
+            return None
+        for dep_id in depends_on:
+            cur.execute(
+                "INSERT INTO ticket_deps (ticket_id, depends_on_id) VALUES (%s, %s) "
+                "ON CONFLICT (ticket_id, depends_on_id) DO NOTHING",
+                (ticket_id, dep_id),
+            )
+        cur.execute(
+            f"INSERT INTO work_queue (ticket_id, cluster_id, status, queued_at) "
+            f"VALUES (%s, %s, 'queued', {UTC_NOW})",
+            (ticket_id, cluster_id),
+        )
+    return (ticket_id, model, depends_on)
+
+
+def triage_todo_tickets(conn, cluster_id: int, run_llm=run_triage_cli) -> list:
+    """Triage every eligible `todo` ticket in this cluster. Returns the list of
+    (ticket_id, model, depends_on) actually applied — empty if there was
+    nothing to triage, every candidate lost its race, or every triage attempt
+    failed. A triage failure (the CLI errors, times out, or replies with
+    something `parse_triage_result` rejects) leaves that ticket in `todo`
+    untouched; it is retried on the next poll cycle, by this worker or another.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT t.id, t.board_id, t.title, t.body FROM tickets t "
+            "JOIN boards b ON b.id = t.board_id "
+            "WHERE b.cluster_id=%s AND t.status='todo' AND t.model IS NULL "
+            "ORDER BY t.id",
+            (cluster_id,),
+        )
+        rows = cur.fetchall()
+    applied = []
+    for ticket_id, board_id, title, body in rows:
+        candidates = _triage_candidates(conn, board_id, ticket_id)
+        ticket = {"id": ticket_id, "title": title, "body": body}
+        prompt = build_triage_prompt(ticket, candidates)
+        try:
+            raw = run_llm(prompt)
+        except Exception as exc:
+            print(f"[triage] #{ticket_id} failed: {exc!r}")
+            continue
+        result = parse_triage_result(raw, [c["id"] for c in candidates], ticket_id)
+        if result is None:
+            print(f"[triage] #{ticket_id} failed: unparseable/invalid triage reply")
+            continue
+        outcome = _apply_triage_one(conn, ticket_id, cluster_id,
+                                    result["model"], result["depends_on"])
+        if outcome is not None:
+            print(f"[triage] #{ticket_id} -> ready (model={result['model']}, "
+                  f"depends_on={result['depends_on']})")
+            applied.append(outcome)
+    return applied
+
+
 # ---------- argument parser & executor selection ----------
 
 # ---------- concurrency slots ----------
@@ -1758,8 +1869,9 @@ def main() -> int:
     # The heartbeat lives on the main thread so a PC with every slot busy in a
     # 30-minute agent run still reports online — it used to ride on the claim
     # query, which is exactly what a busy worker stops issuing. The stale-claim
-    # reaper piggybacks on the same tick: opportunistic, once per poll cycle,
-    # no dedicated infrastructure (see the reaper's own docstring for why).
+    # reaper and initial triage both piggyback on the same tick: opportunistic,
+    # once per poll cycle, no dedicated infrastructure (see each one's own
+    # docstring for why).
     hb_conn = None
     try:
         while any(t.is_alive() for t in slots):
@@ -1770,6 +1882,7 @@ def main() -> int:
                                 running_count())
                 reap_stale_claims(hb_conn, cfg["cluster_id"])
                 prune_ticket_log(hb_conn, cfg["cluster_id"])
+                triage_todo_tickets(hb_conn, cfg["cluster_id"])
             except psycopg.OperationalError:
                 hb_conn = None
             except Exception:
