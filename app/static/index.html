@@ -8,12 +8,18 @@
   :root {
     --bg: #f4f5f7; --panel: #ffffff; --ink: #1b1f24; --muted: #6b7280;
     --accent: #2563eb; --border: #d8dce3; --ok: #16a34a; --bad: #dc2626;
+    --overlay: rgba(0,0,0,.35); --col-bg: #ebedf0; --badge-bg: #eef2ff;
+  }
+  body.dark {
+    --bg: #14161a; --panel: #1d2025; --ink: #e6e8eb; --muted: #9aa2ad;
+    --accent: #5b8def; --border: #33383f; --ok: #22c55e; --bad: #ef4444;
+    --overlay: rgba(0,0,0,.6); --col-bg: #23262c; --badge-bg: #232a3d;
   }
   * { box-sizing: border-box; }
   body { margin: 0; font-family: "Segoe UI", system-ui, sans-serif; background: var(--bg); color: var(--ink); }
   header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--border); flex-wrap: wrap; }
   header h1 { font-size: 16px; margin: 0 8px 0 0; }
-  select, input, textarea, button { font: inherit; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: #fff; color: var(--ink); }
+  select, input, textarea, button { font: inherit; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--ink); }
   button { cursor: pointer; background: var(--accent); color: #fff; border: none; }
   button.ghost { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
   button.small { padding: 3px 8px; font-size: 12px; }
@@ -21,12 +27,12 @@
   .muted { color: var(--muted); font-size: 12px; }
   .layout { display: flex; gap: 12px; padding: 12px 16px; align-items: flex-start; }
   .board { display: flex; gap: 10px; flex: 1; overflow-x: auto; }
-  .col { background: #ebedf0; border-radius: 8px; min-width: 210px; width: 210px; padding: 8px; }
+  .col { background: var(--col-bg); border-radius: 8px; min-width: 210px; width: 210px; padding: 8px; }
   .col h3 { margin: 2px 4px 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); display: flex; justify-content: space-between; }
   .card { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 8px; margin-bottom: 8px; cursor: pointer; font-size: 13px; }
   .card:hover { border-color: var(--accent); }
   .card .tid { color: var(--muted); font-size: 11px; }
-  .badge { display: inline-block; font-size: 10px; padding: 1px 6px; border-radius: 8px; background: #eef2ff; color: var(--accent); margin-top: 4px; }
+  .badge { display: inline-block; font-size: 10px; padding: 1px 6px; border-radius: 8px; background: var(--badge-bg); color: var(--accent); margin-top: 4px; }
   .side { width: 260px; flex-shrink: 0; display: flex; flex-direction: column; gap: 12px; }
   .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
   .panel h3 { margin: 0 0 8px; font-size: 14px; }
@@ -34,7 +40,7 @@
   .dot { width: 8px; height: 8px; border-radius: 50%; background: #9ca3af; }
   .dot.on { background: var(--ok); }
   /* modal */
-  .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.35); display: none; align-items: center; justify-content: center; z-index: 10; }
+  .overlay { position: fixed; inset: 0; background: var(--overlay); display: none; align-items: center; justify-content: center; z-index: 10; }
   .overlay.show { display: flex; }
   .modal { background: var(--panel); border-radius: 10px; padding: 18px; width: min(560px, 92vw); max-height: 88vh; overflow-y: auto; }
   .modal h2 { margin: 0 0 10px; font-size: 17px; }
@@ -49,7 +55,15 @@
   body.spectator .owner-only { display: none !important; }
   #spectatorNote { display: none; font-size: 12px; color: var(--muted); }
   body.spectator #spectatorNote { display: inline; }
-  #toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--ink); color: #fff; padding: 8px 16px; border-radius: 8px; display: none; z-index: 20; }
+  #toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: #1b1f24; color: #fff; padding: 8px 16px; border-radius: 8px; display: none; z-index: 20; }
+  /* account/profile dropdown */
+  .accountWrap { position: relative; }
+  #accountBtn { display: flex; align-items: center; gap: 6px; background: transparent; color: var(--ink); border: 1px solid var(--border); }
+  #accountMenu { display: none; position: absolute; top: calc(100% + 6px); right: 0; min-width: 190px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,.15); padding: 6px; z-index: 15; }
+  #accountMenu.show { display: block; }
+  #accountMenu .menuEmail { padding: 6px 8px; font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--border); margin-bottom: 4px; }
+  #accountMenu button.menuItem { display: flex; align-items: center; justify-content: space-between; width: 100%; text-align: left; background: transparent; color: var(--ink); border: none; padding: 7px 8px; border-radius: 6px; font-size: 13px; }
+  #accountMenu button.menuItem:hover { background: var(--col-bg); }
 </style>
 </head>
 <body>
@@ -75,9 +89,19 @@
     <button class="small owner-only" onclick="openTicketModal(null)">+ ticket</button>
     <div class="spacer"></div>
     <span id="spectatorNote">viewing read-only</span>
-    <button class="small" id="signInBtn" style="display:none">Sign in with GitHub</button>
-    <span class="muted" id="whoami"></span>
-    <button class="small ghost" id="logoutBtn" onclick="logout()">Log out</button>
+    <div class="accountWrap">
+      <button class="small" id="accountBtn" onclick="toggleAccountMenu()">
+        <span id="whoami"></span><span>▾</span>
+      </button>
+      <div id="accountMenu">
+        <div class="menuEmail" id="menuEmail"></div>
+        <button class="menuItem" id="signInBtn" style="display:none" onclick="signIn()">Sign in with GitHub</button>
+        <button class="menuItem" id="darkModeItem" onclick="toggleDarkMode()">
+          <span>Dark mode</span><span id="darkModeState"></span>
+        </button>
+        <button class="menuItem" id="logoutBtn" onclick="logout()">Log out</button>
+      </div>
+    </div>
   </header>
   <div class="layout">
     <div class="board" id="board"></div>
@@ -165,6 +189,36 @@ let sessionMode = "local";
 // exists). Null in owner/local mode, where the first board still wins.
 let sessionBoardId = null;
 
+// ---------- theme ----------
+function applyDarkMode(on) {
+  document.body.classList.toggle("dark", on);
+  const s = document.getElementById("darkModeState");
+  if (s) s.textContent = on ? "On" : "Off";
+}
+function initTheme() {
+  const stored = localStorage.getItem("kc_theme");
+  const on = stored ? stored === "dark" : window.matchMedia("(prefers-color-scheme: dark)").matches;
+  applyDarkMode(on);
+}
+function toggleDarkMode() {
+  const on = !document.body.classList.contains("dark");
+  applyDarkMode(on);
+  localStorage.setItem("kc_theme", on ? "dark" : "light");
+}
+initTheme();
+
+// ---------- account menu ----------
+function toggleAccountMenu() {
+  document.getElementById("accountMenu").classList.toggle("show");
+}
+document.addEventListener("click", (ev) => {
+  const wrap = document.querySelector(".accountWrap");
+  if (wrap && !wrap.contains(ev.target)) document.getElementById("accountMenu").classList.remove("show");
+});
+function signIn() {
+  if (signIn.url) location.href = signIn.url;
+}
+
 function toast(msg) {
   const t = document.getElementById("toast");
   t.textContent = msg; t.style.display = "block";
@@ -219,6 +273,7 @@ async function init() {
   document.getElementById("authView").style.display = "none";
   document.getElementById("appView").style.display = "block";
   document.getElementById("whoami").textContent = me.email;
+  document.getElementById("menuEmail").textContent = me.email;
   clusters = await api("GET", "./api/clusters");
   const sel = document.getElementById("clusterSel");
   sel.innerHTML = clusters.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join("");
@@ -439,14 +494,14 @@ async function boot() {
     if (s.login_url) {
       // A root-relative site path, deliberately not a ./api/ call: this
       // navigates out of the /board/ prefix to the site's own OAuth route.
-      const signIn = document.getElementById("signInBtn");
-      signIn.onclick = function () { location.href = s.login_url; };
-      signIn.style.display = "";
+      signIn.url = s.login_url;
+      document.getElementById("signInBtn").style.display = "";
     }
     document.getElementById("logoutBtn").style.display = "none";
     document.getElementById("authView").style.display = "none";
     document.getElementById("appView").style.display = "block";
-    document.getElementById("whoami").textContent = "";
+    document.getElementById("whoami").textContent = "Spectator";
+    document.getElementById("menuEmail").textContent = "Viewing read-only";
     const sel = document.getElementById("clusterSel");
     sel.disabled = true;
     currentCluster = s.cluster;  // {id, name} or null — from ./api/session
