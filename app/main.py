@@ -127,6 +127,12 @@ class TicketPatch(BaseModel):
     depends_on: list[int] | None = None
 
 
+class ReorderBody(BaseModel):
+    """New drag order for every ticket in one status column of one board."""
+    status: str
+    ticket_ids: list[int]
+
+
 class CommentBody(BaseModel):
     message: str
 
@@ -389,6 +395,7 @@ def create_app(
             "assigned_worker": t.assigned_worker,
             "target_worker": t.target_worker,
             "attempts": t.attempts,
+            "order": t.order,
             "created_at": t.created_at.isoformat(),
             "updated_at": t.updated_at.isoformat(),
             "depends_on": depends_on_ids(db, t.id),
@@ -705,7 +712,8 @@ def create_app(
     ):
         board_for_user(db, user, board_id)
         tickets = db.scalars(
-            select(Ticket).where(Ticket.board_id == board_id).order_by(Ticket.id)
+            select(Ticket).where(Ticket.board_id == board_id)
+            .order_by(Ticket.order, Ticket.id)
         ).all()
         return [ticket_json(db, t) for t in tickets]
 
@@ -738,6 +746,28 @@ def create_app(
         if body.status == "ready":
             delegation.enqueue_ticket(db, ticket)
         return ticket_json(db, ticket)
+
+    @app.patch("/api/boards/{board_id}/reorder")
+    def reorder_tickets(
+        board_id: int,
+        body: ReorderBody,
+        user: User = Depends(current_user),
+        db: Session = Depends(get_db),
+    ):
+        """Persist a drag reorder: `ticket_ids` is the full new top-to-bottom
+        order of one status column. Reindexed as 0..n-1 so ties among
+        never-dragged tickets elsewhere on the board are unaffected."""
+        board = board_for_user(db, user, board_id)
+        column = db.scalars(
+            select(Ticket).where(Ticket.board_id == board.id, Ticket.status == body.status)
+        ).all()
+        by_id = {t.id: t for t in column}
+        if set(body.ticket_ids) != set(by_id):
+            raise HTTPException(400, "ticket_ids must match every ticket in that column")
+        for index, ticket_id in enumerate(body.ticket_ids):
+            by_id[ticket_id].order = index
+        db.commit()
+        return [ticket_json(db, by_id[i]) for i in body.ticket_ids]
 
     @app.patch("/api/tickets/{ticket_id}")
     def patch_ticket(
