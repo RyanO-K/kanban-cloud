@@ -18,10 +18,11 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from . import delegation, enrollment
+from . import delegation, enrollment, importer
 from .auth import hash_password, mask_secret, verify_password
 from .db import make_engine, make_session_factory, run_migrations
 from .models import (
+    AGENT_READY_STATUS,
     TICKET_STATUSES,
     AuthToken,
     Base,
@@ -89,6 +90,16 @@ class SettingsBody(BaseModel):
 
 class BoardBody(BaseModel):
     name: str
+
+
+class ImportBody(BaseModel):
+    """A local .kanban board folder, as read and key-whitelisted by the browser.
+
+    `tickets` holds raw local ticket objects; app/importer.py owns every
+    decision about what they mean.
+    """
+    name: str
+    tickets: list[dict]
 
 
 class TicketBody(BaseModel):
@@ -518,6 +529,93 @@ def create_app(
         db.add(board)
         db.commit()
         return {"id": board.id, "name": board.name}
+
+    @app.post("/api/clusters/{cluster_id}/import")
+    def import_board(
+        cluster_id: int,
+        body: ImportBody,
+        user: User = Depends(current_user),
+        db: Session = Depends(get_db),
+    ):
+        """Create a new board from a local .kanban board folder.
+
+        Always creates; never merges into an existing board. A name collision
+        gets a "(2)" suffix, so re-importing the same folder is safe and leaves
+        the earlier copy alone.
+        """
+        require_member(db, user, cluster_id)
+        if len(body.tickets) > importer.MAX_IMPORT_TICKETS:
+            raise HTTPException(
+                400, f"too many tickets (limit {importer.MAX_IMPORT_TICKETS})"
+            )
+
+        slug = (body.name or "").strip() or importer.DEFAULT_BOARD_NAME
+        ordered = sorted(body.tickets, key=lambda t: importer.sort_key(
+            t.get("id") if isinstance(t, dict) else None
+        ))
+        prepared = []
+        skipped = 0
+        for raw in ordered:
+            local_id = raw.get("id") if isinstance(raw, dict) else None
+            normalized = importer.normalize_ticket(raw, slug, local_id)
+            if normalized is None:
+                skipped += 1
+                continue
+            prepared.append(normalized)
+
+        # Nothing usable: don't leave an empty board behind as a side effect.
+        if not prepared:
+            raise HTTPException(400, "no tickets to import")
+
+        existing = db.scalars(
+            select(Board.name).where(Board.cluster_id == cluster_id)
+        ).all()
+        board = Board(
+            cluster_id=cluster_id,
+            name=importer.unique_board_name(list(existing), slug),
+        )
+        db.add(board)
+        db.flush()
+
+        tickets = []
+        for item in prepared:
+            ticket = Ticket(
+                board_id=board.id,
+                title=item["title"],
+                body=item["body"],
+                status=item["status"],
+                created_by=user.id,
+            )
+            db.add(ticket)
+            db.flush()
+            for c in item["comments"]:
+                db.add(
+                    Comment(
+                        ticket_id=ticket.id,
+                        writer=c["writer"],
+                        message=c["message"],
+                        created_at=c["created_at"],
+                    )
+                )
+            tickets.append(ticket)
+        db.commit()
+
+        # Imported "ready" tickets are handed to agents, same as moving a
+        # ticket to ready in the UI. Enqueued after the commit so a failure
+        # here cannot roll back the import itself.
+        queued = 0
+        for ticket in tickets:
+            if ticket.status == AGENT_READY_STATUS:
+                delegation.enqueue_ticket(db, ticket)
+                queued += 1
+
+        return {
+            "board_id": board.id,
+            "name": board.name,
+            "imported": len(tickets),
+            "skipped": skipped,
+            "queued": queued,
+        }
 
     @app.get("/api/boards/{board_id}/tickets")
     def list_tickets(
