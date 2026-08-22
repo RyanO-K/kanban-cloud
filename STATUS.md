@@ -1,6 +1,47 @@
 # STATUS — kanban-cloud MVP
 
-Last updated: 2026-08-19
+Last updated: 2026-08-22
+
+## Import a local `.kanban` board (2026-08-22)
+
+An owner-only **Import** button in the header pulls a board out of the local
+file-based `.kanban` tool: pick a folder or drop one on the board. Spec:
+`docs/superpowers/specs/2026-08-22-import-local-board-design.md`, plan:
+`docs/superpowers/plans/2026-08-22-import-local-board.md`. See README,
+"Importing a local `.kanban` board", for the user-facing rules.
+
+Shape of the work: the server is on Render and cannot read the operator's
+disk, so the browser reads the folder and posts it up. The browser does nothing
+but key-whitelisting; every semantic decision — status vocabulary, the body
+appendix, board naming, ordering — lives in `app/importer.py` as pure
+functions, because `app/static/index.html` has no JS test runner and
+`app/` has a pytest suite. Import always creates a new board and never merges,
+which removes sync/dedupe/conflict handling from the problem entirely.
+
+Tests: 73 → 116 (21 mapping, 17 endpoint, 5 markup).
+
+The browser half has no unit tests, so it was verified by extracting the
+import module out of the shipped `index.html` and running it under Node
+against all six live local boards, posting to a real dev server: folder
+detection, the `.kanban`-root refusal (names the six boards it found), the
+40-ticket read, the whitelist, name-clash suffixing, and comment timestamps
+surviving as their original June/July dates rather than import time. The
+mapper was also dry-run over all 125 real local tickets — 125 mapped, 0
+skipped, largest body 6 KB.
+
+Two things deliberately left as they are:
+
+- **Imported `ready` tickets dispatch to agents.** The operator chose this. It
+  is currently inert — all 125 live local tickets are `completed`, `done` or
+  `blocked`, none `ready`. Reversing it is one line in `importer.STATUS_MAP`.
+- **`dependsOn`/`blocks` arrive as prose**, not as a dependency graph. The
+  cloud has no such concept; see `docs/2026-08-22-local-vs-cloud-gap-analysis.md`.
+
+Note on history: commit `8248341`, whose message describes only the importer
+module, also contains an unrelated dark-mode/account-menu change to
+`index.html`. A concurrent session staged that file between this session's
+`git add` and `git commit`. The work is intact, only mis-attributed; history
+was left alone rather than rewritten under a live session.
 
 ## Public board polish (2026-08-19)
 

@@ -255,6 +255,49 @@ nothing, so cards you delete stay deleted. Seeded tickets never enter the work
 queue, so an enrolled worker cannot claim one even though two of them sit in
 `ready`.
 
+## Importing a local `.kanban` board
+
+The **Import** button in the header (owner-only) loads a board from the local
+file-based `.kanban` tool. Click it and pick a board folder, or drag the folder
+onto the board area. One board per import: pick `.kanban/boards/ai-kanban`, not
+`.kanban` itself — dropping the root tells you which boards it found instead of
+importing all of them.
+
+Import **always creates a new board**, named after the folder, suffixed `(2)`,
+`(3)` on a name clash. It never merges into or edits an existing board, so
+re-importing is safe and there is no sync, dedupe, or conflict resolution to
+reason about. There is no cloud-to-local export.
+
+The server runs on Render and cannot see your disk, so the browser does the
+reading and posts the tickets up. It sends nine keys per ticket — `title`,
+`detail`, `status`, `comments`, `dependsOn`, `blocks`, `steps`, `files`,
+`outputs` — and drops `history`, `commitGate`, `runLogFile`, `completedLog`,
+`claudeSessionId` and `claudeSessionDir` before anything leaves the machine.
+That is run exhaust from another computer, and it is most of the bulk: the six
+live local boards are 0.9–2.8 MB on disk but 33–204 KB on the wire.
+
+The two status vocabularies differ, so they are mapped (`app/importer.py`):
+
+| local | cloud |
+|---|---|
+| `todo`, `pending`, `blocked` | `todo` |
+| `ready` | `ready` |
+| `in_progress` | `doing` |
+| `completed` | `done` |
+| already-cloud names (`done`, `review`, `failed`, `doing`) | unchanged |
+| anything else | `todo` |
+
+`blocked` has no cloud equivalent. Nothing is silently lost: every imported
+ticket gets an appendix in its body recording the source board, the local
+ticket number and its original local status, followed by whichever of
+`dependsOn` / `blocks` / `steps` / `files` / `outputs` it had. Those arrive as
+prose, not as a dependency graph — the cloud schema has no such concept.
+
+Imported `ready` tickets **are queued for agents**, exactly as moving a ticket
+to `ready` in the UI is. The response reports how many (`queued`). In practice
+this is currently inert: all 125 tickets across the six live local boards are
+`completed`, `done` or `blocked`.
+
 Example nginx-ish proxy config:
 
 ```
