@@ -8,6 +8,7 @@ Windows — see test_never_uses_shell_true.
 import json
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -58,9 +59,35 @@ class _FakeStdout:
         pass
 
 
+class _CapturingStdin:
+    """A minimal writable fake that (unlike io.StringIO) keeps its buffered
+    text readable via getvalue() after close() — production code closes
+    stdin as part of a normal run, and tests need to inspect what was
+    written afterwards."""
+
+    def __init__(self):
+        self._buf = []
+        self.closed = False
+
+    def write(self, data):
+        if self.closed:
+            raise ValueError("I/O operation on closed file")
+        self._buf.append(data)
+
+    def flush(self):
+        pass
+
+    def close(self):
+        self.closed = True
+
+    def getvalue(self):
+        return "".join(self._buf)
+
+
 class FakeProc:
     def __init__(self, lines, returncode=0, crash_after=None, crash_exc=None):
         self.stdout = _FakeStdout(lines, crash_after, crash_exc)
+        self.stdin = _CapturingStdin()
         self.returncode = returncode
         self.killed = False
 
@@ -69,6 +96,27 @@ class FakeProc:
 
     def kill(self):
         self.killed = True
+
+
+class _GatedFakeStdout(_FakeStdout):
+    """Like _FakeStdout, but blocks before yielding its first line until
+    `gate` is set — gives a background thread (the chat pump) a guaranteed
+    chance to run before the read loop can finish and shut it down."""
+
+    def __init__(self, lines, gate):
+        super().__init__(lines)
+        self._gate = gate
+
+    def __next__(self):
+        if self._i == 0:
+            self._gate.wait(timeout=2)
+        return super().__next__()
+
+
+class GatedFakeProc(FakeProc):
+    def __init__(self, lines, gate, returncode=0):
+        super().__init__(lines, returncode=returncode)
+        self.stdout = _GatedFakeStdout(lines, gate)
 
 
 def fake_popen(proc, captured):
@@ -113,7 +161,10 @@ def test_executor_requests_stream_json(monkeypatch, tmp_path):
     cmd = captured["cmd"]
     assert "--output-format" in cmd
     assert cmd[cmd.index("--output-format") + 1] == "stream-json"
+    assert "--input-format" in cmd
+    assert cmd[cmd.index("--input-format") + 1] == "stream-json"
     assert captured["kwargs"]["stdout"] == subprocess.PIPE
+    assert captured["kwargs"]["stdin"] == subprocess.PIPE
     assert "timeout" not in captured["kwargs"]  # no more all-or-nothing timeout
 
 
@@ -299,3 +350,111 @@ def test_progress_callback_error_does_not_abort_the_run(monkeypatch, tmp_path):
         TICKET, board=BOARD, directory=str(tmp_path), session_id="s",
         progress_cb=flaky)
     assert ok and out == "a\ndone"
+
+
+# ---------- agent chat: pumping queued messages onto the CLI's live stdin ----------
+
+def test_stdin_closed_immediately_when_no_chat_wiring(monkeypatch, tmp_path):
+    """No chat_source means nothing will ever write to stdin — it should be
+    closed up front rather than left open for the run's whole duration."""
+    captured = {}
+    proc = FakeProc([result_line("done")])
+    monkeypatch.setattr(subprocess, "Popen", fake_popen(proc, captured))
+    worker.ClaudeExecutor().run(TICKET, board=BOARD,
+                                directory=str(tmp_path), session_id="s")
+    assert proc.stdin.closed
+
+
+def test_messages_queued_before_the_agent_starts_reach_stdin_in_order(monkeypatch, tmp_path):
+    """Messages already sitting in `chat_source` the moment the process comes
+    up (i.e. typed before the agent started) must not be lost, and must
+    arrive on stdin in the order they were queued."""
+    captured = {}
+    gate = threading.Event()
+    proc = GatedFakeProc([result_line("done")], gate)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen(proc, captured))
+
+    delivered = []
+    calls = {"n": 0}
+
+    def chat_source():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            gate.set()  # let stdout proceed only once the first poll has run
+            return [(1, "first"), (2, "second")]
+        return []
+
+    ok, out = worker.ClaudeExecutor(chat_poll_seconds=0).run(
+        TICKET, board=BOARD, directory=str(tmp_path), session_id="s",
+        chat_source=chat_source, chat_delivered=delivered.extend)
+
+    assert ok
+    written = [json.loads(line)["message"]["content"][0]["text"]
+               for line in proc.stdin.getvalue().splitlines()]
+    assert written == ["first", "second"]
+    assert delivered == [1, 2]
+    assert proc.stdin.closed
+
+
+def test_message_typed_mid_run_reaches_stdin_after_an_earlier_one(monkeypatch, tmp_path):
+    """A message that only becomes available on a later poll (i.e. typed
+    while the agent is already running) must still reach stdin, after
+    whatever was already sent."""
+    captured = {}
+    gate = threading.Event()
+    proc = GatedFakeProc([result_line("done")], gate)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen(proc, captured))
+
+    delivered = []
+    calls = {"n": 0}
+
+    def chat_source():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return [(1, "already queued")]
+        if calls["n"] == 2:
+            gate.set()
+            return [(2, "typed while running")]
+        return []
+
+    ok, out = worker.ClaudeExecutor(chat_poll_seconds=0).run(
+        TICKET, board=BOARD, directory=str(tmp_path), session_id="s",
+        chat_source=chat_source, chat_delivered=delivered.extend)
+
+    assert ok
+    written = [json.loads(line)["message"]["content"][0]["text"]
+               for line in proc.stdin.getvalue().splitlines()]
+    assert written == ["already queued", "typed while running"]
+    assert delivered == [1, 2]
+
+
+def test_chat_pump_closes_stdin_even_when_the_process_crashes(monkeypatch, tmp_path):
+    """The pump thread must be stopped and stdin closed on every exit path,
+    including a crashed/broken subprocess pipe."""
+    captured = {}
+    lines = [text_line("step one"), text_line("step two")]
+    proc = FakeProc(lines, returncode=-9, crash_after=2, crash_exc=OSError("pipe broke"))
+    monkeypatch.setattr(subprocess, "Popen", fake_popen(proc, captured))
+
+    ok, _ = worker.ClaudeExecutor(chat_poll_seconds=0).run(
+        TICKET, board=BOARD, directory=str(tmp_path), session_id="s",
+        chat_source=lambda: [], chat_delivered=None)
+
+    assert ok is False
+    assert proc.stdin.closed
+
+
+def test_chat_source_error_does_not_abort_the_run(monkeypatch, tmp_path):
+    """A DB hiccup while polling for chat messages must not take down an
+    otherwise-healthy agent run, mirroring progress_cb's own error handling."""
+    captured = {}
+    proc = FakeProc([result_line("done")])
+    monkeypatch.setattr(subprocess, "Popen", fake_popen(proc, captured))
+
+    def flaky():
+        raise RuntimeError("db is down")
+
+    ok, out = worker.ClaudeExecutor(chat_poll_seconds=0).run(
+        TICKET, board=BOARD, directory=str(tmp_path), session_id="s",
+        chat_source=flaky, chat_delivered=None)
+    assert ok and out == "done"

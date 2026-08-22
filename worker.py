@@ -109,7 +109,8 @@ class StubExecutor:
 
     name = "stub"
 
-    def run(self, ticket, board=None, directory=None, session_id=None, progress_cb=None):
+    def run(self, ticket, board=None, directory=None, session_id=None, progress_cb=None,
+            chat_source=None, chat_delivered=None):
         print(f"  [stub] pretending to work on ticket #{ticket['id']}: {ticket['title']}")
         time.sleep(2)
         return True, (
@@ -158,6 +159,84 @@ def _render_stream_lines(raw_lines) -> str:
     return "\n".join(rendered).strip()
 
 
+# ---------- agent chat: pump queued messages onto the CLI's live stdin ----------
+#
+# `--input-format stream-json` keeps the CLI's stdin open for additional user
+# turns for as long as the process is alive. `chat_encode`/`chat_pump`/
+# `chat_close` mirror the local orchestrator's `_chat_pump` helpers: encode a
+# typed message as one stream-json user-turn line, write pending ones in
+# order, and close stdin without letting an already-dead process's broken
+# pipe surface as an error. They operate on a bare writable object rather
+# than a Popen, so they're exercised directly with no subprocess involved.
+
+def chat_encode(message: str) -> str:
+    """One stream-json user-turn line for `message` (no trailing newline)."""
+    return json.dumps({
+        "type": "user",
+        "message": {"role": "user", "content": [{"type": "text", "text": message}]},
+    })
+
+
+def chat_pump(stdin, pending) -> list:
+    """Write each `(id, message)` in `pending` to `stdin`, in order, as one
+    stream-json line. Returns the ids actually written.
+
+    Stops at the first failed write instead of raising: a closed/broken pipe
+    means the process is already gone, and every message after it would fail
+    the same way. An id left off the returned list stays unmarked as
+    delivered by the caller, so the message survives (in `ticket_chat`,
+    unlike the local tool's JSONL file) for a later run.
+    """
+    sent = []
+    for chat_id, message in pending:
+        try:
+            stdin.write(chat_encode(message) + "\n")
+            stdin.flush()
+        except (BrokenPipeError, ValueError, OSError):
+            break
+        sent.append(chat_id)
+    return sent
+
+
+def chat_close(stdin) -> None:
+    """Close the CLI's stdin. The common case is the process having already
+    exited, which must not raise back into the caller."""
+    try:
+        stdin.close()
+    except (BrokenPipeError, ValueError, OSError):
+        pass
+
+
+def _chat_pump_loop(stdin, chat_source, chat_delivered, stop_pump, poll_interval) -> None:
+    """Runs on its own thread for the lifetime of one CLI process: polls
+    `chat_source()` for newly queued messages and writes them to `stdin` in
+    order via `chat_pump`, acknowledging each batch through `chat_delivered`.
+    The first poll happens immediately, before any wait, so messages already
+    queued when the process starts are not lost. Always closes `stdin` on
+    the way out, however the loop ends, so the CLI sees a clean EOF instead
+    of an abandoned pipe.
+    """
+    try:
+        while not stop_pump.is_set():
+            try:
+                pending = list(chat_source() or [])
+            except Exception as exc:
+                print(f"  [claude] chat source failed: {exc!r}")
+                pending = []
+            if pending:
+                sent = chat_pump(stdin, pending)
+                if sent and chat_delivered:
+                    try:
+                        chat_delivered(sent)
+                    except Exception as exc:
+                        print(f"  [claude] chat delivery ack failed: {exc!r}")
+                if len(sent) < len(pending):
+                    break  # stdin is gone; nothing left to do
+            stop_pump.wait(poll_interval)
+    finally:
+        chat_close(stdin)
+
+
 class ClaudeExecutor:
     """Real executor: runs the Claude CLI inside the board's checkout.
 
@@ -168,14 +247,18 @@ class ClaudeExecutor:
 
     name = "claude"
 
-    def __init__(self, allowed_tools: str = DEFAULT_ALLOWED_TOOLS, progress_batch: int = 4):
+    def __init__(self, allowed_tools: str = DEFAULT_ALLOWED_TOOLS, progress_batch: int = 4,
+                chat_poll_seconds: float = 0.5):
         self.allowed_tools = allowed_tools
         # How many stream-json turns to buffer before flushing a progress_cb
         # call — batches a chatty run into a handful of comments instead of
         # one per line.
         self.progress_batch = max(1, progress_batch)
+        # How often the chat pump thread checks for newly queued messages.
+        self.chat_poll_seconds = chat_poll_seconds
 
-    def run(self, ticket, board=None, directory=None, session_id=None, progress_cb=None):
+    def run(self, ticket, board=None, directory=None, session_id=None, progress_cb=None,
+            chat_source=None, chat_delivered=None):
         board = board or {}
         name = board.get("name", "?")
         if not directory:
@@ -200,6 +283,7 @@ class ClaudeExecutor:
 
         prompt = build_agent_prompt(ticket, board, directory)
         cmd = [exe, "-p", prompt, "--allowedTools", self.allowed_tools,
+               "--input-format", "stream-json",
                "--output-format", "stream-json", "--verbose"]
         if session_id:
             cmd += ["--session-id", session_id]
@@ -218,11 +302,30 @@ class ClaudeExecutor:
             # what makes streaming possible at all. As a side effect it also
             # removes the old 30-minute all-or-nothing timeout: whatever the
             # agent produced before a stall or crash is already visible
-            # instead of being discarded along with the rest.
-            proc = subprocess.Popen(cmd, cwd=directory, stdout=subprocess.PIPE,
+            # instead of being discarded along with the rest. stdin is a pipe
+            # too — --input-format stream-json accepts further user turns on
+            # it for as long as the process is alive, which is what lets chat
+            # messages reach a running agent at all.
+            proc = subprocess.Popen(cmd, cwd=directory, stdin=subprocess.PIPE,
+                                    stdout=subprocess.PIPE,
                                     stderr=subprocess.STDOUT, text=True, bufsize=1)
         except FileNotFoundError:
             return False, "`claude` CLI not found on this PC's PATH."
+
+        stop_pump = threading.Event()
+        pump_thread = None
+        if chat_source is not None:
+            pump_thread = threading.Thread(
+                target=_chat_pump_loop,
+                args=(proc.stdin, chat_source, chat_delivered, stop_pump,
+                      self.chat_poll_seconds),
+                daemon=True,
+            )
+            pump_thread.start()
+        else:
+            # Nothing will ever write here — close it up front so the CLI
+            # sees EOF instead of a pipe held open for no reason.
+            chat_close(proc.stdin)
 
         seen_lines = []
         pending = []
@@ -251,6 +354,9 @@ class ClaudeExecutor:
                 proc.stdout.close()
             except Exception:
                 pass
+            stop_pump.set()
+            if pump_thread is not None:
+                pump_thread.join(timeout=5)
 
         emit("\n".join(pending))
         returncode = proc.wait()
@@ -681,6 +787,28 @@ def add_progress(conn, worker_id: int, worker_name: str, ticket_id: int, message
         )
 
 
+def fetch_pending_chat(conn, ticket_id: int) -> list:
+    """Undelivered `ticket_chat` rows for this ticket, oldest first — what a
+    chat pump run picks up on its next poll."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, message FROM ticket_chat "
+            "WHERE ticket_id=%s AND delivered_at IS NULL ORDER BY id",
+            (ticket_id,),
+        )
+        return cur.fetchall()
+
+
+def mark_chat_delivered(conn, chat_ids: list) -> None:
+    if not chat_ids:
+        return
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            f"UPDATE ticket_chat SET delivered_at={UTC_NOW} WHERE id = ANY(%s::int[])",
+            (list(chat_ids),),
+        )
+
+
 def finish_work(conn, worker_id: int, worker_name: str, item_id: int,
                 ticket_id: int, ok: bool, comment: str | None) -> str:
     """Record the result. Mirrors v1 delegation.finish_work: success ->
@@ -808,13 +936,38 @@ def run_slot(cfg, args, executor, stop_event, slot_no: int) -> None:
                     except Exception as exc:
                         print(f"[slot {slot_no}] progress post failed: {exc!r}")
 
+                # The chat pump runs on its own thread inside executor.run()
+                # for the run's whole duration, so it gets a connection of
+                # its own rather than sharing `conn` (which the main thread
+                # reads/writes concurrently via progress_cb and, after the
+                # run, finish_work). A connection failure here just disables
+                # chat for this run instead of failing the ticket.
+                try:
+                    chat_conn = psycopg.connect(cfg["dsn"], connect_timeout=15)
+                except Exception as exc:
+                    # Any failure here just disables chat for this run rather
+                    # than failing the ticket (and, since _RUNNING["n"] was
+                    # already incremented above, must not escape uncaught —
+                    # that would leak the counter past the try/finally below
+                    # that decrements it).
+                    print(f"[slot {slot_no}] chat pump connection failed: {exc!r}")
+                    chat_conn = None
+
+                def chat_source(_conn=chat_conn, _ticket_id=ticket["id"]):
+                    return fetch_pending_chat(_conn, _ticket_id) if _conn is not None else []
+
+                def chat_delivered(chat_ids, _conn=chat_conn):
+                    if _conn is not None:
+                        mark_chat_delivered(_conn, chat_ids)
+
                 try:
                     if isinstance(executor, StubExecutor):
                         ok, comment = executor.run(
                             ticket, board=work.get("board"),
                             directory=paths.get(str(ticket["board_id"])),
                             session_id=work.get("session_id"),
-                            progress_cb=progress_cb)
+                            progress_cb=progress_cb,
+                            chat_source=chat_source, chat_delivered=chat_delivered)
                     else:
                         directory, resolve_error = resolve_directory(
                             work.get("board") or {}, cfg)
@@ -825,12 +978,15 @@ def run_slot(cfg, args, executor, stop_event, slot_no: int) -> None:
                                 ticket, board=work.get("board"),
                                 directory=directory,
                                 session_id=work.get("session_id"),
-                                progress_cb=progress_cb)
+                                progress_cb=progress_cb,
+                                chat_source=chat_source, chat_delivered=chat_delivered)
                 except Exception as exc:
                     ok, comment = False, f"Executor error: {exc!r}"
                 finally:
                     with _SLOT_LOCK:
                         _RUNNING["n"] -= 1
+                    if chat_conn is not None and not chat_conn.closed:
+                        chat_conn.close()
                 status = finish_work(conn, cfg["worker_id"], cfg["name"],
                                      work["assignment_id"], ticket["id"], ok, comment)
                 print(f"[slot {slot_no}] #{ticket['id']} -> {status}")
