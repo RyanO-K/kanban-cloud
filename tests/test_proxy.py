@@ -82,7 +82,7 @@ def test_owner_header_provisions_user_with_full_rights(pclient):
     boards = pclient.get(f"/api/clusters/{clusters[0]['id']}/boards", headers=OWNER).json()
     assert [b["name"] for b in boards] == ["Main"]
 
-    # Full rights: tickets, comments, settings, workers listing.
+    # Full rights: tickets, comments, workers listing.
     t = pclient.post(
         f"/api/boards/{boards[0]['id']}/tickets", json={"title": "hi"}, headers=OWNER
     )
@@ -90,11 +90,6 @@ def test_owner_header_provisions_user_with_full_rights(pclient):
     tid = t.json()["id"]
     assert pclient.patch(f"/api/tickets/{tid}", json={"status": "doing"}, headers=OWNER).status_code == 200
     assert pclient.post(f"/api/tickets/{tid}/comments", json={"message": "note"}, headers=OWNER).status_code == 200
-    assert pclient.put(
-        f"/api/clusters/{clusters[0]['id']}/settings",
-        json={"claude_api_key": "sk-ant-test-0000000000"},
-        headers=OWNER,
-    ).status_code == 200
     assert pclient.get(f"/api/clusters/{clusters[0]['id']}/workers", headers=OWNER).status_code == 200
 
     # Same login -> same user, no duplicate provisioning; bearer not required.
@@ -156,11 +151,9 @@ def test_spectator_can_read_board_live(pclient):
 
 
 def test_spectator_sensitive_gets_403(pclient):
-    seed = owner_seed(pclient)
-    cid = seed["cluster"]["id"]
-    # Cluster list leaks join codes; settings leaks key state; /api/me is not needed.
+    owner_seed(pclient)
+    # Cluster list leaks join codes; /api/me is not needed.
     assert pclient.get("/api/clusters", headers=SPECTATOR).status_code == 403
-    assert pclient.get(f"/api/clusters/{cid}/settings", headers=SPECTATOR).status_code == 403
     assert pclient.get("/api/me", headers=SPECTATOR).status_code == 403
 
 
@@ -177,7 +170,6 @@ def test_spectator_every_mutation_403(pclient):
         ("POST", "/api/clusters", {"name": "evil"}),
         ("POST", "/api/clusters/join", {"join_code": "AAAA1111"}),
         ("POST", f"/api/clusters/{cid}/boards", {"name": "evil"}),
-        ("PUT", f"/api/clusters/{cid}/settings", {"claude_api_key": "sk-steal"}),
         ("POST", f"/api/boards/{bid}/tickets", {"title": "evil"}),
         ("PATCH", f"/api/tickets/{tid}", {"status": "done"}),
         ("POST", f"/api/tickets/{tid}/run", None),

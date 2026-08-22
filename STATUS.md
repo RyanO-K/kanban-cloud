@@ -2,6 +2,29 @@
 
 Last updated: 2026-08-22
 
+## Workers authenticate with local Claude Code config, not a cloud key (2026-08-22)
+
+The cluster no longer stores or forwards a Claude API key. `ClaudeExecutor`
+now shells out to `claude -p ...` inheriting the worker process's own
+environment, so it authenticates however that PC already does (a `claude
+login` session, or the operator's own `ANTHROPIC_API_KEY`). This removes the
+`cluster_settings` table, the Settings panel, the `GET/PUT
+/api/clusters/{id}/settings` endpoints, and `cluster_settings` from the
+`kanban_worker` group's SELECT grant — closing the "any enrolled worker can
+read the key via SQL" caveat entirely, since there is no longer a key to
+read. `app/db.py:run_migrations` drops a pre-existing `cluster_settings`
+table (verified idempotent against a scratch SQLite DB with the old table
+present) so already-deployed DBs pick this up on next startup.
+
+Operator note: each worker PC must run `claude login` (or otherwise have
+`claude` CLI auth configured) before real ticket execution works — this is
+no longer provisioned centrally.
+
+Tests: 117 passed (removed the API-key-masking and settings-endpoint tests
+that no longer apply; `test_cluster_scoping_blocks_outsiders` and the
+proxy-mode owner/spectator tests now exercise the `/workers` endpoint in the
+settings tests' place).
+
 ## Import a local `.kanban` board (2026-08-22)
 
 An owner-only **Import** button in the header pulls a board out of the local

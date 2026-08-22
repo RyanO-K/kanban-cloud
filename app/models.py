@@ -84,15 +84,6 @@ class ClusterMember(Base):
     joined_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow)
 
 
-class ClusterSettings(Base):
-    __tablename__ = "cluster_settings"
-    cluster_id: Mapped[int] = mapped_column(ForeignKey("clusters.id"), primary_key=True)
-    # Stored server-side; NEVER returned to browsers after save (masked).
-    # Delivered only to the worker that claims a work item.
-    claude_api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
-    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
-
-
 class Board(Base):
     __tablename__ = "boards"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

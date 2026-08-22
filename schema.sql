@@ -32,14 +32,6 @@ CREATE TABLE IF NOT EXISTS cluster_members (
     UNIQUE (cluster_id, user_id)
 );
 
--- claude_api_key: stored server-side; masked in every browser-facing response;
--- delivered in full only to the worker that claims a work item.
-CREATE TABLE IF NOT EXISTS cluster_settings (
-    cluster_id     INTEGER PRIMARY KEY REFERENCES clusters(id),
-    claude_api_key TEXT,
-    updated_at     TIMESTAMP NOT NULL DEFAULT now()
-);
-
 CREATE TABLE IF NOT EXISTS boards (
     id         SERIAL PRIMARY KEY,
     cluster_id INTEGER NOT NULL REFERENCES clusters(id),

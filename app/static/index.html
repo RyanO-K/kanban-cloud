@@ -123,16 +123,6 @@
         <p class="muted owner-only" style="margin-bottom:0">Join code: <b id="joinCode">–</b><br>
         Start a PC: <code style="font-size:11px">py worker.py --enroll --server &lt;url&gt; --join-code &lt;code&gt;</code></p>
       </div>
-      <div class="panel owner-only">
-        <h3>Settings</h3>
-        <label class="muted">Cluster Claude API key</label>
-        <input id="apiKeyInput" type="password" placeholder="sk-ant-..." style="width:100%; margin:4px 0">
-        <div class="row" style="margin-top:6px">
-          <button class="small" onclick="saveApiKey()">Save key</button>
-          <span class="muted" id="apiKeyState"></span>
-        </div>
-        <p class="muted">Stored server-side; readable by this cluster's enrolled worker PCs. It is never shown here again.</p>
-      </div>
       <div class="panel">
         <h3>Recent delegations</h3>
         <div id="queuePanel" class="muted" style="font-size:12px">–</div>
@@ -308,7 +298,6 @@ async function refreshClusterBits() {
   currentBoard = boards.find(b => b.id === sessionBoardId) || boards[0] || null;
   if (currentBoard) bs.value = currentBoard.id;
   const jobs = [loadBoard(), loadWorkers(), loadQueue()];
-  if (sessionMode !== "spectator") jobs.push(loadSettings());  // settings GET is 403 for spectators
   await Promise.all(jobs);
 }
 
@@ -606,18 +595,6 @@ async function revokeWorker(id) {
   if (!confirm("Revoke this PC's database access? It stops working immediately; re-enrolling restores it.")) return;
   await api("POST", `./api/workers/${id}/revoke`);
   await loadWorkers();
-}
-async function loadSettings() {
-  const s = await api("GET", `./api/clusters/${currentCluster.id}/settings`);
-  document.getElementById("apiKeyState").textContent =
-    s.has_key ? "Saved: " + s.claude_api_key_masked : "No key set";
-}
-async function saveApiKey() {
-  const v = document.getElementById("apiKeyInput").value.trim();
-  if (!v) return;
-  await api("PUT", `./api/clusters/${currentCluster.id}/settings`, {claude_api_key: v});
-  document.getElementById("apiKeyInput").value = "";
-  toast("API key saved"); loadSettings();
 }
 async function loadQueue() {
   const q = await api("GET", `./api/clusters/${currentCluster.id}/queue`);

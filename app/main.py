@@ -19,7 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from . import delegation, enrollment, importer
-from .auth import hash_password, mask_secret, verify_password
+from .auth import hash_password, verify_password
 from .db import make_engine, make_session_factory, run_migrations
 from .models import (
     AGENT_READY_STATUS,
@@ -29,7 +29,6 @@ from .models import (
     Board,
     Cluster,
     ClusterMember,
-    ClusterSettings,
     Comment,
     Ticket,
     User,
@@ -49,8 +48,8 @@ WORKER_EXEMPT_RE = re.compile(r"^/api/workers/enroll$")
 
 # The only paths a SPECTATOR (read-only, unauthenticated-through-proxy visitor)
 # may GET. Default-deny: everything else is 403. Deliberately excluded:
-# /api/clusters (leaks join codes) and /api/clusters/{id}/settings (API-key
-# state) — spectators get the default cluster id from /api/session instead.
+# /api/clusters (leaks join codes) — spectators get the default cluster id
+# from /api/session instead.
 SPECTATOR_ALLOWED_RE = re.compile(
     r"^(?:/"
     r"|/api/health"
@@ -82,10 +81,6 @@ class ClusterBody(BaseModel):
 
 class JoinBody(BaseModel):
     join_code: str
-
-
-class SettingsBody(BaseModel):
-    claude_api_key: str
 
 
 class BoardBody(BaseModel):
@@ -430,35 +425,6 @@ def create_app(
             .order_by(Cluster.id)
         ).scalars().all()
         return [{"id": c.id, "name": c.name, "join_code": c.join_code} for c in rows]
-
-    @app.get("/api/clusters/{cluster_id}/settings")
-    def get_settings(
-        cluster_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)
-    ):
-        require_member(db, user, cluster_id)
-        settings = db.get(ClusterSettings, cluster_id)
-        # Masked: the raw key is never returned to browsers after save.
-        return {
-            "cluster_id": cluster_id,
-            "claude_api_key_masked": mask_secret(settings.claude_api_key if settings else None),
-            "has_key": bool(settings and settings.claude_api_key),
-        }
-
-    @app.put("/api/clusters/{cluster_id}/settings")
-    def put_settings(
-        cluster_id: int,
-        body: SettingsBody,
-        user: User = Depends(current_user),
-        db: Session = Depends(get_db),
-    ):
-        require_member(db, user, cluster_id)
-        settings = db.get(ClusterSettings, cluster_id)
-        if settings is None:
-            settings = ClusterSettings(cluster_id=cluster_id)
-            db.add(settings)
-        settings.claude_api_key = body.claude_api_key.strip()
-        db.commit()
-        return {"ok": True, "claude_api_key_masked": mask_secret(settings.claude_api_key)}
 
     @app.get("/api/clusters/{cluster_id}/workers")
     def cluster_workers(

@@ -25,13 +25,3 @@ def verify_password(password: str, stored: str) -> bool:
         return hmac.compare_digest(candidate, digest)
     except (ValueError, AttributeError):
         return False
-
-
-def mask_secret(value: str | None) -> str | None:
-    """Show only the last 4 chars of a stored secret (nothing at all for
-    short values, which a 4-char suffix would effectively reveal)."""
-    if not value:
-        return None
-    if len(value) <= 8:
-        return "•" * 8
-    return "•" * 8 + value[-4:]

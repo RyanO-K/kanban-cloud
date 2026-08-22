@@ -8,7 +8,8 @@ Client PCs (packaged exe): download kanban-worker.exe from the latest
 worker-v* GitHub Release, put it in its own folder, and run it — on first
 run it asks for the cluster join code, then starts polling. Real ticket
 execution shells out to the `claude` CLI, which must be installed
-separately.
+separately and already authenticated on this PC (`claude login`, or your
+own ANTHROPIC_API_KEY) — the cluster does not store or forward a key.
 
 Dev / script setup (once per PC):
     pip install "psycopg[binary]"
@@ -86,7 +87,7 @@ class StubExecutor:
 
     name = "stub"
 
-    def run(self, ticket: dict, api_key: str | None) -> tuple[bool, str]:
+    def run(self, ticket: dict) -> tuple[bool, str]:
         print(f"  [stub] pretending to work on ticket #{ticket['id']}: {ticket['title']}")
         time.sleep(2)
         return True, (
@@ -97,26 +98,24 @@ class StubExecutor:
 
 
 class ClaudeExecutor:
-    """Real executor: shells out to the Claude CLI with the cluster's API key."""
+    """Real executor: shells out to the Claude CLI, which authenticates using
+    whatever local configuration already exists on this PC (a `claude login`
+    session, or the operator's own ANTHROPIC_API_KEY) — the cluster no longer
+    stores or forwards a key."""
 
     name = "claude"
 
-    def run(self, ticket: dict, api_key: str | None) -> tuple[bool, str]:
-        if not api_key:
-            return False, "No Claude API key configured for this cluster (set it in Settings)."
+    def run(self, ticket: dict) -> tuple[bool, str]:
         prompt = (
             f"You are working a kanban ticket.\n"
             f"Title: {ticket['title']}\n\n"
             f"Details:\n{ticket.get('body') or '(no details)'}\n\n"
             f"Do the work described, then reply with a concise summary of what you did."
         )
-        env = dict(os.environ)
-        env["ANTHROPIC_API_KEY"] = api_key
         print(f"  [claude] running `claude -p ...` for ticket #{ticket['id']}")
         try:
             proc = subprocess.run(
                 ["claude", "-p", prompt],
-                env=env,
                 capture_output=True,
                 text=True,
                 timeout=1800,
@@ -224,7 +223,7 @@ def heartbeat(conn, worker_id: int) -> None:
 
 def claim_next(conn, worker_id: int, cluster_id: int) -> dict | None:
     """Claim the oldest eligible queued item; returns the v1 poll payload
-    shape or None. One transaction: claim + ticket flip + key read."""
+    shape or None. One transaction: claim + ticket flip."""
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(CLAIM_SQL, {"wid": worker_id, "cid": cluster_id})
         row = cur.fetchone()
@@ -246,14 +245,8 @@ def claim_next(conn, worker_id: int, cluster_id: int) -> dict | None:
             f"UPDATE workers SET status='working', last_seen={UTC_NOW} WHERE id=%s",
             (worker_id,),
         )
-        cur.execute(
-            "SELECT claude_api_key FROM cluster_settings WHERE cluster_id=%s",
-            (cluster_id,),
-        )
-        key_row = cur.fetchone()
         return {
             "assignment_id": item_id,
-            "claude_api_key": key_row[0] if key_row else None,
             "ticket": {
                 "id": ticket_id, "board_id": board_id, "title": title,
                 "body": body, "status": "doing", "attempts": attempts,
@@ -410,7 +403,7 @@ def main() -> int:
                 print(f"Claimed ticket #{ticket['id']} '{ticket['title']}' "
                       f"(assignment {item_id})")
                 try:
-                    ok, comment = executor.run(ticket, work.get("claude_api_key"))
+                    ok, comment = executor.run(ticket)
                 except Exception as exc:
                     ok, comment = False, f"Executor error: {exc!r}"
                 status = finish_work(conn, cfg["worker_id"], cfg["name"],

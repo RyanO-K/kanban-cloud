@@ -48,9 +48,6 @@ def main() -> int:
                             headers=headers).json()
         created["cluster_id"] = c["id"]
         board = client.get(f"/api/clusters/{c['id']}/boards", headers=headers).json()[0]
-        r = client.put(f"/api/clusters/{c['id']}/settings",
-                       json={"claude_api_key": "sk-smoke-fake"}, headers=headers)
-        assert r.status_code == 200, r.text
         t = client.post(f"/api/boards/{board['id']}/tickets",
                         json={"title": "smoke v2 ticket", "status": "ready"},
                         headers=headers).json()
@@ -74,7 +71,6 @@ def main() -> int:
         wins = [r for r in results if r]
         assert len(wins) == 1, f"expected exactly 1 winner, got {len(wins)}"
         work = wins[0]
-        assert work["claude_api_key"] == "sk-smoke-fake"
         print(f"claim race: 1/{RACE_N} winner (assignment {work['assignment_id']})")
 
         # -- progress comment via direct SQL --
@@ -152,10 +148,6 @@ def main() -> int:
                         cur.execute("DELETE FROM workers WHERE cluster_id=%s", (cid,))
                     except Exception as e:
                         print(f"cleanup: delete workers failed: {e}")
-                    try:
-                        cur.execute("DELETE FROM cluster_settings WHERE cluster_id=%s", (cid,))
-                    except Exception as e:
-                        print(f"cleanup: delete cluster_settings failed: {e}")
                     try:
                         cur.execute("DELETE FROM cluster_members WHERE cluster_id=%s", (cid,))
                     except Exception as e:

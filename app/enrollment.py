@@ -21,7 +21,7 @@ PASSWORD_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 # INSERT on work_queue is required by the failure-requeue path (worker inserts
 # the retry row itself). No DELETE anywhere; users/auth_tokens untouched.
 GROUP_GRANTS = [
-    f"GRANT SELECT ON tickets, boards, clusters, cluster_settings, workers, "
+    f"GRANT SELECT ON tickets, boards, clusters, workers, "
     f"work_queue, comments TO {GROUP_ROLE}",
     f"GRANT INSERT ON comments, work_queue TO {GROUP_ROLE}",
     f"GRANT UPDATE ON work_queue, tickets, workers TO {GROUP_ROLE}",
