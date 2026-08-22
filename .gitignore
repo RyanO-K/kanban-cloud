@@ -7,3 +7,4 @@ kanban_cloud.db
 .pytest_cache/
 .env
 .worktrees/
+.claude/
