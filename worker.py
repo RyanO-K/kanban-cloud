@@ -53,6 +53,9 @@ UTC_NOW = "(now() at time zone 'utc')"
 
 # Atomic, race-safe claim: SKIP LOCKED means concurrent workers never block
 # or double-claim; the subquery orders by queue age and honors target_worker.
+# The board filter keeps a PC from claiming work it cannot do: a ticket whose
+# board has no folder configured here would otherwise be claimed and then fail.
+# A NULL %(boards)s disables it, which is how --stub (no repo needed) opts out.
 CLAIM_SQL = f"""
 UPDATE work_queue SET status='claimed', claimed_by=%(wid)s, claimed_at={UTC_NOW}
 WHERE id = (
@@ -60,6 +63,7 @@ WHERE id = (
   JOIN tickets t ON t.id = wq.ticket_id
   WHERE wq.status='queued' AND wq.cluster_id=%(cid)s
     AND (t.target_worker IS NULL OR t.target_worker = %(wid)s)
+    AND (%(boards)s::int[] IS NULL OR t.board_id = ANY(%(boards)s::int[]))
   ORDER BY wq.queued_at, wq.id
   FOR UPDATE OF wq SKIP LOCKED
   LIMIT 1
@@ -139,6 +143,112 @@ def save_config(cfg: dict) -> None:
     print(f"Saved worker config to {CONFIG_PATH}")
 
 
+# ---------- per-PC board paths ----------
+#
+# Which folder a board's code lives in is this machine's business: the same
+# board is worked by several PCs with different layouts, so the mapping lives
+# here rather than in the database.
+
+def board_paths(cfg: dict) -> dict:
+    """{board_id_as_str: absolute path} for the boards this PC can work."""
+    return cfg.get("boards") or {}
+
+
+def configured_board_ids(cfg: dict) -> list:
+    """Board ids this PC has a checkout for, as ints for the claim query."""
+    out = []
+    for key in board_paths(cfg):
+        try:
+            out.append(int(key))
+        except (TypeError, ValueError):
+            continue  # a hand-edited config should not stop the worker
+    return out
+
+
+def list_cluster_boards(conn, cluster_id: int) -> list:
+    with conn.cursor() as cur:
+        cur.execute("SELECT id, name FROM boards WHERE cluster_id=%s ORDER BY id",
+                    (cluster_id,))
+        return [{"id": r[0], "name": r[1]} for r in cur.fetchall()]
+
+
+def resolve_board(conn, cluster_id: int, token: str):
+    """Map a board id or name to (id, name). Names are case-insensitive.
+
+    A name that matches no board, or more than one, is rejected rather than
+    guessed — picking one silently would point an agent at the wrong repo.
+    """
+    rows = [(b["id"], b["name"]) for b in list_cluster_boards(conn, cluster_id)]
+    token = (token or "").strip()
+    if token.isdigit():
+        for bid, name in rows:
+            if bid == int(token):
+                return bid, name
+        raise ValueError(f"no board with id {token} in this cluster")
+    matches = [r for r in rows if r[1].lower() == token.lower()]
+    if len(matches) > 1:
+        raise ValueError(f"'{token}' matches {len(matches)} boards; use the id instead")
+    if not matches:
+        known = ", ".join(f"{b}:{n}" for b, n in rows) or "(none)"
+        raise ValueError(f"no board named '{token}'. Known boards: {known}")
+    return matches[0]
+
+
+def parse_set_path(arg: str):
+    """Split a --set-path value into (board token, path) on the FIRST '='.
+
+    Splitting on the first one keeps Windows paths containing '=' intact.
+    """
+    if "=" not in (arg or ""):
+        raise ValueError("--set-path needs <board-id-or-name>=<path>")
+    token, path = arg.split("=", 1)
+    if not token.strip() or not path.strip():
+        raise ValueError("--set-path needs <board-id-or-name>=<path>")
+    return token.strip(), path.strip()
+
+
+def apply_set_path(conn, cfg: dict, arg: str) -> dict:
+    """Validate and record one board->path mapping; saves and returns cfg."""
+    token, path = parse_set_path(arg)
+    board_id, name = resolve_board(conn, cfg["cluster_id"], token)
+    resolved = Path(path).expanduser()
+    if not resolved.is_dir():
+        raise ValueError(f"{resolved} does not exist (or is not a directory)")
+    cfg.setdefault("boards", {})[str(board_id)] = str(resolved)
+    save_config(cfg)
+    print(f"Board {board_id} ({name}) -> {resolved}")
+    return cfg
+
+
+def prompt_for_board_paths(conn, cfg: dict) -> dict:
+    """Walk the cluster's boards after enrollment, asking for a folder for each.
+
+    Blank input skips a board, which simply means this PC never claims its
+    tickets. Skipped entirely when stdin is not a terminal, so scripted and
+    service runs never hang waiting for input.
+    """
+    if not (sys.stdin is not None and sys.stdin.isatty()):
+        return cfg
+    boards = list_cluster_boards(conn, cfg["cluster_id"])
+    if not boards:
+        return cfg
+    print("\nWhich folder on this PC holds each board's code?")
+    print("Press Enter to skip a board (this PC then never claims its tickets).")
+    for b in boards:
+        try:
+            answer = input(f"  {b['name']}: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        if not answer:
+            continue
+        try:
+            apply_set_path(conn, cfg, f"{b['id']}={answer}")
+        except ValueError as e:
+            print(f"    skipped: {e}")
+    return cfg
+
+
 def enroll(server: str, join_code: str, name: str) -> dict:
     """One-time HTTP call; the server creates this PC's Postgres role and
     returns a ready-to-use DSN."""
@@ -211,11 +321,17 @@ def heartbeat(conn, worker_id: int) -> None:
         )
 
 
-def claim_next(conn, worker_id: int, cluster_id: int) -> dict | None:
-    """Claim the oldest eligible queued item; returns the v1 poll payload
-    shape or None. One transaction: claim + ticket flip + key read."""
+def claim_next(conn, worker_id: int, cluster_id: int, board_ids=None) -> dict | None:
+    """Claim the oldest eligible queued item; returns a work payload or None.
+
+    `board_ids` limits the claim to boards this PC has a checkout for. None
+    means no limit, which is what the stub executor uses — it needs no repo.
+
+    One transaction: claim + ticket flip + board read + key read.
+    """
     with conn.transaction(), conn.cursor() as cur:
-        cur.execute(CLAIM_SQL, {"wid": worker_id, "cid": cluster_id})
+        cur.execute(CLAIM_SQL, {"wid": worker_id, "cid": cluster_id,
+                                "boards": board_ids})
         row = cur.fetchone()
         if row is None:
             cur.execute(
@@ -340,6 +456,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help=f"poll interval seconds (default {POLL_SECONDS})")
     parser.add_argument("--once", action="store_true",
                         help="poll a single time then exit (for testing)")
+    parser.add_argument("--set-path", action="append", metavar="BOARD=PATH",
+                        help="map a board (id or name) to its folder on this PC; "
+                             "repeatable")
+    parser.add_argument("--list-boards", action="store_true",
+                        help="list this cluster's boards and their configured paths")
     return parser
 
 
@@ -373,17 +494,50 @@ def main() -> int:
         if cfg is None:
             pause_if_frozen()
             return 2
+        try:
+            conn = psycopg.connect(cfg["dsn"], connect_timeout=15)
+            try:
+                cfg = prompt_for_board_paths(conn, cfg)
+            finally:
+                conn.close()
+        except psycopg.OperationalError as e:
+            print(f"Enrolled, but could not list boards ({str(e)[:120]}).")
+            print("Set folders later with --set-path <board>=<path>.")
+
+    if args.list_boards or args.set_path:
+        conn = psycopg.connect(cfg["dsn"], connect_timeout=15)
+        try:
+            for arg in args.set_path or []:
+                try:
+                    cfg = apply_set_path(conn, cfg, arg)
+                except ValueError as e:
+                    print(f"--set-path {arg}: {e}")
+                    return 2
+            if args.list_boards:
+                paths = board_paths(cfg)
+                print(f"{'id':>4}  {'board':<24} path")
+                for b in list_cluster_boards(conn, cfg["cluster_id"]):
+                    print(f"{b['id']:>4}  {b['name']:<24} "
+                          f"{paths.get(str(b['id']), '(not configured)')}")
+        finally:
+            conn.close()
+        return 0
 
     executor = pick_executor(args)
+    # The stub needs no repo, so it opts out of the board filter entirely.
+    board_ids = None if args.stub else configured_board_ids(cfg)
     print(f"Worker '{cfg['name']}' polling Postgres every {args.poll}s "
           f"(executor: {executor.name}). Ctrl+C to stop.")
+    if board_ids is not None and not board_ids:
+        print("No board folders configured — this PC will claim nothing. "
+              "Run with --set-path <board>=<path> first.")
 
     conn = None
     while True:
         try:
             if conn is None or conn.closed:
                 conn = psycopg.connect(cfg["dsn"], connect_timeout=15)
-            work = claim_next(conn, cfg["worker_id"], cfg["cluster_id"])
+            work = claim_next(conn, cfg["worker_id"], cfg["cluster_id"], board_ids)
             if work:
                 ticket = work["ticket"]
                 item_id = work["assignment_id"]
