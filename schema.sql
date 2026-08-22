@@ -95,16 +95,23 @@ CREATE TABLE IF NOT EXISTS comments (
 -- Work queue doubles as the assignment log; one row per delegation attempt.
 -- Atomic claim: UPDATE work_queue SET status='claimed', claimed_by=$w
 --               WHERE id=$id AND status='queued'  (rowcount 0 => lost race).
+-- heartbeat_at is set at claim time and refreshed periodically by the
+-- claiming slot while it runs (worker.py's _claim_heartbeat_loop). Every
+-- worker opportunistically reaps claims whose heartbeat has gone stale
+-- (worker.reap_stale_claims): the row -> failed, and (attempts permitting)
+-- the ticket -> ready with a fresh queued row, same MAX_ATTEMPTS budget as
+-- an explicit failure.
 CREATE TABLE IF NOT EXISTS work_queue (
-    id          SERIAL PRIMARY KEY,
-    ticket_id   INTEGER NOT NULL REFERENCES tickets(id),
-    cluster_id  INTEGER NOT NULL REFERENCES clusters(id),
-    status      VARCHAR(32) NOT NULL DEFAULT 'queued',  -- queued | claimed | done | failed
-    claimed_by  INTEGER REFERENCES workers(id),
-    queued_at   TIMESTAMP NOT NULL DEFAULT now(),
-    claimed_at  TIMESTAMP,
-    finished_at TIMESTAMP,
-    result      TEXT
+    id           SERIAL PRIMARY KEY,
+    ticket_id    INTEGER NOT NULL REFERENCES tickets(id),
+    cluster_id   INTEGER NOT NULL REFERENCES clusters(id),
+    status       VARCHAR(32) NOT NULL DEFAULT 'queued',  -- queued | claimed | done | failed
+    claimed_by   INTEGER REFERENCES workers(id),
+    queued_at    TIMESTAMP NOT NULL DEFAULT now(),
+    claimed_at   TIMESTAMP,
+    heartbeat_at TIMESTAMP,
+    finished_at  TIMESTAMP,
+    result       TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_work_queue_claim

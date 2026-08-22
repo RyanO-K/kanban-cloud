@@ -139,6 +139,30 @@ def test_phase1_slot_defaults_are_backward_compatible(tmp_path):
         assert (w.concurrency, w.running) == (1, 0)
 
 
+def test_work_item_model_has_heartbeat_at():
+    from app.models import WorkItem
+
+    assert "heartbeat_at" in {c.name for c in WorkItem.__table__.columns}
+
+
+def test_migration_adds_phase3_columns_to_an_existing_db(tmp_path):
+    """A database created before the reaper must reach the new shape too."""
+    from app.db import _PHASE3_COLUMNS
+
+    engine = make_engine(f"sqlite:///{tmp_path / 'old3.db'}")
+    Base.metadata.create_all(engine)
+    with engine.begin() as conn:
+        for table, ddl in _PHASE3_COLUMNS:
+            conn.execute(sa.text(f"ALTER TABLE {table} DROP COLUMN {ddl.split()[0]}"))
+
+    run_migrations(engine)
+    run_migrations(engine)  # idempotent
+
+    insp = sa.inspect(engine)
+    for table, ddl in _PHASE3_COLUMNS:
+        assert ddl.split()[0] in {c["name"] for c in insp.get_columns(table)}, ddl
+
+
 def test_phase1_boolean_defaults_are_postgres_legal():
     """Regression: `BOOLEAN NOT NULL DEFAULT 0` deployed green and then broke
     startup on Neon — "column is of type boolean but default expression is of

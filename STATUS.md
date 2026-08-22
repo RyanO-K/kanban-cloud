@@ -2,6 +2,59 @@
 
 Last updated: 2026-08-22
 
+## Stale-claim reaper (2026-08-22)
+
+Closes the long-standing gap this file used to describe under "Known
+issues": a worker PC that dies mid-ticket left its `work_queue` row
+`claimed` and the ticket `doing` forever, with no automatic recovery. Phase
+3, item 7 of `docs/2026-08-22-local-vs-cloud-gap-analysis.md`; the cloud
+analogue of the local tool's `reap_decision`.
+
+`work_queue` gained `heartbeat_at`, set at claim time and refreshed every
+`HEARTBEAT_INTERVAL_SECONDS` (60s) by a dedicated thread + connection that
+`run_slot` starts for the lifetime of one executor run (`worker.py`'s
+`_claim_heartbeat_loop`) — a 30-minute Claude CLI invocation now keeps
+proving the claim is alive instead of going quiet the moment the slot
+stopped issuing claim queries, same lesson as the existing worker-level
+heartbeat move to the main thread. `worker.reap_stale_claims` flips any
+claim whose heartbeat (falling back to `claimed_at` for pre-existing rows)
+is older than `STALE_CLAIM_SECONDS` (300s, a 5x margin matching
+`Worker.is_online`'s cushion over the poll interval) back to `queued` /
+`ready`, respecting the same `MAX_ATTEMPTS` budget `finish_work` already
+enforces on a reported failure (attempts is not incremented a second time —
+it was already bumped at claim time).
+
+**Where it runs — decided: opportunistically in every worker**, once per
+poll cycle alongside the existing `set_slot_counts` heartbeat tick, not a
+Render cron. No new infrastructure to deploy or keep alive, and it needs no
+new grant: the `kanban_worker` group role already has `UPDATE` on
+`work_queue`/`tickets` for every enrolled PC, not scoped to rows that PC
+itself claimed (verified against `app/enrollment.py`'s `GROUP_GRANTS`). This
+also keeps the architecture consistent with the design tension already
+recorded in the gap analysis — pull/claim workers with no central
+dispatcher — rather than introducing the first piece of centrally-scheduled
+infrastructure for a job this cheap. The tradeoff: every worker in a
+cluster redundantly scans for stale claims on every poll, and two workers
+racing to reap the same row is expected, not a bug — `_reap_one`'s
+`UPDATE ... WHERE status='claimed'` rowcount guard (same pattern
+`finish_work` already uses) means the loser sees rowcount 0 and no-ops, so
+double-reaping is not possible.
+
+Tests: 201 → 215. `worker.py`'s claim/reap SQL is Postgres-only by the
+codebase's existing convention (psycopg `%s` params, `now() at time zone
+'utc'`), normally exercised for real only via `scripts/neon_smoke_v2.py`
+against live Neon — but this ticket's acceptance criteria are behavioral
+(exactly-once under a real race; a live claim never touched), which a mock
+can't prove. `tests/test_reaper.py` adapts the exact SQL shapes
+`reap_stale_claims`/`_reap_one`/`touch_claim_heartbeat` issue onto stdlib
+`sqlite3` (translating `%s` -> `?` and the UTC-now literal ->
+`CURRENT_TIMESTAMP`), so the race test runs the real production functions
+from two threads against a real embedded database with real file-level
+write locking — SQLite's writer serialization gives the same "loser's
+UPDATE sees rowcount 0" guarantee this code relies on under Postgres READ
+COMMITTED. Verified stable across repeated runs (8x back-to-back), not just
+once.
+
 ## Agents do real repo work, and PCs limit their own concurrency (2026-08-22)
 
 Cloud agents could not do repo work at all: `ClaudeExecutor` ran `claude -p`
@@ -325,9 +378,8 @@ $ .venv/Scripts/python -m pytest tests/ -q
 - Not deployed anywhere and no real Neon DB provisioned (by design for this
   pass); Postgres path is code-complete but only exercised via SQLite.
 - Polling (worker 4s, UI 5s) instead of websockets/long-poll hold.
-- No stale-claim reaper: if a worker dies mid-ticket the assignment stays
-  `claimed` forever (manual fix: move ticket back to `ready`... which enqueues
-  a fresh item; the orphaned work_queue row remains as log noise).
+- ~~No stale-claim reaper~~ — resolved 2026-08-22, see "Stale-claim reaper"
+  above.
 - Auth tokens never expire; no roles; any member can edit settings.
 - API key plaintext in DB; join code effectively grants key access (see README
   security caveats).
