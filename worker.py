@@ -289,6 +289,104 @@ def prompt_for_board_paths(conn, cfg: dict) -> dict:
     return cfg
 
 
+# ---------- auto-clone: repo_url as a fallback for --set-path ----------
+#
+# A board with a repo_url lets a worker with no manual path mapping still
+# claim its tickets: the repo is cloned once into this PC's own AppData
+# folder and refreshed to the default branch before every run. An explicit
+# --set-path entry always wins and is never touched by anything below —
+# that folder may be an operator's own hand-tended checkout.
+
+def app_data_boards_dir() -> Path:
+    """Where auto-cloned board repos live on this PC.
+
+    Independent of app_dir() (wherever the exe/script happens to sit) so the
+    clone survives moving or re-downloading the exe. Falls back to app_dir()
+    if LOCALAPPDATA is somehow unset, rather than crashing.
+    """
+    base = os.environ.get("LOCALAPPDATA")
+    root = Path(base) if base else app_dir()
+    return root / "kanban-worker" / "boards"
+
+
+def _run_git(args: list, cwd: str | None = None) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+
+
+def resolve_directory(board: dict, cfg: dict) -> tuple:
+    """The folder to run this board's tickets in, cloning/refreshing it if
+    needed. Returns (directory, error) — exactly one is None.
+
+    Order: an explicit --set-path entry always wins over repo_url, and is
+    used as-is with no git commands run against it at all.
+    """
+    board = board or {}
+    board_id = board.get("id")
+    name = board.get("name", "?")
+
+    explicit = board_paths(cfg).get(str(board_id))
+    if explicit:
+        return explicit, None
+
+    repo_url = (board.get("repo_url") or "").strip()
+    if not repo_url:
+        return None, (
+            f"This PC has no folder configured for board '{name}', and the "
+            "board has no Repo URL set. Fix one: "
+            f'kanban-worker --set-path "{name}=<path>", or set a Repo URL '
+            "in the board's Project settings."
+        )
+
+    directory = app_data_boards_dir() / str(board_id)
+    if not directory.exists():
+        directory.parent.mkdir(parents=True, exist_ok=True)
+        proc = _run_git(["clone", repo_url, str(directory)])
+        if proc.returncode != 0:
+            return None, (
+                f"git clone failed for board '{name}': "
+                f"{(proc.stderr or proc.stdout).strip()[:2000]}"
+            )
+    else:
+        proc = _run_git(["remote", "get-url", "origin"], cwd=str(directory))
+        if proc.returncode != 0:
+            return None, (
+                f"Could not read the git remote for board '{name}' at "
+                f"{directory}: {proc.stderr.strip()[:500]}"
+            )
+        origin = proc.stdout.strip()
+        if origin != repo_url:
+            return None, (
+                f"The Repo URL configured for board '{name}' ({repo_url}) "
+                f"does not match this PC's existing clone's origin "
+                f"({origin}) at {directory}. If this is intentional, remove "
+                "that folder by hand — nothing here does that automatically."
+            )
+
+    proc = _run_git(["fetch", "origin"], cwd=str(directory))
+    if proc.returncode != 0:
+        return None, f"git fetch failed for board '{name}': {proc.stderr.strip()[:2000]}"
+
+    proc = _run_git(["rev-parse", "--abbrev-ref", "origin/HEAD"], cwd=str(directory))
+    if proc.returncode != 0:
+        return None, (
+            f"Could not determine the default branch for board '{name}': "
+            f"{proc.stderr.strip()[:500]}"
+        )
+    default_branch = proc.stdout.strip().split("/", 1)[-1]
+
+    for args in (["checkout", default_branch],
+                 ["reset", "--hard", f"origin/{default_branch}"],
+                 ["clean", "-fd"]):
+        proc = _run_git(args, cwd=str(directory))
+        if proc.returncode != 0:
+            return None, (
+                f"git {' '.join(args)} failed for board '{name}': "
+                f"{proc.stderr.strip()[:2000]}"
+            )
+
+    return str(directory), None
+
+
 def enroll(server: str, join_code: str, name: str) -> dict:
     """One-time HTTP call; the server creates this PC's Postgres role and
     returns a ready-to-use DSN."""
