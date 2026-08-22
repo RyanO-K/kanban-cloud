@@ -44,6 +44,19 @@ _PHASE3_COLUMNS = [
     ("work_queue", "heartbeat_at TIMESTAMP"),
 ]
 
+# (table, column DDL) pairs added by agent profiles (gap analysis phase 5).
+# The `profiles` table itself is brand new, so create_all() alone is enough
+# to bring it into being on every DB; only the new columns on the
+# already-existing boards/tickets tables need the guarded-ALTER treatment.
+# Both are soft references (no FK enforced at the SQLite/Postgres DDL level
+# here, matching every other nullable id column in this file) so a deleted
+# profile leaves a dangling id rather than a migration-time constraint
+# failure — worker.resolve_profile treats that the same as "no profile".
+_PHASE5_COLUMNS = [
+    ("boards", "default_profile_id INTEGER"),
+    ("tickets", "profile_id INTEGER"),
+]
+
 
 def resolve_db_url(db_url: str | None = None) -> str:
     url = db_url or os.environ.get("DATABASE_URL") or DEFAULT_SQLITE_URL
@@ -151,7 +164,7 @@ def _add_missing_columns(engine) -> None:
     insp = inspect(engine)
     tables = set(insp.get_table_names())
     with engine.begin() as conn:
-        for table, ddl in _PHASE1_COLUMNS + _PHASE2_COLUMNS + _PHASE3_COLUMNS:
+        for table, ddl in _PHASE1_COLUMNS + _PHASE2_COLUMNS + _PHASE3_COLUMNS + _PHASE5_COLUMNS:
             if table not in tables:
                 continue  # a brand-new DB: create_all() already built the shape
             column = ddl.split()[0].strip('"')

@@ -87,6 +87,28 @@ class ClusterMember(Base):
     joined_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class Profile(Base):
+    """A named agent configuration, cluster-scoped: the tool allowlist, model
+    and system prompt an agent run is launched with. The cloud counterpart of
+    the local `.kanban` tool's profiles (gap analysis section 8, item 12).
+
+    Referenced by id from `Board.default_profile_id` and `Ticket.profile_id`,
+    both soft references (no FK-enforced cascade): deleting a profile that is
+    still named by a board or ticket is allowed, and worker.resolve_profile
+    treats the dangling id the same as "no profile chosen" rather than
+    erroring, so a stale reference can never launch an agent with no tools.
+    """
+    __tablename__ = "profiles"
+    __table_args__ = (UniqueConstraint("cluster_id", "name"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    cluster_id: Mapped[int] = mapped_column(ForeignKey("clusters.id"), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    allowed_tools: Mapped[str] = mapped_column(Text, nullable=False)
+    model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    system_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class Board(Base):
     """A project. The metadata below is the context every agent working one of
     this board's tickets is given (see app/prompt.build_agent_prompt).
@@ -97,6 +119,10 @@ class Board(Base):
     layouts) and is either set by hand (`--set-path`) or derived from
     `repo_url` under the worker's own AppData folder. Neither the folder nor
     that derivation lives in this table.
+
+    `default_profile_id` is this board's fallback agent profile: used when a
+    ticket names none of its own (see Ticket.profile_id and
+    worker.resolve_profile).
     """
     __tablename__ = "boards"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -109,6 +135,9 @@ class Board(Base):
         Boolean, default=False, nullable=False, server_default="0"
     )
     repo_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    default_profile_id: Mapped[int | None] = mapped_column(
+        ForeignKey("profiles.id"), nullable=True
+    )
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow)
 
 
@@ -150,6 +179,10 @@ class Ticket(Base):
     assigned_worker: Mapped[int | None] = mapped_column(ForeignKey("workers.id"), nullable=True)
     # NULL target_worker = "any worker in the cluster may claim".
     target_worker: Mapped[int | None] = mapped_column(ForeignKey("workers.id"), nullable=True)
+    # Per-ticket profile override; beats the board's default_profile_id. NULL
+    # falls through to the board, then to the worker's own --allowed-tools
+    # default — see worker.resolve_profile.
+    profile_id: Mapped[int | None] = mapped_column(ForeignKey("profiles.id"), nullable=True)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     # Claude CLI session id of the most recent attempt, so a human can take a
     # stuck run over with `claude --resume <id>`.

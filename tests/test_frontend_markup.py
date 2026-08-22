@@ -134,3 +134,21 @@ def test_kill_button_only_shown_for_in_progress_tickets(markup):
 def test_killed_is_a_board_column_and_ticket_status_option(markup):
     assert '"killed"' in markup
     assert '<option value="killed">killed</option>' in markup
+
+
+# ---------- agent profiles ----------
+
+def test_profiles_modal_markup_present(markup):
+    for token in ("profilesOverlay", "profilesList", "pName", "pAllowedTools",
+                  "pModel", "pSystemPrompt", "openProfilesModal", "saveProfile"):
+        assert token in markup, token
+
+
+def test_board_settings_has_a_default_profile_picker(markup):
+    assert 'id="bDefaultProfile"' in markup
+    assert "default_profile_id" in markup
+
+
+def test_ticket_modal_has_a_profile_picker(markup):
+    assert 'id="tProfile"' in markup
+    assert "payload.profile_id" in markup

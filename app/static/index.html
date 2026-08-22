@@ -93,6 +93,8 @@
     <select id="boardSel" onchange="loadBoard()"></select>
     <button class="small ghost owner-only" id="boardSettingsBtn" onclick="openBoardSettings()"
             title="Project settings — the context agents working this board are given">&#9881;</button>
+    <button class="small ghost owner-only" onclick="openProfilesModal()"
+            title="Agent profiles — named tool/model/system-prompt presets">Profiles</button>
     <button class="small ghost owner-only" onclick="openClusterModal()">+ cluster</button>
     <button class="small ghost owner-only" onclick="newBoard()">+ board</button>
     <button class="small owner-only" onclick="openTicketModal(null)">+ ticket</button>
@@ -157,6 +159,8 @@
     </select>
     <label>Run on</label>
     <select id="tTarget"><option value="">any worker</option></select>
+    <label>Agent profile <span class="muted" style="font-weight:normal">(overrides the board's default)</span></label>
+    <select id="tProfile"><option value="">board default</option></select>
     <label>Depends on <span class="muted" style="font-weight:normal">(ctrl/cmd-click to select several; must all reach review/done before this ticket is claimed)</span></label>
     <select id="tDeps" multiple size="4"></select>
     <div id="tBlockedNote" class="badge blocked" style="display:none; margin-top:4px">Blocked — waiting on dependencies</div>
@@ -209,9 +213,37 @@
       <code>--set-path</code> entry for this board clones this URL automatically
       into its own AppData folder and keeps it up to date. Setting
       <code>kanban-worker --set-path</code> on a PC always overrides this.</p>
+    <label>Default agent profile</label>
+    <select id="bDefaultProfile"><option value="">(none — falls back to the worker's own --allowed-tools)</option></select>
+    <p class="muted" style="font-size:12px">Used for every ticket on this board that doesn't pick its own profile.
+      Manage profiles from the <b>Profiles</b> button in the header.</p>
     <div class="row">
       <button onclick="saveBoardSettings()">Save</button>
       <button class="ghost" onclick="document.getElementById('boardOverlay').classList.remove('show')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- agent profiles modal -->
+<div class="overlay" id="profilesOverlay" onclick="if(event.target===this) closeProfilesModal()">
+  <div class="modal">
+    <h2>Agent profiles</h2>
+    <p class="muted" style="margin-top:0">Named tool-allowlist / model / system-prompt presets. A board's
+      Project settings can pick one as its default; a ticket can override that.</p>
+    <div id="profilesList"></div>
+    <h3 id="profileFormTitle" style="font-size:13px; margin:14px 0 4px">New profile</h3>
+    <label>Name</label><input id="pName">
+    <label>Allowed tools <span class="muted" style="font-weight:normal">(comma-separated)</span></label>
+    <input id="pAllowedTools" placeholder="Read,Edit,Write,Bash,Grep,Glob">
+    <label>Model <span class="muted" style="font-weight:normal">(optional — blank uses the CLI's default)</span></label>
+    <input id="pModel" placeholder="e.g. claude-sonnet-5">
+    <label>System prompt <span class="muted" style="font-weight:normal">(optional, appended to the CLI's default)</span></label>
+    <textarea id="pSystemPrompt"></textarea>
+    <div class="row">
+      <button onclick="saveProfile()" id="profileSaveBtn">Save profile</button>
+      <button class="ghost" onclick="resetProfileForm()">New instead</button>
+      <div class="spacer"></div>
+      <button class="ghost" onclick="closeProfilesModal()">Close</button>
     </div>
   </div>
 </div>
@@ -233,7 +265,8 @@
 <script>
 const COLS = ["todo", "ready", "doing", "blocked", "review", "done", "failed", "killed"];
 let token = localStorage.getItem("kc_token") || null;
-let clusters = [], boards = [], tickets = [], workers = [];
+let clusters = [], boards = [], tickets = [], workers = [], profiles = [];
+let editingProfile = null;
 let currentCluster = null, currentBoard = null, editingTicket = null;
 // 'local' (dev: login UI) | 'owner' (proxy-authenticated, full rights)
 // | 'spectator' (proxy, read-only). Set once at boot from ./api/session.
@@ -349,7 +382,7 @@ async function refreshClusterBits() {
   bs.innerHTML = boards.map(b => `<option value="${b.id}">${esc(b.name)}</option>`).join("");
   currentBoard = boards.find(b => b.id === sessionBoardId) || boards[0] || null;
   if (currentBoard) bs.value = currentBoard.id;
-  const jobs = [loadBoard(), loadWorkers(), loadQueue(), loadBlocked()];
+  const jobs = [loadBoard(), loadWorkers(), loadQueue(), loadBlocked(), loadProfiles()];
   await Promise.all(jobs);
 }
 
@@ -387,22 +420,103 @@ function openBoardSettings() {
   document.getElementById("bCommitReq").value = b.commit_requirements || "";
   document.getElementById("bUseWorktrees").checked = !!b.use_worktrees;
   document.getElementById("bRepoUrl").value = b.repo_url || "";
+  const sel = document.getElementById("bDefaultProfile");
+  sel.innerHTML = `<option value="">(none — falls back to the worker's own --allowed-tools)</option>` +
+    profiles.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join("");
+  sel.value = b.default_profile_id || "";
   document.getElementById("boardOverlay").classList.add("show");
 }
 
 async function saveBoardSettings() {
   const id = Number(document.getElementById("boardSel").value);
   if (!id) return;
-  await api("PATCH", `./api/boards/${id}`, {
+  const profileVal = document.getElementById("bDefaultProfile").value;
+  const payload = {
     description: document.getElementById("bDescription").value,
     out_of_scope: document.getElementById("bOutOfScope").value,
     commit_requirements: document.getElementById("bCommitReq").value,
     use_worktrees: document.getElementById("bUseWorktrees").checked,
     repo_url: document.getElementById("bRepoUrl").value,
-  });
+  };
+  if (profileVal) payload.default_profile_id = parseInt(profileVal);
+  else payload.clear_default_profile = true;
+  await api("PATCH", `./api/boards/${id}`, payload);
   document.getElementById("boardOverlay").classList.remove("show");
   await refreshClusterBits();
   toast("Project settings saved");
+}
+
+// ---------- agent profiles ----------
+async function loadProfiles() {
+  if (!currentCluster) return;
+  profiles = await api("GET", `./api/clusters/${currentCluster.id}/profiles`);
+}
+
+function openProfilesModal() {
+  resetProfileForm();
+  renderProfilesList();
+  document.getElementById("profilesOverlay").classList.add("show");
+}
+function closeProfilesModal() { document.getElementById("profilesOverlay").classList.remove("show"); }
+
+function renderProfilesList() {
+  document.getElementById("profilesList").innerHTML = profiles.length ? profiles.map(p => `
+    <div class="comment">
+      <b>${esc(p.name)}</b>${p.model ? ` <span class="muted">(${esc(p.model)})</span>` : ""}
+      <div class="muted" style="font-size:11px">${esc(p.allowed_tools)}</div>
+      <div class="row" style="margin-top:6px">
+        <button class="small ghost" onclick="editProfile(${p.id})">Edit</button>
+        <button class="small ghost" style="color:var(--bad); border-color:var(--bad)" onclick="deleteProfile(${p.id})">Delete</button>
+      </div>
+    </div>`).join("") : `<p class="muted">No profiles yet — every ticket runs with the worker's own --allowed-tools default.</p>`;
+}
+
+function resetProfileForm() {
+  editingProfile = null;
+  document.getElementById("profileFormTitle").textContent = "New profile";
+  document.getElementById("pName").value = "";
+  document.getElementById("pAllowedTools").value = "";
+  document.getElementById("pModel").value = "";
+  document.getElementById("pSystemPrompt").value = "";
+  document.getElementById("profileSaveBtn").textContent = "Save profile";
+}
+
+function editProfile(id) {
+  const p = profiles.find(x => x.id === id);
+  if (!p) return;
+  editingProfile = p;
+  document.getElementById("profileFormTitle").textContent = `Edit "${p.name}"`;
+  document.getElementById("pName").value = p.name;
+  document.getElementById("pAllowedTools").value = p.allowed_tools;
+  document.getElementById("pModel").value = p.model || "";
+  document.getElementById("pSystemPrompt").value = p.system_prompt || "";
+  document.getElementById("profileSaveBtn").textContent = "Save changes";
+}
+
+async function saveProfile() {
+  const name = document.getElementById("pName").value.trim();
+  const allowedTools = document.getElementById("pAllowedTools").value.trim();
+  if (!name || !allowedTools) { toast("Name and allowed tools are required"); return; }
+  const payload = {
+    name, allowed_tools: allowedTools,
+    model: document.getElementById("pModel").value.trim() || null,
+    system_prompt: document.getElementById("pSystemPrompt").value.trim() || null,
+  };
+  if (editingProfile) await api("PATCH", `./api/profiles/${editingProfile.id}`, payload);
+  else await api("POST", `./api/clusters/${currentCluster.id}/profiles`, payload);
+  await loadProfiles();
+  resetProfileForm();
+  renderProfilesList();
+  toast("Profile saved");
+}
+
+async function deleteProfile(id) {
+  const p = profiles.find(x => x.id === id);
+  if (!p || !confirm(`Delete profile "${p.name}"? Boards/tickets pinned to it fall back to the next thing in the chain.`)) return;
+  await api("DELETE", `./api/profiles/${id}`);
+  await loadProfiles();
+  if (editingProfile && editingProfile.id === id) resetProfileForm();
+  renderProfilesList();
 }
 
 // ---------- import a local .kanban board ----------
@@ -621,7 +735,7 @@ function workerName(id) {
 function openTicketModal(id) {
   editingTicket = id === null ? null : tickets.find(t => t.id === id);
   const readOnly = sessionMode === "spectator";
-  ["tTitle", "tBody", "tStatus", "tTarget", "tDeps"].forEach(x => document.getElementById(x).disabled = readOnly);
+  ["tTitle", "tBody", "tStatus", "tTarget", "tProfile", "tDeps"].forEach(x => document.getElementById(x).disabled = readOnly);
   document.getElementById("ticketModalTitle").textContent = editingTicket ? `Ticket #${editingTicket.id}` : "New ticket";
   document.getElementById("tTitle").value = editingTicket ? editingTicket.title : "";
   document.getElementById("tBody").value = editingTicket ? editingTicket.body : "";
@@ -630,6 +744,10 @@ function openTicketModal(id) {
   tgt.innerHTML = `<option value="">any worker</option>` +
     workers.filter(w => !w.revoked).map(w => `<option value="${w.id}">${esc(w.name)}${w.online ? "" : " (offline)"}</option>`).join("");
   tgt.value = editingTicket && editingTicket.target_worker ? editingTicket.target_worker : "";
+  const prof = document.getElementById("tProfile");
+  prof.innerHTML = `<option value="">board default</option>` +
+    profiles.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join("");
+  prof.value = editingTicket && editingTicket.profile_id ? editingTicket.profile_id : "";
   const deps = document.getElementById("tDeps");
   const dependsOn = editingTicket ? (editingTicket.depends_on || []) : [];
   deps.innerHTML = tickets.filter(t => !editingTicket || t.id !== editingTicket.id)
@@ -659,11 +777,14 @@ async function saveTicket() {
   };
   const tgt = document.getElementById("tTarget").value;
   if (tgt) payload.target_worker = parseInt(tgt); else payload.clear_target = true;
+  const prof = document.getElementById("tProfile").value;
+  if (prof) payload.profile_id = parseInt(prof); else payload.clear_profile = true;
   if (editingTicket) {
     payload.depends_on = Array.from(document.getElementById("tDeps").selectedOptions).map(o => parseInt(o.value));
     await api("PATCH", `./api/tickets/${editingTicket.id}`, payload);
   } else {
     delete payload.clear_target;
+    delete payload.clear_profile;
     await api("POST", `./api/boards/${currentBoard.id}/tickets`, payload);
   }
   closeTicketModal(); loadBoard(); loadQueue();

@@ -176,7 +176,7 @@ class StubExecutor:
 
     def run(self, ticket, board=None, directory=None, session_id=None,
             progress_cb=None, should_kill=None,
-            chat_source=None, chat_delivered=None):
+            chat_source=None, chat_delivered=None, profile=None):
         print(f"  [stub] pretending to work on ticket #{ticket['id']}: {ticket['title']}")
         time.sleep(2)
         return True, (
@@ -325,7 +325,7 @@ class ClaudeExecutor:
 
     def run(self, ticket, board=None, directory=None, session_id=None,
             progress_cb=None, should_kill=None,
-            chat_source=None, chat_delivered=None):
+            chat_source=None, chat_delivered=None, profile=None):
         board = board or {}
         name = board.get("name", "?")
         should_kill = should_kill or (lambda: False)
@@ -349,12 +349,27 @@ class ClaudeExecutor:
         if not exe:
             return False, "`claude` CLI not found on this PC's PATH."
 
+        # profile (resolved by worker.resolve_profile: ticket beats board)
+        # supplies the tool allowlist, model and system prompt for this run.
+        # A falsy allowed_tools (no profile, or a profile with an empty
+        # list — should not happen given the column is NOT NULL, but never
+        # trust it blindly) falls back to this executor's own default rather
+        # than ever launching the CLI with no tool grant at all.
+        profile = profile or {}
+        allowed_tools = profile.get("allowed_tools") or self.allowed_tools
+        model = profile.get("model")
+        system_prompt = profile.get("system_prompt")
+
         prompt = build_agent_prompt(ticket, board, directory)
-        cmd = [exe, "-p", prompt, "--allowedTools", self.allowed_tools,
+        cmd = [exe, "-p", prompt, "--allowedTools", allowed_tools,
                "--input-format", "stream-json",
                "--output-format", "stream-json", "--verbose"]
         if session_id:
             cmd += ["--session-id", session_id]
+        if model:
+            cmd += ["--model", model]
+        if system_prompt:
+            cmd += ["--append-system-prompt", system_prompt]
         print(f"  [claude] running in {directory} for ticket #{ticket['id']}")
 
         def emit(text):
@@ -883,6 +898,34 @@ def _claim_heartbeat_loop(dsn: str, item_id: int, stop_event: threading.Event,
             pass
 
 
+# ---------- agent profiles ----------
+#
+# A profile names the tool allowlist, model and system prompt an agent run is
+# launched with (gap analysis phase 5). Resolution order — ticket beats
+# board beats nothing — mirrors the local `.kanban` tool: a ticket's own
+# `profile` field pins the model and beats both triage and the board's
+# profile.
+
+def resolve_profile(profiles: dict, ticket_profile_id, board_default_profile_id) -> dict | None:
+    """The profile a claimed ticket's agent run should use, or None to fall
+    back to the worker's own --allowed-tools default (see
+    ClaudeExecutor.run).
+
+    `profiles` maps profile id -> profile dict, scoped to one cluster.
+    Ticket beats board: the ticket's own `profile_id` is tried first, and
+    only if it names no row in `profiles` — never chosen, or since deleted —
+    does the board's `default_profile_id` get a turn. Either id "not found in
+    profiles" is treated identically to "not set" rather than raising, so a
+    stale or unknown reference can never make an agent run with the CLI's
+    default (no) tool grant — it just falls through to the next thing in the
+    order, and ultimately to the worker default.
+    """
+    for profile_id in (ticket_profile_id, board_default_profile_id):
+        if profile_id is not None and profile_id in profiles:
+            return profiles[profile_id]
+    return None
+
+
 def claim_next(conn, worker_id: int, cluster_id: int, board_ids=None) -> dict | None:
     """Claim the oldest eligible queued item; returns a work payload or None.
 
@@ -905,10 +948,10 @@ def claim_next(conn, worker_id: int, cluster_id: int, board_ids=None) -> dict | 
         cur.execute(
             f"UPDATE tickets SET status='doing', assigned_worker=%s, "
             f"attempts=COALESCE(attempts,0)+1, updated_at={UTC_NOW} "
-            f"WHERE id=%s RETURNING board_id, title, body, attempts",
+            f"WHERE id=%s RETURNING board_id, title, body, attempts, profile_id",
             (worker_id, ticket_id),
         )
-        board_id, title, body, attempts = cur.fetchone()
+        board_id, title, body, attempts, ticket_profile_id = cur.fetchone()
         # Minted here so the id is recorded even if the worker dies mid-run:
         # `claude --resume <id>` in the board folder then replays the session.
         session_id = str(uuid.uuid4())
@@ -920,13 +963,25 @@ def claim_next(conn, worker_id: int, cluster_id: int, board_ids=None) -> dict | 
         )
         cur.execute(
             "SELECT name, description, out_of_scope, commit_requirements, "
-            "use_worktrees, repo_url FROM boards WHERE id=%s",
+            "use_worktrees, repo_url, default_profile_id FROM boards WHERE id=%s",
             (board_id,),
         )
         b = cur.fetchone()
+        board_default_profile_id = b[6] if b else None
+        cur.execute(
+            "SELECT id, name, allowed_tools, model, system_prompt "
+            "FROM profiles WHERE cluster_id=%s",
+            (cluster_id,),
+        )
+        profiles = {
+            row[0]: {"id": row[0], "name": row[1], "allowed_tools": row[2],
+                      "model": row[3], "system_prompt": row[4]}
+            for row in cur.fetchall()
+        }
         return {
             "assignment_id": item_id,
             "session_id": session_id,
+            "profile": resolve_profile(profiles, ticket_profile_id, board_default_profile_id),
             "board": {
                 "id": board_id, "name": b[0], "description": b[1],
                 "out_of_scope": b[2], "commit_requirements": b[3],
@@ -1289,7 +1344,8 @@ def run_slot(cfg, args, executor, stop_event, slot_no: int) -> None:
                             directory=paths.get(str(ticket["board_id"])),
                             session_id=work.get("session_id"),
                             progress_cb=progress_cb, should_kill=should_kill,
-                            chat_source=chat_source, chat_delivered=chat_delivered)
+                            chat_source=chat_source, chat_delivered=chat_delivered,
+                            profile=work.get("profile"))
                     else:
                         directory, resolve_error = resolve_directory(
                             work.get("board") or {}, cfg)
@@ -1301,7 +1357,8 @@ def run_slot(cfg, args, executor, stop_event, slot_no: int) -> None:
                                 directory=directory,
                                 session_id=work.get("session_id"),
                                 progress_cb=progress_cb, should_kill=should_kill,
-                                chat_source=chat_source, chat_delivered=chat_delivered)
+                                chat_source=chat_source, chat_delivered=chat_delivered,
+                                profile=work.get("profile"))
                             # A question isn't a finished attempt — nothing to
                             # push yet, and (in tests especially) `directory`
                             # may not even be a real git checkout.

@@ -32,12 +32,29 @@ CREATE TABLE IF NOT EXISTS cluster_members (
     UNIQUE (cluster_id, user_id)
 );
 
+-- A named agent configuration: the tool allowlist, model and system prompt
+-- an agent run is launched with. Referenced (by id, not FK-enforced, so a
+-- deleted profile just leaves a dangling id) from boards.default_profile_id
+-- and tickets.profile_id — see worker.resolve_profile for the fallback rule.
+CREATE TABLE IF NOT EXISTS profiles (
+    id            SERIAL PRIMARY KEY,
+    cluster_id    INTEGER NOT NULL REFERENCES clusters(id),
+    name          VARCHAR(255) NOT NULL,
+    allowed_tools TEXT NOT NULL,
+    model         VARCHAR(128),
+    system_prompt TEXT,
+    created_at    TIMESTAMP NOT NULL DEFAULT now(),
+    UNIQUE (cluster_id, name)
+);
+
 -- description/out_of_scope/commit_requirements/use_worktrees are the project
 -- context injected into every agent prompt built for this board. repo_url is
 -- the git clone URL a worker with no --set-path entry auto-clones under its
 -- own AppData folder. The folder the code actually lives in on a given PC is
 -- deliberately NOT here: it is per-PC and lives in each worker's own
--- .worker_config.json (or is derived from repo_url).
+-- .worker_config.json (or is derived from repo_url). default_profile_id is
+-- this board's fallback agent profile, used when a ticket names none of its
+-- own (see tickets.profile_id).
 CREATE TABLE IF NOT EXISTS boards (
     id                  SERIAL PRIMARY KEY,
     cluster_id          INTEGER NOT NULL REFERENCES clusters(id),
@@ -47,6 +64,7 @@ CREATE TABLE IF NOT EXISTS boards (
     commit_requirements TEXT,
     use_worktrees       BOOLEAN NOT NULL DEFAULT FALSE,
     repo_url            TEXT,
+    default_profile_id  INTEGER,
     created_at          TIMESTAMP NOT NULL DEFAULT now()
 );
 
@@ -79,6 +97,10 @@ CREATE TABLE IF NOT EXISTS tickets (
     created_by      INTEGER NOT NULL REFERENCES users(id),
     assigned_worker INTEGER REFERENCES workers(id),
     target_worker   INTEGER REFERENCES workers(id),
+    -- Per-ticket agent profile override; beats boards.default_profile_id.
+    -- NULL falls through to the board, then to the worker's own
+    -- --allowed-tools default (worker.resolve_profile).
+    profile_id      INTEGER,
     attempts        INTEGER NOT NULL DEFAULT 0,
     -- Claude CLI session of the latest attempt: `claude --resume <id>`.
     session_id      VARCHAR(64),

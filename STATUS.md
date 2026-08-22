@@ -2,6 +2,40 @@
 
 Last updated: 2026-08-22
 
+## Agent profiles and per-ticket profile pin (2026-08-22)
+
+Gap analysis §8 item 12 (phase 5): named agent configurations replace the
+single hardcoded `DEFAULT_ALLOWED_TOOLS` every ticket on every board used to
+run with. A new cluster-scoped `profiles` table (`name`, `allowed_tools`,
+`model`, `system_prompt`) is CRUD-able from a Profiles modal in the header;
+a board picks one as its `default_profile_id`, and a ticket can override
+that with its own `profile_id` — resolution order is ticket beats board
+beats the worker's own `--allowed-tools` default, which is now genuinely a
+*fallback* rather than the only option.
+
+`worker.resolve_profile` (pure function: `{id: profile}` map plus the
+ticket's and board's chosen ids in) implements that order and, critically,
+treats an id that names no row the same as "not set" rather than raising —
+a profile pinned by a ticket or board and later deleted just falls through
+to the next thing in the chain instead of erroring or launching an agent
+with no tools. `claim_next` resolves it once per claim (ticket row's
+`profile_id`, board row's `default_profile_id`, and the cluster's profiles
+all read in the same transaction) and hands the result to `ClaudeExecutor`,
+which adds `--model`/`--append-system-prompt` when the profile sets them and
+substitutes `allowed_tools` for `--allowedTools` — falling back to its own
+default (which is `--allowed-tools`'s value) whenever the resolved profile
+is `None` or, defensively, has an empty `allowed_tools`.
+
+Deleting a profile does not null out references on boards/tickets that name
+it — that dangling-id case is exactly what the fallback exists to handle,
+and is exercised directly (both at the API layer and via
+`worker.resolve_profile`) rather than worked around.
+
+Tests: 300 → 336 (5 `resolve_profile` resolution-order/fallback tests, 7
+executor wiring tests for `--model`/`--append-system-prompt`/`--allowedTools`
+substitution and the no-profile/empty-profile fallback, 21 API tests for
+profile CRUD and the board/ticket wiring, 3 markup checks).
+
 ## Ticket dependencies gate claiming (2026-08-22)
 
 Phase 2 of the gap analysis (`docs/2026-08-22-local-vs-cloud-gap-analysis.md`,

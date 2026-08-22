@@ -174,3 +174,38 @@ def test_explicit_server_flag_overrides_test_flag():
 def test_no_flags_targets_default_server():
     args = worker.build_parser().parse_args(["--enroll", "--join-code", "X"])
     assert worker.resolve_server(args) == worker.DEFAULT_SERVER
+
+
+# ---------- agent profiles: resolve_profile ----------
+
+RESTRICTED = {"id": 1, "name": "restricted", "allowed_tools": "Read",
+              "model": None, "system_prompt": None}
+FULL = {"id": 2, "name": "full", "allowed_tools": "Read,Edit,Write,Bash,Grep,Glob",
+        "model": "claude-opus-5", "system_prompt": "Be terse."}
+PROFILES = {1: RESTRICTED, 2: FULL}
+
+
+def test_resolve_profile_ticket_beats_board():
+    assert worker.resolve_profile(PROFILES, 1, 2) == RESTRICTED
+
+
+def test_resolve_profile_falls_back_to_board_when_ticket_names_none():
+    assert worker.resolve_profile(PROFILES, None, 2) == FULL
+
+
+def test_resolve_profile_unknown_ticket_profile_falls_back_to_board():
+    """A ticket pinned to a deleted (or otherwise unknown) profile must not
+    leave the agent with no tools -- it falls through to the board's default,
+    exactly as if the ticket had named no profile at all."""
+    assert worker.resolve_profile(PROFILES, 999, 2) == FULL
+
+
+def test_resolve_profile_unknown_everywhere_returns_none():
+    """None is the "nothing resolved" signal -- ClaudeExecutor.run treats it
+    as "use the worker's own --allowed-tools default", never an empty grant."""
+    assert worker.resolve_profile(PROFILES, 999, 888) is None
+    assert worker.resolve_profile({}, None, None) is None
+
+
+def test_resolve_profile_board_default_used_when_ticket_id_is_none():
+    assert worker.resolve_profile(PROFILES, None, 1) == RESTRICTED
