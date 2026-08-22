@@ -31,7 +31,14 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-import psycopg
+try:
+    import psycopg
+except ImportError as exc:
+    sys.exit(
+        "Missing Postgres driver: no working psycopg backend is installed "
+        f"({exc}).\nFix: pip install \"psycopg[binary]\"\n"
+        'Then re-run: py worker.py --enroll --join-code ABC12345'
+    )
 
 DEFAULT_SERVER = "https://kanban-cloud.onrender.com"
 
