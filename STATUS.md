@@ -41,12 +41,13 @@ at its first newline. Every cloud agent to date had received the ticket title
 and none of its body. `shutil.which` finds the `.CMD` shim that `shell=True`
 was there for, with `shell=False`. Regression-tested.
 
-Tests: 116 → 179 (3 migrations, 8 board settings, 3 markup, 11 prompt,
-18 worker paths, 11 executor, 11 concurrency).
+Tests: 117 → 181 (3 migrations, 8 board settings, 3 markup, 11 prompt,
+18 worker paths, 10 executor, 11 concurrency).
 
 Not yet done — the remaining phases of the gap analysis: ticket dependencies,
 a cluster-wide cap, a reaper for dead claims, live progress streaming, kill,
 agent questions and chat, agent profiles, and triage.
+
 ## Workers authenticate with local Claude Code config, not a cloud key (2026-08-22)
 
 The cluster no longer stores or forwards a Claude API key. `ClaudeExecutor`
