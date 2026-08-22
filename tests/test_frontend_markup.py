@@ -90,3 +90,21 @@ def test_workers_panel_renders_slot_counts(markup):
     """A PC's own concurrency limit and current load are shown next to it."""
     assert "w.running" in markup
     assert "w.concurrency" in markup
+
+
+# ---------- ticket dependencies ----------
+
+def test_deps_picker_present_in_ticket_modal(markup):
+    for token in ('id="tDeps"', 'id="tBlockedNote"', "multiple"):
+        assert token in markup, token
+
+
+def test_save_ticket_sends_selected_deps(markup):
+    body = markup[markup.index("async function saveTicket"):]
+    assert 'getElementById("tDeps")' in body[:body.index("closeTicketModal")]
+    assert "payload.depends_on" in body[:body.index("closeTicketModal")]
+
+
+def test_card_shows_blocked_badge(markup):
+    assert "badge blocked" in markup
+    assert "t.blocked" in markup

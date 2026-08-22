@@ -23,6 +23,7 @@ from .auth import hash_password, verify_password
 from .db import make_engine, make_session_factory, run_migrations
 from .models import (
     AGENT_READY_STATUS,
+    DEP_MET_STATUSES,
     TICKET_STATUSES,
     AuthToken,
     Base,
@@ -31,6 +32,7 @@ from .models import (
     ClusterMember,
     Comment,
     Ticket,
+    TicketDep,
     User,
     WorkItem,
     Worker,
@@ -120,6 +122,9 @@ class TicketPatch(BaseModel):
     status: str | None = None
     target_worker: int | None = None
     clear_target: bool = False
+    # None = leave dependencies unchanged; [] = clear them; a list replaces
+    # the full set (the ticket editor sends its whole picklist selection).
+    depends_on: list[int] | None = None
 
 
 class CommentBody(BaseModel):
@@ -308,6 +313,68 @@ def create_app(
             "repo_url": b.repo_url,
         }
 
+    def depends_on_ids(db: Session, ticket_id: int) -> list[int]:
+        return list(
+            db.scalars(select(TicketDep.depends_on_id).where(TicketDep.ticket_id == ticket_id))
+        )
+
+    def blocks_ids(db: Session, ticket_id: int) -> list[int]:
+        """Reverse edge, derived rather than stored: tickets that name this
+        one as a dependency."""
+        return list(
+            db.scalars(select(TicketDep.ticket_id).where(TicketDep.depends_on_id == ticket_id))
+        )
+
+    def is_blocked(db: Session, ticket_id: int) -> bool:
+        dep_ids = depends_on_ids(db, ticket_id)
+        if not dep_ids:
+            return False
+        unmet = db.scalar(
+            select(Ticket.id).where(
+                Ticket.id.in_(dep_ids), Ticket.status.notin_(DEP_MET_STATUSES)
+            ).limit(1)
+        )
+        return unmet is not None
+
+    def dep_creates_cycle(db: Session, ticket_id: int, new_dep_ids: list[int]) -> bool:
+        """True if setting ticket_id's dependencies to new_dep_ids would let
+        the graph reach back to ticket_id (a self-dependency is the ticket_id
+        == 1 case). Walks forward from each candidate dep over the *existing*
+        edges of every other ticket — ticket_id's own current edges are about
+        to be replaced, so they are irrelevant here."""
+        seen = set()
+        stack = list(new_dep_ids)
+        while stack:
+            node = stack.pop()
+            if node == ticket_id:
+                return True
+            if node in seen:
+                continue
+            seen.add(node)
+            stack.extend(
+                db.scalars(select(TicketDep.depends_on_id).where(TicketDep.ticket_id == node))
+            )
+        return False
+
+    def set_ticket_deps(db: Session, ticket: Ticket, board: Board, new_dep_ids: list[int]) -> None:
+        new_dep_ids = sorted(set(new_dep_ids))
+        if new_dep_ids:
+            rows = db.scalars(select(Ticket).where(Ticket.id.in_(new_dep_ids))).all()
+            found = {t.id for t in rows}
+            missing = set(new_dep_ids) - found
+            if missing:
+                raise HTTPException(400, f"unknown ticket id(s) in depends_on: {sorted(missing)}")
+            for dep in rows:
+                dep_board = db.get(Board, dep.board_id)
+                if dep_board.cluster_id != board.cluster_id:
+                    raise HTTPException(400, "depends_on must reference tickets in this cluster")
+            if dep_creates_cycle(db, ticket.id, new_dep_ids):
+                raise HTTPException(400, "that dependency would create a cycle")
+        for existing in db.scalars(select(TicketDep).where(TicketDep.ticket_id == ticket.id)):
+            db.delete(existing)
+        for dep_id in new_dep_ids:
+            db.add(TicketDep(ticket_id=ticket.id, depends_on_id=dep_id))
+
     def ticket_json(db: Session, t: Ticket) -> dict:
         comments = db.scalars(
             select(Comment).where(Comment.ticket_id == t.id).order_by(Comment.created_at)
@@ -324,6 +391,9 @@ def create_app(
             "attempts": t.attempts,
             "created_at": t.created_at.isoformat(),
             "updated_at": t.updated_at.isoformat(),
+            "depends_on": depends_on_ids(db, t.id),
+            "blocks": blocks_ids(db, t.id),
+            "blocked": is_blocked(db, t.id),
             "comments": [
                 {
                     "writer": c.writer,
@@ -693,6 +763,9 @@ def create_app(
             if body.status not in TICKET_STATUSES:
                 raise HTTPException(400, f"status must be one of {TICKET_STATUSES}")
             ticket.status = body.status
+        if body.depends_on is not None:
+            board = db.get(Board, ticket.board_id)
+            set_ticket_deps(db, ticket, board, body.depends_on)
         ticket.updated_at = utcnow()
         db.commit()
         # Moving into "ready" queues the ticket for an agent.
@@ -729,6 +802,12 @@ def create_app(
             db.delete(c)
         for i in db.scalars(select(WorkItem).where(WorkItem.ticket_id == ticket.id)):
             db.delete(i)
+        for d in db.scalars(
+            select(TicketDep).where(
+                (TicketDep.ticket_id == ticket.id) | (TicketDep.depends_on_id == ticket.id)
+            )
+        ):
+            db.delete(d)
         db.delete(ticket)
         db.commit()
         return {"ok": True}

@@ -75,6 +75,17 @@ MAX_ATTEMPTS = 2  # keep in sync with app/models.py MAX_ATTEMPTS
 
 UTC_NOW = "(now() at time zone 'utc')"
 
+# A queued ticket is eligible only once every dependency it has is done or in
+# review — matching the local .kanban tool's `_dep_met_fn`. Plain ANSI SQL
+# (no Postgres-only syntax), unlike the rest of CLAIM_SQL, so it also runs
+# unmodified against SQLite in tests (see tests/test_worker.py) — the two
+# places this predicate can drift apart from CLAIM_SQL are guarded by that
+# test importing this exact constant rather than re-typing it.
+DEPS_MET_SQL = """NOT EXISTS (
+         SELECT 1 FROM ticket_deps td
+         JOIN tickets dep ON dep.id = td.depends_on_id
+         WHERE td.ticket_id = t.id AND dep.status NOT IN ('done', 'review'))"""
+
 # Atomic, race-safe claim: SKIP LOCKED means concurrent workers never block
 # or double-claim; the subquery orders by queue age and honors target_worker.
 # The board filter keeps a PC from claiming work it cannot do: a ticket is
@@ -83,6 +94,9 @@ UTC_NOW = "(now() at time zone 'utc')"
 # case resolve_directory() can clone/refresh it on demand — no --set-path
 # needed. A NULL %(boards)s disables the configured-boards half entirely,
 # which is how --stub (no repo needed) opts out and still claims everything.
+# The dependency predicate is enforced here rather than in Python: a Python
+# check would have to claim the row first and then abandon it, and it would
+# not hold across N independent workers racing the same queue.
 CLAIM_SQL = f"""
 UPDATE work_queue SET status='claimed', claimed_by=%(wid)s, claimed_at={UTC_NOW}
 WHERE id = (
@@ -94,6 +108,7 @@ WHERE id = (
          OR t.board_id = ANY(%(boards)s::int[])
          OR EXISTS (SELECT 1 FROM boards b
                     WHERE b.id = t.board_id AND COALESCE(b.repo_url, '') <> ''))
+    AND {DEPS_MET_SQL}
   ORDER BY wq.queued_at, wq.id
   FOR UPDATE OF wq SKIP LOCKED
   LIMIT 1
