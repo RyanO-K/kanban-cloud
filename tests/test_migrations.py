@@ -90,7 +90,7 @@ def test_models_have_phase1_columns():
     from app.models import Board, Ticket
     board_cols = {c.name for c in Board.__table__.columns}
     assert {"description", "out_of_scope", "commit_requirements",
-            "use_worktrees"} <= board_cols
+            "use_worktrees", "repo_url"} <= board_cols
     assert "directory" not in board_cols  # per-PC, never a server column
     assert "session_id" in {c.name for c in Ticket.__table__.columns}
     assert {"concurrency", "running"} <= {c.name for c in Worker.__table__.columns}

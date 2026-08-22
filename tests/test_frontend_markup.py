@@ -71,9 +71,14 @@ def test_ticket_drag_and_folder_drop_do_not_collide(markup):
 
 def test_board_settings_modal_markup_present(markup):
     for token in ("boardSettingsBtn", "boardOverlay", "bDescription",
-                  "bOutOfScope", "bCommitReq", "bUseWorktrees",
+                  "bOutOfScope", "bCommitReq", "bUseWorktrees", "bRepoUrl",
                   "openBoardSettings", "saveBoardSettings"):
         assert token in markup, token
+
+
+def test_board_settings_wires_repo_url_on_open_and_save(markup):
+    assert 'document.getElementById("bRepoUrl").value = b.repo_url || ""' in markup
+    assert 'repo_url: document.getElementById("bRepoUrl").value' in markup
 
 
 def test_board_settings_button_is_owner_only(markup):

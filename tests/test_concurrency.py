@@ -192,3 +192,94 @@ def test_revoked_credentials_stop_every_slot(monkeypatch, tmp_path):
     stop = threading.Event()
     worker.run_slot(cfg, args, worker.StubExecutor(), stop, 0)
     assert stop.is_set()
+
+
+def test_real_slots_auto_clone_when_no_set_path_is_configured(monkeypatch, tmp_path):
+    """No --set-path entry, but the board carries a repo_url: resolve_directory
+    must be consulted and its directory handed to the executor."""
+    monkeypatch.setattr(worker, "CONFIG_PATH", tmp_path / "cfg.json")
+    seen = {}
+
+    def fake_claim(conn, wid, cid, boards):
+        return {"assignment_id": 1, "session_id": "s",
+                "board": {"id": 9, "name": "site-page",
+                          "repo_url": "https://github.com/org/repo.git"},
+                "ticket": {"id": 1, "board_id": 9, "title": "t", "body": "",
+                           "status": "doing", "attempts": 1}}
+
+    class RecordingExecutor:
+        name = "recording"
+
+        def run(self, ticket, board=None, directory=None, session_id=None):
+            seen["directory"] = directory
+            return True, "ok"
+
+    monkeypatch.setattr(worker.psycopg, "connect", _fake_connect())
+    monkeypatch.setattr(worker, "claim_next", fake_claim)
+    monkeypatch.setattr(worker, "finish_work", lambda *a, **k: "review")
+    monkeypatch.setattr(worker, "resolve_directory",
+                        lambda board, cfg: (str(tmp_path / "cloned"), None))
+
+    cfg = {"dsn": "x", "worker_id": 1, "cluster_id": 1, "name": "pc"}
+    args = worker.build_parser().parse_args(["--poll", "0.01", "--once"])
+    worker.run_slot(cfg, args, RecordingExecutor(), threading.Event(), 0)
+    assert seen["directory"] == str(tmp_path / "cloned")
+
+
+def test_resolve_error_skips_the_executor_entirely(monkeypatch, tmp_path):
+    """When neither --set-path nor repo_url resolves, don't waste a Claude
+    CLI invocation on a directory that doesn't exist."""
+    monkeypatch.setattr(worker, "CONFIG_PATH", tmp_path / "cfg.json")
+    finished = {}
+
+    def fake_claim(conn, wid, cid, boards):
+        return {"assignment_id": 1, "session_id": "s",
+                "board": {"id": 9, "name": "site-page", "repo_url": None},
+                "ticket": {"id": 1, "board_id": 9, "title": "t", "body": "",
+                           "status": "doing", "attempts": 1}}
+
+    class Unreachable:
+        name = "unreachable"
+
+        def run(self, *a, **k):
+            raise AssertionError("executor.run must not be called")
+
+    def fake_finish(conn, wname, wid, item_id, ticket_id, ok, comment):
+        finished["ok"], finished["comment"] = ok, comment
+        return "failed"
+
+    monkeypatch.setattr(worker.psycopg, "connect", _fake_connect())
+    monkeypatch.setattr(worker, "claim_next", fake_claim)
+    monkeypatch.setattr(worker, "finish_work", fake_finish)
+    monkeypatch.setattr(worker, "resolve_directory",
+                        lambda board, cfg: (None, "no folder configured, no repo_url"))
+
+    cfg = {"dsn": "x", "worker_id": 1, "cluster_id": 1, "name": "pc"}
+    args = worker.build_parser().parse_args(["--poll", "0.01", "--once"])
+    worker.run_slot(cfg, args, Unreachable(), threading.Event(), 0)
+    assert finished["ok"] is False
+    assert finished["comment"] == "no folder configured, no repo_url"
+
+
+def test_stub_slots_never_call_resolve_directory(monkeypatch, tmp_path):
+    """--stub needs no repo at all; it must not trigger a clone attempt."""
+    monkeypatch.setattr(worker, "CONFIG_PATH", tmp_path / "cfg.json")
+    monkeypatch.setattr(worker.time, "sleep", lambda s: None)  # skip StubExecutor's 2s delay
+
+    def fake_claim(conn, wid, cid, boards):
+        return {"assignment_id": 1, "session_id": "s",
+                "board": {"id": 9, "name": "b", "repo_url": "https://x/y.git"},
+                "ticket": {"id": 1, "board_id": 9, "title": "t", "body": "",
+                           "status": "doing", "attempts": 1}}
+
+    def boom(board, cfg):
+        raise AssertionError("resolve_directory must not run for --stub")
+
+    monkeypatch.setattr(worker.psycopg, "connect", _fake_connect())
+    monkeypatch.setattr(worker, "claim_next", fake_claim)
+    monkeypatch.setattr(worker, "finish_work", lambda *a, **k: "review")
+    monkeypatch.setattr(worker, "resolve_directory", boom)
+
+    cfg = {"dsn": "x", "worker_id": 1, "cluster_id": 1, "name": "pc"}
+    args = worker.build_parser().parse_args(["--poll", "0.01", "--once"])
+    worker.run_slot(cfg, args, worker.StubExecutor(), threading.Event(), 0)
