@@ -37,7 +37,9 @@
   .side { width: 260px; flex-shrink: 0; display: flex; flex-direction: column; gap: 12px; }
   .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
   .panel h3 { margin: 0 0 8px; font-size: 14px; }
-  .worker-row { display: flex; align-items: center; gap: 8px; font-size: 13px; padding: 3px 0; }
+  .worker-row { display: flex; align-items: center; gap: 6px; font-size: 13px; padding: 4px 0; flex-wrap: wrap; }
+  .worker-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .worker-actions { display: flex; gap: 6px; margin-left: auto; }
   /* folder-drop import */
   #dropZone { position: relative; }
   .dropHint { display: none; }
@@ -1022,13 +1024,15 @@ async function loadWorkers() {
   workers = await api("GET", `./api/clusters/${currentCluster.id}/workers`);
   document.getElementById("workersPanel").innerHTML = workers.length
     ? workers.map(w => `<div class="worker-row"><span class="dot ${w.online && !w.revoked ? "on" : ""}"></span>
-        <b>${esc(w.name)}</b>
+        <b class="worker-name">${esc(w.name)}</b>
         ${w.revoked ? '<span class="muted">(revoked)</span>'
           : `<span class="muted">${w.online
                 ? `${w.running || 0}/${w.concurrency || 1} running` : "offline"}</span>
              ${w.desired_concurrency ? `<span class="muted">(site limit ${w.desired_concurrency})</span>` : ""}
-             <button class="ghost small owner-only" onclick="openWorkerSettings(${w.id})">Edit</button>
-             <button class="ghost small owner-only" onclick="revokeWorker(${w.id})">Revoke</button>`}</div>`).join("")
+             <span class="worker-actions">
+               <button class="ghost small owner-only" onclick="openWorkerSettings(${w.id})">Edit</button>
+               <button class="ghost small owner-only" onclick="revokeWorker(${w.id})">Revoke</button>
+             </span>`}</div>`).join("")
     : `<span class="muted">No PCs enrolled yet. On the PC:<br>
        <code>py worker.py --enroll --server ${esc(enrollServer())} --join-code &lt;code&gt;</code></span>`;
 }
