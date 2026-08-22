@@ -2,6 +2,52 @@
 
 Last updated: 2026-08-22
 
+## Agents do real repo work, and PCs limit their own concurrency (2026-08-22)
+
+Cloud agents could not do repo work at all: `ClaudeExecutor` ran `claude -p`
+with no `cwd`, no tool grant, and a prompt built from the ticket title and
+body alone. It has now got all three. Spec:
+`docs/superpowers/specs/2026-08-22-agents-do-real-repo-work-design.md`, plan:
+`docs/superpowers/plans/2026-08-22-agents-do-real-repo-work.md`. This is
+Phase 1 of the local-vs-cloud gap analysis in
+`docs/2026-08-22-local-vs-cloud-gap-analysis.md`.
+
+The design splits "where does this agent run" in two, because the two halves
+have different owners. Project facts — description, out-of-scope,
+commit requirements, worktree preference — are board columns on the server,
+since every PC working that board needs the same ones. The *folder* is not:
+the same board is worked by machines with different layouts, so it lives in
+each worker's own `.worker_config.json`, keyed by board id, set with
+`--set-path`. The prompt is therefore composed on the worker, by
+`app/prompt.py`, which is stdlib-only by contract — `worker.py` imports it and
+PyInstaller follows static imports into the onefile exe, so a SQLAlchemy
+import there would drag the whole server in. A test enforces that.
+
+`CLAIM_SQL` grew a board predicate so a PC with no folder for a board goes
+idle instead of claiming a ticket it would immediately have to fail. `--stub`
+passes NULL to opt out; it needs no repo.
+
+Concurrency is a worker-local setting (`--concurrency N`, saved to the
+config), not a server one — nothing schedules, so N slot threads each running
+their own claim/run/report loop is the whole mechanism. `SKIP LOCKED` already
+makes concurrent claims race-safe, so slots coordinate on nothing but a stop
+event. The heartbeat moved to the main thread: it used to ride on the claim
+query, which is exactly what a fully-busy worker stops issuing, so a PC
+working flat out reported offline.
+
+Found and fixed along the way: `subprocess.run(..., shell=True)` on Windows
+re-parses the argument list through cmd.exe, truncating the multi-line prompt
+at its first newline. Every cloud agent to date had received the ticket title
+and none of its body. `shutil.which` finds the `.CMD` shim that `shell=True`
+was there for, with `shell=False`. Regression-tested.
+
+Tests: 116 → 179 (3 migrations, 8 board settings, 3 markup, 11 prompt,
+18 worker paths, 11 executor, 11 concurrency).
+
+Not yet done — the remaining phases of the gap analysis: ticket dependencies,
+a cluster-wide cap, a reaper for dead claims, live progress streaming, kill,
+agent questions and chat, agent profiles, and triage.
+
 ## Import a local `.kanban` board (2026-08-22)
 
 An owner-only **Import** button in the header pulls a board out of the local
