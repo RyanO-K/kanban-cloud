@@ -109,7 +109,7 @@ class StubExecutor:
 
     name = "stub"
 
-    def run(self, ticket, board=None, directory=None, session_id=None):
+    def run(self, ticket, board=None, directory=None, session_id=None, progress_cb=None):
         print(f"  [stub] pretending to work on ticket #{ticket['id']}: {ticket['title']}")
         time.sleep(2)
         return True, (
@@ -117,6 +117,45 @@ class StubExecutor:
             f"{ticket.get('attempts', '?')}). This is a placeholder result — "
             "run the worker without --stub to execute via the Claude CLI."
         )
+
+
+# ---------- stream-json progress parsing ----------
+#
+# `--output-format stream-json` (the same format the local orchestrator's log
+# viewer already parses) emits one JSON object per line: `assistant` turns
+# (text and tool_use blocks) and a final `result` summary. `system` init and
+# `user` tool-result echoes carry nothing worth surfacing in a progress feed
+# and are dropped.
+
+def _stream_json_text(raw_line: str):
+    """One human-readable progress line from a raw stream-json line, or
+    None if it has nothing worth showing."""
+    raw_line = raw_line.strip()
+    if not raw_line:
+        return None
+    try:
+        obj = json.loads(raw_line)
+    except (json.JSONDecodeError, TypeError):
+        return raw_line
+    kind = obj.get("type")
+    if kind == "assistant":
+        parts = []
+        for block in (obj.get("message") or {}).get("content") or []:
+            if block.get("type") == "text":
+                text = (block.get("text") or "").strip()
+                if text:
+                    parts.append(text)
+            elif block.get("type") == "tool_use":
+                parts.append(f"-> {block.get('name', 'tool')}")
+        return "\n".join(parts) or None
+    if kind == "result":
+        return (obj.get("result") or "").strip() or None
+    return None
+
+
+def _render_stream_lines(raw_lines) -> str:
+    rendered = [t for t in (_stream_json_text(l) for l in raw_lines) if t]
+    return "\n".join(rendered).strip()
 
 
 class ClaudeExecutor:
@@ -129,10 +168,14 @@ class ClaudeExecutor:
 
     name = "claude"
 
-    def __init__(self, allowed_tools: str = DEFAULT_ALLOWED_TOOLS):
+    def __init__(self, allowed_tools: str = DEFAULT_ALLOWED_TOOLS, progress_batch: int = 4):
         self.allowed_tools = allowed_tools
+        # How many stream-json turns to buffer before flushing a progress_cb
+        # call — batches a chatty run into a handful of comments instead of
+        # one per line.
+        self.progress_batch = max(1, progress_batch)
 
-    def run(self, ticket, board=None, directory=None, session_id=None):
+    def run(self, ticket, board=None, directory=None, session_id=None, progress_cb=None):
         board = board or {}
         name = board.get("name", "?")
         if not directory:
@@ -156,20 +199,64 @@ class ClaudeExecutor:
             return False, "`claude` CLI not found on this PC's PATH."
 
         prompt = build_agent_prompt(ticket, board, directory)
-        cmd = [exe, "-p", prompt, "--allowedTools", self.allowed_tools]
+        cmd = [exe, "-p", prompt, "--allowedTools", self.allowed_tools,
+               "--output-format", "stream-json", "--verbose"]
         if session_id:
             cmd += ["--session-id", session_id]
         print(f"  [claude] running in {directory} for ticket #{ticket['id']}")
+
+        def emit(text):
+            if text and progress_cb:
+                try:
+                    progress_cb(text)
+                except Exception as exc:
+                    print(f"  [claude] progress callback failed: {exc!r}")
+
         try:
-            proc = subprocess.run(cmd, cwd=directory,
-                                  capture_output=True, text=True, timeout=1800)
+            # Popen + incremental reads (rather than subprocess.run with
+            # capture_output=True, which blocks until the process exits) is
+            # what makes streaming possible at all. As a side effect it also
+            # removes the old 30-minute all-or-nothing timeout: whatever the
+            # agent produced before a stall or crash is already visible
+            # instead of being discarded along with the rest.
+            proc = subprocess.Popen(cmd, cwd=directory, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, text=True, bufsize=1)
         except FileNotFoundError:
             return False, "`claude` CLI not found on this PC's PATH."
-        except subprocess.TimeoutExpired:
-            return False, "Claude CLI timed out after 30 minutes."
-        output = (proc.stdout or "").strip() or (proc.stderr or "").strip()
-        if proc.returncode != 0:
-            return False, f"Claude CLI exited {proc.returncode}: {output[:2000]}"
+
+        seen_lines = []
+        pending = []
+        try:
+            for raw_line in proc.stdout:
+                seen_lines.append(raw_line)
+                text = _stream_json_text(raw_line)
+                if text:
+                    pending.append(text)
+                    if len(pending) >= self.progress_batch:
+                        emit("\n".join(pending))
+                        pending = []
+        except Exception as exc:
+            emit("\n".join(pending))
+            try:
+                proc.kill()
+                proc.wait()
+            except Exception:
+                pass
+            partial = _render_stream_lines(seen_lines)
+            crash_msg = f"Claude CLI crashed while streaming output: {exc!r}"
+            comment = f"{crash_msg}\n\n{partial}" if partial else crash_msg
+            return False, comment[:10000]
+        finally:
+            try:
+                proc.stdout.close()
+            except Exception:
+                pass
+
+        emit("\n".join(pending))
+        returncode = proc.wait()
+        output = _render_stream_lines(seen_lines)
+        if returncode != 0:
+            return False, f"Claude CLI exited {returncode}: {output[:2000]}"
         return True, output[:10000] or "(no output)"
 
 
@@ -711,12 +798,23 @@ def run_slot(cfg, args, executor, stop_event, slot_no: int) -> None:
                 with _SLOT_LOCK:
                     _RUNNING["n"] += 1
                 print(f"[slot {slot_no}] claimed #{ticket['id']} '{ticket['title']}'")
+
+                # Bound to this claim's connection/ticket by default args, so a
+                # progress flush mid-run always lands on the right row even if
+                # `conn`/`ticket` are reassigned by a later loop iteration.
+                def progress_cb(message, _conn=conn, _ticket_id=ticket["id"]):
+                    try:
+                        add_progress(_conn, cfg["worker_id"], cfg["name"], _ticket_id, message)
+                    except Exception as exc:
+                        print(f"[slot {slot_no}] progress post failed: {exc!r}")
+
                 try:
                     if isinstance(executor, StubExecutor):
                         ok, comment = executor.run(
                             ticket, board=work.get("board"),
                             directory=paths.get(str(ticket["board_id"])),
-                            session_id=work.get("session_id"))
+                            session_id=work.get("session_id"),
+                            progress_cb=progress_cb)
                     else:
                         directory, resolve_error = resolve_directory(
                             work.get("board") or {}, cfg)
@@ -726,7 +824,8 @@ def run_slot(cfg, args, executor, stop_event, slot_no: int) -> None:
                             ok, comment = executor.run(
                                 ticket, board=work.get("board"),
                                 directory=directory,
-                                session_id=work.get("session_id"))
+                                session_id=work.get("session_id"),
+                                progress_cb=progress_cb)
                 except Exception as exc:
                     ok, comment = False, f"Executor error: {exc!r}"
                 finally:

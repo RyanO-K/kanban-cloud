@@ -69,7 +69,7 @@ def test_slots_run_concurrently_and_never_exceed_the_limit(monkeypatch, tmp_path
     class SlowExecutor:
         name = "slow"
 
-        def run(self, ticket, board=None, directory=None, session_id=None):
+        def run(self, ticket, board=None, directory=None, session_id=None, progress_cb=None):
             with lock:
                 live.append(ticket["id"])
                 peak["n"] = max(peak["n"], len(live))
@@ -210,7 +210,7 @@ def test_real_slots_auto_clone_when_no_set_path_is_configured(monkeypatch, tmp_p
     class RecordingExecutor:
         name = "recording"
 
-        def run(self, ticket, board=None, directory=None, session_id=None):
+        def run(self, ticket, board=None, directory=None, session_id=None, progress_cb=None):
             seen["directory"] = directory
             return True, "ok"
 
