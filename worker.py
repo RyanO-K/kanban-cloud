@@ -26,6 +26,7 @@ Note: while this worker runs, its polling keeps Neon compute awake
 (free tier autosuspends only when idle). Stop the worker when not in use.
 """
 import argparse
+import datetime
 import json
 import os
 import re
@@ -73,6 +74,15 @@ CONFIG_PATH = app_dir() / ".worker_config.json"
 POLL_SECONDS = 10
 MAX_ATTEMPTS = 2  # keep in sync with app/models.py MAX_ATTEMPTS
 
+# How often a slot touches work_queue.heartbeat_at while its claim is in
+# flight, and how stale a heartbeat has to be before the reaper gives up on
+# it. 5x the heartbeat interval is the same margin models.Worker.is_online
+# gives WORKER_ONLINE_SECONDS over the poll interval — generous enough that a
+# GC pause or a slow DB round-trip never gets a live claim reaped, but tight
+# enough that a PC that died mid-ticket doesn't block re-delegation for long.
+HEARTBEAT_INTERVAL_SECONDS = 60
+STALE_CLAIM_SECONDS = 300
+
 UTC_NOW = "(now() at time zone 'utc')"
 
 # A queued ticket is eligible only once every dependency it has is done or in
@@ -108,7 +118,8 @@ DEPS_MET_SQL = """NOT EXISTS (
 CLAIM_ORDER_BY = 't."order", wq.queued_at, wq.id'
 
 CLAIM_SQL = f"""
-UPDATE work_queue SET status='claimed', claimed_by=%(wid)s, claimed_at={UTC_NOW}
+UPDATE work_queue SET status='claimed', claimed_by=%(wid)s, claimed_at={UTC_NOW},
+    heartbeat_at={UTC_NOW}
 WHERE id = (
   SELECT wq.id FROM work_queue wq
   JOIN tickets t ON t.id = wq.ticket_id
@@ -665,6 +676,39 @@ def heartbeat(conn, worker_id: int) -> None:
         )
 
 
+def touch_claim_heartbeat(conn, item_id: int) -> None:
+    """Refresh one claim's heartbeat_at. Guarded on status='claimed' so a
+    heartbeat that lands after the claim was already finished/superseded is a
+    silent no-op rather than resurrecting a stale row."""
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            f"UPDATE work_queue SET heartbeat_at={UTC_NOW} "
+            f"WHERE id=%s AND status='claimed'",
+            (item_id,),
+        )
+
+
+def _claim_heartbeat_loop(dsn: str, item_id: int, stop_event: threading.Event,
+                          interval: float = HEARTBEAT_INTERVAL_SECONDS) -> None:
+    """Runs on its own thread and connection for the lifetime of one executor
+    run, so a 30-minute agent invocation keeps proving to the reaper that this
+    claim is still alive. A dedicated connection avoids sharing the slot's
+    main connection across threads, which psycopg does not support."""
+    conn = None
+    while not stop_event.wait(interval):
+        try:
+            if conn is None or conn.closed:
+                conn = psycopg.connect(dsn, connect_timeout=15)
+            touch_claim_heartbeat(conn, item_id)
+        except Exception:
+            conn = None  # reconnect next tick; a missed beat or two is fine
+    if conn is not None and not conn.closed:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def claim_next(conn, worker_id: int, cluster_id: int, board_ids=None) -> dict | None:
     """Claim the oldest eligible queued item; returns a work payload or None.
 
@@ -793,6 +837,87 @@ def finish_work(conn, worker_id: int, worker_name: str, item_id: int,
         return ticket_status
 
 
+# ---------- stale-claim reaper ----------
+#
+# The cloud analogue of the local tool's reap_decision: if a worker PC dies
+# mid-ticket, its claim never calls finish_work, so nothing would otherwise
+# move the row out of 'claimed'. Every worker opportunistically reaps its own
+# cluster's stale claims once per poll cycle (see main()) — no new
+# infrastructure (no Render cron, no elected leader), because the existing
+# kanban_worker group grant already includes UPDATE on work_queue/tickets for
+# every enrolled PC, not just the one that placed a given claim. Two workers
+# reaping the same cluster in the same tick is expected, not a bug: the
+# threshold check in reap_stale_claims re-reads the row before touching it,
+# then _reap_one's UPDATE ... WHERE status='claimed' guard (same pattern as
+# finish_work's rowcount guard) means only the first one actually flips it —
+# whichever reaper loses the race sees rowcount 0 and moves on.
+
+def reap_stale_claims(conn, cluster_id: int,
+                      stale_after_seconds: float = STALE_CLAIM_SECONDS,
+                      now: "datetime.datetime | None" = None) -> list:
+    """Flip claims whose heartbeat has gone stale back to queued/ready,
+    respecting MAX_ATTEMPTS exactly like a reported failure would. Returns a
+    list of (item_id, ticket_id, new_ticket_status) for whichever claims this
+    call actually reaped (empty if another reaper won every race, or if
+    nothing was stale).
+    """
+    now = now or datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+    cutoff = now - datetime.timedelta(seconds=stale_after_seconds)
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id FROM work_queue WHERE status='claimed' AND cluster_id=%s "
+            "AND COALESCE(heartbeat_at, claimed_at) < %s",
+            (cluster_id, cutoff),
+        )
+        candidate_ids = [row[0] for row in cur.fetchall()]
+    reaped = []
+    for item_id in candidate_ids:
+        result = _reap_one(conn, item_id, stale_after_seconds)
+        if result is not None:
+            reaped.append(result)
+    return reaped
+
+
+def _reap_one(conn, item_id: int, stale_after_seconds: float):
+    """Atomically resolve one stale claim, or no-op if it was already
+    resolved (by another reaper, or by the worker's own finish_work landing
+    late) between the candidate scan and here."""
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            f"UPDATE work_queue SET status='failed', finished_at={UTC_NOW}, "
+            f"result=%s WHERE id=%s AND status='claimed'",
+            (f"reaped: no heartbeat for over {int(stale_after_seconds)}s "
+             "(worker likely died mid-ticket)", item_id),
+        )
+        if cur.rowcount != 1:
+            return None
+        cur.execute("SELECT ticket_id FROM work_queue WHERE id=%s", (item_id,))
+        ticket_id = cur.fetchone()[0]
+        cur.execute("SELECT attempts, board_id FROM tickets WHERE id=%s", (ticket_id,))
+        attempts, board_id = cur.fetchone()
+        if (attempts or 0) < MAX_ATTEMPTS:
+            cur.execute("SELECT cluster_id FROM boards WHERE id=%s", (board_id,))
+            cluster_id = cur.fetchone()[0]
+            cur.execute(
+                f"INSERT INTO work_queue (ticket_id, cluster_id, status, queued_at) "
+                f"VALUES (%s, %s, 'queued', {UTC_NOW})",
+                (ticket_id, cluster_id),
+            )
+            cur.execute(
+                f"UPDATE tickets SET status='ready', assigned_worker=NULL, "
+                f"updated_at={UTC_NOW} WHERE id=%s",
+                (ticket_id,),
+            )
+            new_status = "ready"
+        else:
+            cur.execute(
+                f"UPDATE tickets SET status='failed', updated_at={UTC_NOW} WHERE id=%s",
+                (ticket_id,),
+            )
+            new_status = "failed"
+    return (item_id, ticket_id, new_status)
+
+
 # ---------- argument parser & executor selection ----------
 
 # ---------- concurrency slots ----------
@@ -860,6 +985,13 @@ def run_slot(cfg, args, executor, stop_event, slot_no: int) -> None:
                     except Exception as exc:
                         print(f"[slot {slot_no}] progress post failed: {exc!r}")
 
+                hb_stop = threading.Event()
+                hb_thread = threading.Thread(
+                    target=_claim_heartbeat_loop,
+                    args=(cfg["dsn"], work["assignment_id"], hb_stop),
+                    daemon=True,
+                )
+                hb_thread.start()
                 try:
                     if isinstance(executor, StubExecutor):
                         ok, comment = executor.run(
@@ -886,6 +1018,8 @@ def run_slot(cfg, args, executor, stop_event, slot_no: int) -> None:
                 except Exception as exc:
                     ok, comment = False, f"Executor error: {exc!r}"
                 finally:
+                    hb_stop.set()
+                    hb_thread.join(timeout=5)
                     with _SLOT_LOCK:
                         _RUNNING["n"] -= 1
                 status = finish_work(conn, cfg["worker_id"], cfg["name"],
@@ -1034,7 +1168,9 @@ def main() -> int:
 
     # The heartbeat lives on the main thread so a PC with every slot busy in a
     # 30-minute agent run still reports online — it used to ride on the claim
-    # query, which is exactly what a busy worker stops issuing.
+    # query, which is exactly what a busy worker stops issuing. The stale-claim
+    # reaper piggybacks on the same tick: opportunistic, once per poll cycle,
+    # no dedicated infrastructure (see the reaper's own docstring for why).
     hb_conn = None
     try:
         while any(t.is_alive() for t in slots):
@@ -1043,6 +1179,7 @@ def main() -> int:
                     hb_conn = psycopg.connect(cfg["dsn"], connect_timeout=15)
                 set_slot_counts(hb_conn, cfg["worker_id"], concurrency,
                                 running_count())
+                reap_stale_claims(hb_conn, cfg["cluster_id"])
             except psycopg.OperationalError:
                 hb_conn = None
             except Exception:

@@ -198,5 +198,10 @@ class WorkItem(Base):
     claimed_by: Mapped[int | None] = mapped_column(ForeignKey("workers.id"), nullable=True)
     queued_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow)
     claimed_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
+    # Set at claim time and refreshed periodically by the running slot while
+    # the executor is in flight (worker.py's _claim_heartbeat_loop). A claim
+    # whose heartbeat goes stale (dead worker PC) is what the reaper looks for
+    # — claimed_at alone can't tell a dead claim from a slow-but-alive one.
+    heartbeat_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
     result: Mapped[str | None] = mapped_column(Text, nullable=True)
