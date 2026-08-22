@@ -94,10 +94,23 @@ class ClusterSettings(Base):
 
 
 class Board(Base):
+    """A project. The metadata below is the context every agent working one of
+    this board's tickets is given (see app/prompt.build_agent_prompt).
+
+    Note what is NOT here: the folder the code lives in. That is per-PC — the
+    same board is worked by several machines with different layouts — so it
+    lives in each worker's own config, not in this table.
+    """
     __tablename__ = "boards"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     cluster_id: Mapped[int] = mapped_column(ForeignKey("clusters.id"), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    out_of_scope: Mapped[str | None] = mapped_column(Text, nullable=True)
+    commit_requirements: Mapped[str | None] = mapped_column(Text, nullable=True)
+    use_worktrees: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False, server_default="0"
+    )
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow)
 
 
@@ -111,6 +124,15 @@ class Worker(Base):
     role_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
     revoked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="idle")  # idle | working
+    # How many tickets this PC will run at once, and how many are running now.
+    # The PC owns the limit; the server only displays it. Defaults keep rows
+    # written by exes that predate these columns readable.
+    concurrency: Mapped[int] = mapped_column(
+        Integer, default=1, nullable=False, server_default="1"
+    )
+    running: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False, server_default="0"
+    )
     last_seen: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow)
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow)
 
@@ -131,6 +153,9 @@ class Ticket(Base):
     # NULL target_worker = "any worker in the cluster may claim".
     target_worker: Mapped[int | None] = mapped_column(ForeignKey("workers.id"), nullable=True)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
+    # Claude CLI session id of the most recent attempt, so a human can take a
+    # stuck run over with `claude --resume <id>`.
+    session_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 

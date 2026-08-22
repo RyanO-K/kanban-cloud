@@ -40,11 +40,19 @@ CREATE TABLE IF NOT EXISTS cluster_settings (
     updated_at     TIMESTAMP NOT NULL DEFAULT now()
 );
 
+-- description/out_of_scope/commit_requirements/use_worktrees are the project
+-- context injected into every agent prompt built for this board. The folder the
+-- code lives in is deliberately NOT here: it is per-PC and lives in each
+-- worker's own .worker_config.json.
 CREATE TABLE IF NOT EXISTS boards (
-    id         SERIAL PRIMARY KEY,
-    cluster_id INTEGER NOT NULL REFERENCES clusters(id),
-    name       VARCHAR(255) NOT NULL,
-    created_at TIMESTAMP NOT NULL DEFAULT now()
+    id                  SERIAL PRIMARY KEY,
+    cluster_id          INTEGER NOT NULL REFERENCES clusters(id),
+    name                VARCHAR(255) NOT NULL,
+    description         TEXT,
+    out_of_scope        TEXT,
+    commit_requirements TEXT,
+    use_worktrees       BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at          TIMESTAMP NOT NULL DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS workers (
@@ -54,6 +62,10 @@ CREATE TABLE IF NOT EXISTS workers (
     role_name  VARCHAR(64),
     revoked    BOOLEAN NOT NULL DEFAULT FALSE,
     status     VARCHAR(32) NOT NULL DEFAULT 'idle',   -- idle | working
+    -- Slots this PC runs at once, and how many are busy. Set by the worker
+    -- itself; the server only displays them.
+    concurrency INTEGER NOT NULL DEFAULT 1,
+    running     INTEGER NOT NULL DEFAULT 0,
     last_seen  TIMESTAMP NOT NULL DEFAULT now(),
     created_at TIMESTAMP NOT NULL DEFAULT now(),
     UNIQUE (cluster_id, name)
@@ -71,6 +83,8 @@ CREATE TABLE IF NOT EXISTS tickets (
     assigned_worker INTEGER REFERENCES workers(id),
     target_worker   INTEGER REFERENCES workers(id),
     attempts        INTEGER NOT NULL DEFAULT 0,
+    -- Claude CLI session of the latest attempt: `claude --resume <id>`.
+    session_id      VARCHAR(64),
     created_at      TIMESTAMP NOT NULL DEFAULT now(),
     updated_at      TIMESTAMP NOT NULL DEFAULT now()
 );
