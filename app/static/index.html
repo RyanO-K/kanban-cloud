@@ -192,9 +192,12 @@
     <label style="display:flex; align-items:center; gap:6px; margin-top:8px">
       <input type="checkbox" id="bUseWorktrees"> Use git worktrees for this project
     </label>
-    <p class="muted" style="font-size:12px">Each worker PC sets its own folder for this board with
-      <code>kanban-worker --set-path</code>. Folders are never stored here — the same board is
-      worked by machines with different layouts.</p>
+    <label>Repo URL</label>
+    <input id="bRepoUrl" placeholder="https://github.com/org/repo.git">
+    <p class="muted" style="font-size:12px">A worker PC with no
+      <code>--set-path</code> entry for this board clones this URL automatically
+      into its own AppData folder and keeps it up to date. Setting
+      <code>kanban-worker --set-path</code> on a PC always overrides this.</p>
     <div class="row">
       <button onclick="saveBoardSettings()">Save</button>
       <button class="ghost" onclick="document.getElementById('boardOverlay').classList.remove('show')">Cancel</button>
@@ -360,6 +363,7 @@ function openBoardSettings() {
   document.getElementById("bOutOfScope").value = b.out_of_scope || "";
   document.getElementById("bCommitReq").value = b.commit_requirements || "";
   document.getElementById("bUseWorktrees").checked = !!b.use_worktrees;
+  document.getElementById("bRepoUrl").value = b.repo_url || "";
   document.getElementById("boardOverlay").classList.add("show");
 }
 
@@ -371,6 +375,7 @@ async function saveBoardSettings() {
     out_of_scope: document.getElementById("bOutOfScope").value,
     commit_requirements: document.getElementById("bCommitReq").value,
     use_worktrees: document.getElementById("bUseWorktrees").checked,
+    repo_url: document.getElementById("bRepoUrl").value,
   });
   document.getElementById("boardOverlay").classList.remove("show");
   await refreshClusterBits();
