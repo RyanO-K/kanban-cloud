@@ -33,6 +33,7 @@
   .card:hover { border-color: var(--accent); }
   .card .tid { color: var(--muted); font-size: 11px; }
   .badge { display: inline-block; font-size: 10px; padding: 1px 6px; border-radius: 8px; background: var(--badge-bg); color: var(--accent); margin-top: 4px; }
+  .badge.blocked { background: var(--bad); color: #fff; margin-right: 4px; }
   .side { width: 260px; flex-shrink: 0; display: flex; flex-direction: column; gap: 12px; }
   .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
   .panel h3 { margin: 0 0 8px; font-size: 14px; }
@@ -150,6 +151,9 @@
     </select>
     <label>Run on</label>
     <select id="tTarget"><option value="">any worker</option></select>
+    <label>Depends on <span class="muted" style="font-weight:normal">(ctrl/cmd-click to select several; must all reach review/done before this ticket is claimed)</span></label>
+    <select id="tDeps" multiple size="4"></select>
+    <div id="tBlockedNote" class="badge blocked" style="display:none; margin-top:4px">Blocked — waiting on dependencies</div>
     <div class="row owner-only">
       <button onclick="saveTicket()">Save</button>
       <button class="ghost" id="runBtn" onclick="runTicket()">Run on agent now</button>
@@ -544,6 +548,7 @@ async function loadBoard() {
            ondragstart="event.dataTransfer.setData('text/plain','${t.id}')">
         <div class="tid">#${t.id}${t.target_worker ? " → " + esc(workerName(t.target_worker)) : ""}</div>
         <div>${esc(t.title)}</div>
+        ${t.blocked ? `<span class="badge blocked">blocked</span>` : ""}
         ${t.assigned_worker && (t.status === "doing") ? `<span class="badge">on ${esc(workerName(t.assigned_worker))}</span>` : ""}
         ${t.comments.length ? `<span class="badge">${t.comments.length} 💬</span>` : ""}
       </div>`).join("");
@@ -572,7 +577,7 @@ function workerName(id) {
 function openTicketModal(id) {
   editingTicket = id === null ? null : tickets.find(t => t.id === id);
   const readOnly = sessionMode === "spectator";
-  ["tTitle", "tBody", "tStatus", "tTarget"].forEach(x => document.getElementById(x).disabled = readOnly);
+  ["tTitle", "tBody", "tStatus", "tTarget", "tDeps"].forEach(x => document.getElementById(x).disabled = readOnly);
   document.getElementById("ticketModalTitle").textContent = editingTicket ? `Ticket #${editingTicket.id}` : "New ticket";
   document.getElementById("tTitle").value = editingTicket ? editingTicket.title : "";
   document.getElementById("tBody").value = editingTicket ? editingTicket.body : "";
@@ -581,6 +586,11 @@ function openTicketModal(id) {
   tgt.innerHTML = `<option value="">any worker</option>` +
     workers.filter(w => !w.revoked).map(w => `<option value="${w.id}">${esc(w.name)}${w.online ? "" : " (offline)"}</option>`).join("");
   tgt.value = editingTicket && editingTicket.target_worker ? editingTicket.target_worker : "";
+  const deps = document.getElementById("tDeps");
+  const dependsOn = editingTicket ? (editingTicket.depends_on || []) : [];
+  deps.innerHTML = tickets.filter(t => !editingTicket || t.id !== editingTicket.id)
+    .map(t => `<option value="${t.id}" ${dependsOn.includes(t.id) ? "selected" : ""}>#${t.id} ${esc(t.title)}</option>`).join("");
+  document.getElementById("tBlockedNote").style.display = editingTicket && editingTicket.blocked ? "" : "none";
   document.getElementById("delBtn").style.display = editingTicket ? "" : "none";
   document.getElementById("runBtn").style.display = editingTicket ? "" : "none";
   document.getElementById("commentsWrap").style.display = editingTicket ? "" : "none";
@@ -605,6 +615,7 @@ async function saveTicket() {
   const tgt = document.getElementById("tTarget").value;
   if (tgt) payload.target_worker = parseInt(tgt); else payload.clear_target = true;
   if (editingTicket) {
+    payload.depends_on = Array.from(document.getElementById("tDeps").selectedOptions).map(o => parseInt(o.value));
     await api("PATCH", `./api/tickets/${editingTicket.id}`, payload);
   } else {
     delete payload.clear_target;

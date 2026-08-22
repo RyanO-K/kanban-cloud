@@ -84,6 +84,18 @@ CREATE TABLE IF NOT EXISTS tickets (
     updated_at      TIMESTAMP NOT NULL DEFAULT now()
 );
 
+-- Dependency edges: ticket_id is not claimable (see the CLAIM_SQL predicate
+-- in worker.py) until depends_on_id reaches 'done' or 'review'. No cluster_id
+-- of its own — both tickets carry one via their board, checked by the app.
+-- `blocks` (the reverse edge) is derived by querying this table by
+-- depends_on_id rather than stored.
+CREATE TABLE IF NOT EXISTS ticket_deps (
+    id             SERIAL PRIMARY KEY,
+    ticket_id      INTEGER NOT NULL REFERENCES tickets(id),
+    depends_on_id  INTEGER NOT NULL REFERENCES tickets(id),
+    UNIQUE (ticket_id, depends_on_id)
+);
+
 CREATE TABLE IF NOT EXISTS comments (
     id         SERIAL PRIMARY KEY,
     ticket_id  INTEGER NOT NULL REFERENCES tickets(id),

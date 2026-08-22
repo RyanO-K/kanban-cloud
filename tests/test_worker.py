@@ -5,6 +5,7 @@ by scripts/neon_smoke_v2.py against the real database.
 """
 import io
 import json
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -43,6 +44,67 @@ def test_claim_sql_is_race_safe_and_utc():
     assert "now() at time zone 'utc'" in worker.CLAIM_SQL
     assert "target_worker IS NULL OR" in worker.CLAIM_SQL
     assert "LIMIT 1" in worker.CLAIM_SQL
+
+
+def test_claim_sql_gates_on_unmet_dependencies():
+    """The predicate must live in the claim SQL itself, not a Python check
+    run after claiming — see the DEPS_MET_SQL/CLAIM_SQL docstrings."""
+    assert worker.DEPS_MET_SQL in worker.CLAIM_SQL
+    assert "ticket_deps" in worker.CLAIM_SQL
+
+
+def _deps_met_row(conn, ticket_id):
+    """Run worker.DEPS_MET_SQL for real against a scratch SQLite DB, so the
+    dependency gate is proven behaviorally rather than by string match alone.
+    DEPS_MET_SQL is deliberately plain ANSI SQL (unlike the rest of CLAIM_SQL,
+    which needs Postgres-only SKIP LOCKED / array syntax) so it can run here
+    unmodified — this executes the exact production predicate text."""
+    query = f"SELECT t.id FROM tickets t WHERE t.id = ? AND {worker.DEPS_MET_SQL}"
+    return conn.execute(query, (ticket_id,)).fetchall()
+
+
+def test_ticket_with_unmet_dependency_is_never_claimable():
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE tickets (id INTEGER PRIMARY KEY, status TEXT);
+        CREATE TABLE ticket_deps (ticket_id INTEGER, depends_on_id INTEGER);
+        INSERT INTO tickets VALUES (1, 'ready'), (2, 'todo');
+        INSERT INTO ticket_deps VALUES (1, 2);
+        """
+    )
+    assert _deps_met_row(conn, 1) == []
+
+
+def test_ticket_becomes_claimable_the_moment_its_dependency_reaches_review_or_done():
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE tickets (id INTEGER PRIMARY KEY, status TEXT);
+        CREATE TABLE ticket_deps (ticket_id INTEGER, depends_on_id INTEGER);
+        INSERT INTO tickets VALUES (1, 'ready'), (2, 'todo');
+        INSERT INTO ticket_deps VALUES (1, 2);
+        """
+    )
+    assert _deps_met_row(conn, 1) == []  # still todo: not yet claimable
+
+    conn.execute("UPDATE tickets SET status='review' WHERE id=2")
+    assert _deps_met_row(conn, 1) == [(1,)]
+
+    conn.execute("UPDATE tickets SET status='done' WHERE id=2")
+    assert _deps_met_row(conn, 1) == [(1,)]
+
+
+def test_ticket_with_no_dependencies_is_unaffected():
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE tickets (id INTEGER PRIMARY KEY, status TEXT);
+        CREATE TABLE ticket_deps (ticket_id INTEGER, depends_on_id INTEGER);
+        INSERT INTO tickets VALUES (1, 'ready');
+        """
+    )
+    assert _deps_met_row(conn, 1) == [(1,)]
 
 
 def test_max_attempts_matches_server():

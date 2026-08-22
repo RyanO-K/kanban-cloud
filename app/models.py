@@ -155,6 +155,25 @@ class Ticket(Base):
     updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 
+class TicketDep(Base):
+    """A dependency edge: `ticket_id` cannot be claimed until `depends_on_id`
+    reaches DEP_MET_STATUSES. No cluster_id of its own — both tickets carry
+    one via their board, and the app layer enforces they match. `blocks`
+    (the reverse edge) is derived by querying this table by depends_on_id
+    rather than stored."""
+    __tablename__ = "ticket_deps"
+    __table_args__ = (UniqueConstraint("ticket_id", "depends_on_id"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ticket_id: Mapped[int] = mapped_column(ForeignKey("tickets.id"), nullable=False)
+    depends_on_id: Mapped[int] = mapped_column(ForeignKey("tickets.id"), nullable=False)
+
+
+# A dependency is satisfied once the prerequisite ticket reaches either of
+# these statuses. Keep in sync with worker.py's CLAIM_SQL, which encodes the
+# same rule directly in the claim predicate (see DEPS_MET_SQL there).
+DEP_MET_STATUSES = ("done", "review")
+
+
 class Comment(Base):
     __tablename__ = "comments"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

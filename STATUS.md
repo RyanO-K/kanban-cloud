@@ -2,6 +2,42 @@
 
 Last updated: 2026-08-22
 
+## Ticket dependencies gate claiming (2026-08-22)
+
+Phase 2 of the gap analysis (`docs/2026-08-22-local-vs-cloud-gap-analysis.md`,
+§8 item 4): a new `ticket_deps(ticket_id, depends_on_id)` table, cluster-scoped
+via each ticket's board (no `cluster_id` of its own). `blocks` is derived by
+querying the reverse edge rather than stored.
+
+The gate lives in `worker.CLAIM_SQL` itself (`worker.py`), not a Python check
+after claiming — a queued ticket is skipped unless every dependency has
+reached `done` or `review`. The predicate (`worker.DEPS_MET_SQL`) is plain
+ANSI SQL split out from the rest of `CLAIM_SQL`, which needs Postgres-only
+`SKIP LOCKED`/array syntax; being portable let it be proven behaviorally
+against a scratch SQLite DB in `tests/test_worker.py` instead of only
+string-matched, which is all the pre-existing board-filter predicate gets.
+
+`PATCH /api/tickets/{id}` takes a `depends_on` list (ticket editor, owner
+only): validates every id exists and shares the ticket's cluster, then
+rejects the save outright if it would create a cycle (BFS over existing
+edges from each candidate dependency back to the ticket being edited — a
+self-dependency is the one-node case of this, no special-casing needed).
+Deleting a ticket clears both its own edges and any edge pointing at it.
+Ticket JSON gained `depends_on`, `blocks`, and a derived `blocked` bool; the
+board view shows a red "blocked" badge on cards with an unmet dependency, and
+the ticket modal grew a multi-select picker with a matching note.
+
+`kanban_worker`'s SELECT grant (`app/enrollment.py`) picked up `ticket_deps`
+so the claim query's join can read it; `ensure_worker_group` re-applies
+grants on every startup, so an already-provisioned Neon DB picks this up
+without a manual step.
+
+Tests: 201 → 217 (9 dependency-graph + display, 4 claim-gating, 3 markup).
+
+Not yet done — the remaining phases: concurrency cap enforced in the claim
+transaction, `tickets.order`, stale-claim reaper, progress streaming, kill,
+human-in-the-loop, profiles/triage, git/worktree isolation.
+
 ## Agents do real repo work, and PCs limit their own concurrency (2026-08-22)
 
 Cloud agents could not do repo work at all: `ClaudeExecutor` ran `claude -p`
