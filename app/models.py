@@ -87,6 +87,24 @@ class ClusterMember(Base):
     joined_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class ClusterSettings(Base):
+    """Cluster-wide dispatch controls (gap analysis phase 2, item 5): a
+    concurrency cap enforced inside the claim transaction itself (see
+    worker.cluster_claim_gate) so it holds across N independent worker PCs
+    with no central dispatcher, and a stop-all switch that blocks every claim
+    outright. `enabled` toggles the cap without losing the configured number.
+    One row per cluster, created alongside it (see app/main.py) and
+    backfilled for older clusters by app/db.run_migrations.
+    """
+    __tablename__ = "cluster_settings"
+    cluster_id: Mapped[int] = mapped_column(ForeignKey("clusters.id"), primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default="0")
+    concurrency_cap: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    stop_all_requested: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False, server_default="0"
+    )
+
+
 class Board(Base):
     """A project. The metadata below is the context every agent working one of
     this board's tickets is given (see app/prompt.build_agent_prompt).

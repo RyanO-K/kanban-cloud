@@ -29,12 +29,16 @@ PASSWORD_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 # there. INSERT on ticket_log is the live-transcript stream (add_log_line);
 # DELETE there (and nowhere else) is the retention prune every worker runs
 # opportunistically (prune_ticket_log) — no dedicated cleanup infrastructure.
+# UPDATE on cluster_settings is never actually written by the worker role —
+# it's needed only so `SELECT ... FOR UPDATE` in worker.cluster_claim_gate
+# can lock the row (Postgres requires UPDATE, not just SELECT, to take a row
+# lock).
 GROUP_GRANTS = [
-    f"GRANT SELECT ON tickets, boards, clusters, workers, "
+    f"GRANT SELECT ON tickets, boards, clusters, workers, cluster_settings, "
     f"work_queue, comments, ticket_deps, ticket_questions, ticket_chat, "
     f"ticket_log TO {GROUP_ROLE}",
     f"GRANT INSERT ON comments, work_queue, ticket_questions, ticket_log TO {GROUP_ROLE}",
-    f"GRANT UPDATE ON work_queue, tickets, workers, ticket_chat TO {GROUP_ROLE}",
+    f"GRANT UPDATE ON work_queue, tickets, workers, ticket_chat, cluster_settings TO {GROUP_ROLE}",
     f"GRANT DELETE ON ticket_log TO {GROUP_ROLE}",
     f"GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {GROUP_ROLE}",
 ]

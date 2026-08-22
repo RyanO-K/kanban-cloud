@@ -201,11 +201,42 @@ def test_migration_adds_phase4_columns_to_an_existing_db(tmp_path):
         assert ddl.split()[0] in {c["name"] for c in insp.get_columns(table)}, ddl
 
 
+def test_cluster_settings_table_is_created(tmp_path):
+    engine = make_engine(f"sqlite:///{tmp_path / 'cs.db'}")
+    Base.metadata.create_all(engine)
+    run_migrations(engine)
+    insp = sa.inspect(engine)
+    assert "cluster_settings" in insp.get_table_names()
+    cols = {c["name"] for c in insp.get_columns("cluster_settings")}
+    assert cols == {"cluster_id", "enabled", "concurrency_cap", "stop_all_requested"}
+
+
+def test_run_migrations_backfills_a_settings_row_for_a_pre_existing_cluster(tmp_path):
+    """A cluster created before this table existed (or whose row was somehow
+    lost) must still get one — worker.cluster_claim_gate's race-safety
+    depends on every cluster having a row to lock."""
+    from app.models import Cluster, User
+
+    engine = make_engine(f"sqlite:///{tmp_path / 'backfill.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        db.add(User(id=1, email="a@b.co", password_hash="x"))
+        db.add(Cluster(id=1, name="T", join_code="J", created_by=1))
+        db.commit()
+    with engine.begin() as conn:
+        conn.execute(sa.text("DELETE FROM cluster_settings"))
+
+    run_migrations(engine)
+    run_migrations(engine)  # idempotent: must not duplicate or error
+
+    with engine.begin() as conn:
+        rows = conn.execute(sa.text("SELECT cluster_id FROM cluster_settings")).fetchall()
+    assert rows == [(1,)]
+
+
 def test_desired_concurrency_defaults_to_none_for_pre_ticket_18_rows(tmp_path):
     """A worker row written before this column existed must read as
     'no website override' rather than erroring or defaulting to 0."""
-    from sqlalchemy.orm import Session
-
     from app.models import Cluster, User
 
     engine = make_engine(f"sqlite:///{tmp_path / 'd4.db'}")

@@ -953,15 +953,71 @@ def _claim_heartbeat_loop(dsn: str, item_id: int, stop_event: threading.Event,
             pass
 
 
+# ---------- cluster-wide concurrency cap (gap analysis phase 2, item 5) ----------
+#
+# A worker's own --concurrency is a per-PC limit; nothing previously stopped
+# five PCs at 3 slots each from putting 15 agents on one Claude account. The
+# cap lives in cluster_settings and is enforced here, inside the same
+# transaction as the claim itself, so it holds across N independent worker
+# PCs with no central dispatcher — exactly like CLAIM_SQL's own SKIP LOCKED
+# race-safety above.
+
+CLUSTER_SETTINGS_LOCK_SQL = """
+SELECT concurrency_cap, enabled, stop_all_requested
+FROM cluster_settings WHERE cluster_id=%s
+FOR UPDATE
+"""
+
+CLUSTER_CLAIMED_COUNT_SQL = (
+    "SELECT count(*) FROM work_queue WHERE status='claimed' AND cluster_id=%s"
+)
+
+
+def cluster_claim_gate(cur, cluster_id: int) -> bool:
+    """True if this cluster may claim one more item right now.
+
+    Locks the cluster's settings row (FOR UPDATE) before counting in-flight
+    claims, and holds that lock for the rest of the caller's transaction: two
+    workers racing claim_next for the same cluster serialize on this check
+    instead of both reading the same stale count under READ COMMITTED and
+    both proceeding past the cap. The loser blocks here until the winner's
+    transaction commits (claim written) or rolls back, then re-reads an
+    accurate count. A cluster with no settings row (should not happen once
+    app/db.run_migrations has backfilled one for every cluster, but kept as a
+    defensive fallback) claims unlimited, same as before this feature existed.
+    """
+    cur.execute(CLUSTER_SETTINGS_LOCK_SQL, (cluster_id,))
+    row = cur.fetchone()
+    if row is None:
+        return True
+    cap, enabled, stop_all = row
+    if stop_all:
+        return False
+    if enabled and cap is not None:
+        cur.execute(CLUSTER_CLAIMED_COUNT_SQL, (cluster_id,))
+        in_flight = cur.fetchone()[0]
+        if in_flight >= cap:
+            return False
+    return True
+
+
 def claim_next(conn, worker_id: int, cluster_id: int, board_ids=None) -> dict | None:
     """Claim the oldest eligible queued item; returns a work payload or None.
 
     `board_ids` limits the claim to boards this PC has a checkout for. None
     means no limit, which is what the stub executor uses — it needs no repo.
 
-    One transaction: claim + ticket flip + board read.
+    One transaction: cluster cap gate + claim + ticket flip + board read. A
+    cluster at (or over) its cap, or with stop_all_requested set, looks
+    exactly like "nothing queued" to the caller — idle, not an error.
     """
     with conn.transaction(), conn.cursor() as cur:
+        if not cluster_claim_gate(cur, cluster_id):
+            cur.execute(
+                f"UPDATE workers SET status='idle', last_seen={UTC_NOW} WHERE id=%s",
+                (worker_id,),
+            )
+            return None
         cur.execute(CLAIM_SQL, {"wid": worker_id, "cid": cluster_id,
                                 "boards": board_ids})
         row = cur.fetchone()

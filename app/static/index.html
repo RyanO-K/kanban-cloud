@@ -93,6 +93,8 @@
     <select id="boardSel" onchange="loadBoard()"></select>
     <button class="small ghost owner-only" id="boardSettingsBtn" onclick="openBoardSettings()"
             title="Project settings — the context agents working this board are given">&#9881;</button>
+    <button class="small ghost owner-only" id="clusterSettingsBtn" onclick="openClusterSettings()"
+            title="Cluster settings — concurrency cap and stop-all switch">&#128295;</button>
     <button class="small ghost owner-only" onclick="openClusterModal()">+ cluster</button>
     <button class="small ghost owner-only" onclick="newBoard()">+ board</button>
     <button class="small owner-only" onclick="openTicketModal(null)">+ ticket</button>
@@ -242,6 +244,27 @@
     <div class="row">
       <button onclick="saveWorkerSettings()">Save</button>
       <button class="ghost" onclick="document.getElementById('workerOverlay').classList.remove('show')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- cluster-wide settings modal -->
+<div class="overlay" id="clusterSettingsOverlay" onclick="if(event.target===this) this.classList.remove('show')">
+  <div class="modal">
+    <h2>Cluster settings</h2>
+    <p class="muted" style="margin-top:0">Limits every PC's claims combined — enforced inside the claim itself, so it holds with no central dispatcher.</p>
+    <label style="display:flex; align-items:center; gap:6px; margin-top:0">
+      <input type="checkbox" id="csEnabled"> Enable a cluster-wide concurrency cap
+    </label>
+    <label>Concurrency cap</label>
+    <input id="csCap" type="number" min="1" placeholder="e.g. 5">
+    <p class="muted" style="font-size:12px">Currently in flight (cluster-wide): <b id="csInFlight">–</b></p>
+    <label style="display:flex; align-items:center; gap:6px; margin-top:8px">
+      <input type="checkbox" id="csStopAll"> Stop all agents (blocks every claim, cluster-wide)
+    </label>
+    <div class="row">
+      <button onclick="saveClusterSettings()">Save</button>
+      <button class="ghost" onclick="document.getElementById('clusterSettingsOverlay').classList.remove('show')">Cancel</button>
     </div>
   </div>
 </div>
@@ -433,6 +456,31 @@ async function saveBoardSettings() {
   document.getElementById("boardOverlay").classList.remove("show");
   await refreshClusterBits();
   toast("Project settings saved");
+}
+
+// ---------- cluster-wide settings: concurrency cap + stop-all ----------
+// Fetched fresh every time the modal opens (rather than cached like the board
+// list) so the in-flight count is current, not a snapshot from page load.
+async function openClusterSettings() {
+  if (!currentCluster) return;
+  const s = await api("GET", `./api/clusters/${currentCluster.id}/settings`);
+  document.getElementById("csEnabled").checked = !!s.enabled;
+  document.getElementById("csCap").value = s.concurrency_cap == null ? "" : s.concurrency_cap;
+  document.getElementById("csStopAll").checked = !!s.stop_all_requested;
+  document.getElementById("csInFlight").textContent = s.in_flight;
+  document.getElementById("clusterSettingsOverlay").classList.add("show");
+}
+
+async function saveClusterSettings() {
+  if (!currentCluster) return;
+  const capRaw = document.getElementById("csCap").value.trim();
+  await api("PUT", `./api/clusters/${currentCluster.id}/settings`, {
+    enabled: document.getElementById("csEnabled").checked,
+    concurrency_cap: capRaw ? parseInt(capRaw) : null,
+    stop_all_requested: document.getElementById("csStopAll").checked,
+  });
+  document.getElementById("clusterSettingsOverlay").classList.remove("show");
+  toast("Cluster settings saved");
 }
 
 // ---------- import a local .kanban board ----------

@@ -86,6 +86,25 @@ def test_board_settings_button_is_owner_only(markup):
     assert 'owner-only" id="boardSettingsBtn"' in markup
 
 
+def test_cluster_settings_modal_markup_present(markup):
+    for token in ("clusterSettingsBtn", "clusterSettingsOverlay", "csEnabled",
+                  "csCap", "csStopAll", "csInFlight",
+                  "openClusterSettings", "saveClusterSettings"):
+        assert token in markup, token
+
+
+def test_cluster_settings_button_is_owner_only(markup):
+    assert 'owner-only" id="clusterSettingsBtn"' in markup
+
+
+def test_cluster_settings_saves_all_three_fields(markup):
+    body = markup[markup.index("async function saveClusterSettings"):]
+    body = body[:body.index("\n}")]
+    assert "enabled:" in body
+    assert "concurrency_cap:" in body
+    assert "stop_all_requested:" in body
+
+
 def test_workers_panel_renders_slot_counts(markup):
     """A PC's own concurrency limit and current load are shown next to it."""
     assert "w.running" in markup
