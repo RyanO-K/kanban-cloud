@@ -188,7 +188,8 @@ def test_run_slot_raises_a_question_instead_of_finishing(monkeypatch, tmp_path):
 
         def run(self, ticket, board=None, directory=None, session_id=None,
                 progress_cb=None, should_kill=None,
-                chat_source=None, chat_delivered=None, log_cb=None, profile=None):
+                chat_source=None, chat_delivered=None, log_cb=None, profile=None,
+                resume=None):
             return True, f'{QUESTION_MARKER} {{"question": "Which lib?"}}'
 
     calls = {"blocked": [], "finished": []}
@@ -222,7 +223,8 @@ def test_run_slot_treats_a_normal_completion_as_before(monkeypatch, tmp_path):
 
         def run(self, ticket, board=None, directory=None, session_id=None,
                 progress_cb=None, should_kill=None,
-                chat_source=None, chat_delivered=None, log_cb=None, profile=None):
+                chat_source=None, chat_delivered=None, log_cb=None, profile=None,
+                resume=None):
             return True, "All set, renamed the component."
 
     calls = {"blocked": [], "finished": []}
@@ -262,7 +264,8 @@ def test_slot_claims_again_after_a_question_is_raised(monkeypatch, tmp_path):
 
         def run(self, ticket, board=None, directory=None, session_id=None,
                 progress_cb=None, should_kill=None,
-                chat_source=None, chat_delivered=None, log_cb=None, profile=None):
+                chat_source=None, chat_delivered=None, log_cb=None, profile=None,
+                resume=None):
             if ticket["id"] == 1:
                 return True, f'{QUESTION_MARKER} {{"question": "Which lib?"}}'
             return True, "done"

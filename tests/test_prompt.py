@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.prompt import (  # noqa: E402
     COMMIT_GATE_MARKER,
     build_agent_prompt,
+    build_resume_prompt,
     parse_commit_gate,
     slugify,
 )
@@ -149,6 +150,35 @@ def test_parse_commit_gate_uses_the_last_marker_occurrence():
     text = (f'Earlier I might write {COMMIT_GATE_MARKER} {{"requirements_met": false}} '
             f'but the real verdict is: {COMMIT_GATE_MARKER} {{"requirements_met": true}}')
     assert parse_commit_gate(text)["requirements_met"] is True
+
+
+# ---------- resume prompt ----------
+
+def test_resume_prompt_carries_question_and_answer():
+    p = build_resume_prompt({"question": "Which branch?", "answer_value": "main",
+                             "answer_notes": None})
+    assert "Which branch?" in p
+    assert "main" in p
+
+
+def test_resume_prompt_includes_notes_when_present():
+    p = build_resume_prompt({"question": "Delete the old table?",
+                             "answer_value": "yes", "answer_notes": "It's unused."})
+    assert "It's unused." in p
+
+
+def test_resume_prompt_omits_notes_section_when_blank():
+    p = build_resume_prompt({"question": "Q", "answer_value": "A", "answer_notes": ""})
+    assert "Notes:" not in p
+
+
+def test_resume_prompt_is_much_shorter_than_a_fresh_prompt():
+    """The whole point: the resumed session already has the ticket and repo
+    context loaded, so this should not re-send build_agent_prompt's bulk."""
+    fresh = build_agent_prompt(TICKET, BOARD, "/repo")
+    resumed = build_resume_prompt({"question": "Q", "answer_value": "A",
+                                   "answer_notes": None})
+    assert len(resumed) < len(fresh)
 
 
 def test_module_is_stdlib_only():

@@ -83,6 +83,14 @@ _PHASE6_COLUMNS = [
     ("tickets", "commit_gate TEXT"),
 ]
 
+# (table, column DDL) pairs added by session resume (ticket #16, gap analysis
+# phase 7 item 19): an unblocked ticket continues its own prior Claude CLI
+# session instead of restarting. Defaults FALSE, so every pre-existing queue
+# row reads as an ordinary (non-resuming) delegation.
+_PHASE7_COLUMNS = [
+    ("work_queue", "resume BOOLEAN NOT NULL DEFAULT FALSE"),
+]
+
 
 def resolve_db_url(db_url: str | None = None) -> str:
     url = db_url or os.environ.get("DATABASE_URL") or DEFAULT_SQLITE_URL
@@ -188,7 +196,7 @@ def _add_missing_columns(engine) -> None:
     with engine.begin() as conn:
         for table, ddl in (_PHASE1_COLUMNS + _PHASE2_COLUMNS + _PHASE3_COLUMNS
                            + _PHASE4_COLUMNS + _PHASE5_COLUMNS + _TRIAGE_COLUMNS
-                           + _PHASE6_COLUMNS):
+                           + _PHASE6_COLUMNS + _PHASE7_COLUMNS):
             if table not in tables:
                 continue  # a brand-new DB: create_all() already built the shape
             column = ddl.split()[0].strip('"')

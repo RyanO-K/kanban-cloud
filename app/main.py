@@ -711,6 +711,7 @@ def create_app(
                 "status": i.status,
                 "claimed_by": i.claimed_by,
                 "kill_requested": bool(i.kill_requested),
+                "resume": bool(i.resume),
                 "queued_at": i.queued_at.isoformat(),
                 "claimed_at": i.claimed_at.isoformat() if i.claimed_at else None,
                 "finished_at": i.finished_at.isoformat() if i.finished_at else None,
@@ -1258,7 +1259,7 @@ def create_app(
         ))
         db.commit()
         if ticket.status == "blocked":
-            delegation.enqueue_ticket(db, ticket)
+            delegation.enqueue_ticket(db, ticket, resume=True)
         return ticket_json(db, ticket)
 
     @app.delete("/api/tickets/{ticket_id}")

@@ -103,7 +103,8 @@ def _run_slot_once(monkeypatch, tmp_path, board, comment, push_calls, finished):
     class FakeExecutor:
         def run(self, ticket, board=None, directory=None, session_id=None,
                 progress_cb=None, should_kill=None,
-                chat_source=None, chat_delivered=None, log_cb=None, profile=None):
+                chat_source=None, chat_delivered=None, log_cb=None, profile=None,
+                resume=None):
             return True, comment
 
     monkeypatch.setattr(worker, "resolve_directory", lambda b, cfg: ("/repo", None))

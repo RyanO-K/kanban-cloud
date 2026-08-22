@@ -52,6 +52,7 @@ except ImportError as exc:
 
 from app.prompt import (
     build_agent_prompt,
+    build_resume_prompt,
     parse_commit_gate,
     parse_question,
     ticket_branch_name,
@@ -140,7 +141,7 @@ WHERE id = (
   FOR UPDATE OF wq SKIP LOCKED
   LIMIT 1
 )
-RETURNING id, ticket_id
+RETURNING id, ticket_id, resume
 """
 
 
@@ -182,7 +183,8 @@ class StubExecutor:
 
     def run(self, ticket, board=None, directory=None, session_id=None,
             progress_cb=None, should_kill=None,
-            chat_source=None, chat_delivered=None, log_cb=None, profile=None):
+            chat_source=None, chat_delivered=None, log_cb=None, profile=None,
+            resume=None):
         print(f"  [stub] pretending to work on ticket #{ticket['id']}: {ticket['title']}")
         time.sleep(2)
         return True, (
@@ -356,7 +358,8 @@ class ClaudeExecutor:
 
     def run(self, ticket, board=None, directory=None, session_id=None,
             progress_cb=None, should_kill=None,
-            chat_source=None, chat_delivered=None, log_cb=None, profile=None):
+            chat_source=None, chat_delivered=None, log_cb=None, profile=None,
+            resume=None):
         board = board or {}
         name = board.get("name", "?")
         should_kill = should_kill or (lambda: False)
@@ -391,17 +394,24 @@ class ClaudeExecutor:
         model = profile.get("model")
         system_prompt = profile.get("system_prompt")
 
-        prompt = build_agent_prompt(ticket, board, directory)
+        # A resume run continues the ticket's own prior session with a short
+        # answer-only prompt (`--resume`); an ordinary run mints a fresh one
+        # under a new id (`--session-id`) so it can be resumed later.
+        if resume:
+            prompt = build_resume_prompt(resume)
+        else:
+            prompt = build_agent_prompt(ticket, board, directory)
         cmd = [exe, "-p", prompt, "--allowedTools", allowed_tools,
                "--input-format", "stream-json",
                "--output-format", "stream-json", "--verbose"]
         if session_id:
-            cmd += ["--session-id", session_id]
+            cmd += (["--resume", session_id] if resume else ["--session-id", session_id])
         if model:
             cmd += ["--model", model]
         if system_prompt:
             cmd += ["--append-system-prompt", system_prompt]
-        print(f"  [claude] running in {directory} for ticket #{ticket['id']}")
+        print(f"  [claude] running in {directory} for ticket #{ticket['id']}"
+             + (" (resuming)" if resume else ""))
 
         def emit(text):
             if text and progress_cb:
@@ -1076,19 +1086,41 @@ def claim_next(conn, worker_id: int, cluster_id: int, board_ids=None) -> dict | 
                 (worker_id,),
             )
             return None
-        item_id, ticket_id = row
+        item_id, ticket_id, is_resume = row
         cur.execute(
             f"UPDATE tickets SET status='doing', assigned_worker=%s, "
             f"attempts=COALESCE(attempts,0)+1, updated_at={UTC_NOW} "
-            f"WHERE id=%s RETURNING board_id, title, body, attempts, profile_id",
+            f"WHERE id=%s RETURNING board_id, title, body, attempts, profile_id, session_id",
             (worker_id, ticket_id),
         )
-        board_id, title, body, attempts, ticket_profile_id = cur.fetchone()
-        # Minted here so the id is recorded even if the worker dies mid-run:
-        # `claude --resume <id>` in the board folder then replays the session.
-        session_id = str(uuid.uuid4())
-        cur.execute("UPDATE tickets SET session_id=%s WHERE id=%s",
-                    (session_id, ticket_id))
+        board_id, title, body, attempts, ticket_profile_id, prior_session_id = cur.fetchone()
+
+        # A resume claim (the ticket was blocked on a question, now answered)
+        # continues the agent's own prior session instead of starting a fresh
+        # one, with a short prompt carrying just the question and its answer
+        # — see app/prompt.build_resume_prompt. Only takes effect if there is
+        # actually a prior session and an answered question to hand back;
+        # otherwise this claim behaves like any ordinary fresh run.
+        resume = None
+        if is_resume and prior_session_id:
+            cur.execute(
+                "SELECT question, answer_value, answer_notes FROM ticket_questions "
+                "WHERE ticket_id=%s AND answered_at IS NOT NULL "
+                "ORDER BY answered_at DESC LIMIT 1",
+                (ticket_id,),
+            )
+            qrow = cur.fetchone()
+            if qrow:
+                resume = {"question": qrow[0], "answer_value": qrow[1], "answer_notes": qrow[2]}
+
+        if resume:
+            session_id = prior_session_id
+        else:
+            # Minted here so the id is recorded even if the worker dies mid-run:
+            # `claude --resume <id>` in the board folder then replays the session.
+            session_id = str(uuid.uuid4())
+            cur.execute("UPDATE tickets SET session_id=%s WHERE id=%s",
+                        (session_id, ticket_id))
         cur.execute(
             f"UPDATE workers SET status='working', last_seen={UTC_NOW} WHERE id=%s",
             (worker_id,),
@@ -1115,6 +1147,7 @@ def claim_next(conn, worker_id: int, cluster_id: int, board_ids=None) -> dict | 
             "assignment_id": item_id,
             "session_id": session_id,
             "profile": resolve_profile(profiles, ticket_profile_id, board_default_profile_id),
+            "resume": resume,
             "board": {
                 "id": board_id, "name": b[0], "description": b[1],
                 "out_of_scope": b[2], "commit_requirements": b[3],
@@ -1677,7 +1710,8 @@ def run_slot(cfg, args, executor, stop_event, slot_no: int) -> None:
                             session_id=work.get("session_id"),
                             progress_cb=progress_cb, should_kill=should_kill,
                             chat_source=chat_source, chat_delivered=chat_delivered,
-                            log_cb=log_cb, profile=work.get("profile"))
+                            log_cb=log_cb, profile=work.get("profile"),
+                            resume=work.get("resume"))
                     else:
                         directory, resolve_error = resolve_directory(
                             work.get("board") or {}, cfg)
@@ -1690,7 +1724,8 @@ def run_slot(cfg, args, executor, stop_event, slot_no: int) -> None:
                                 session_id=work.get("session_id"),
                                 progress_cb=progress_cb, should_kill=should_kill,
                                 chat_source=chat_source, chat_delivered=chat_delivered,
-                                log_cb=log_cb, profile=work.get("profile"))
+                                log_cb=log_cb, profile=work.get("profile"),
+                                resume=work.get("resume"))
                             # A question isn't a finished attempt — nothing to
                             # push yet, and (in tests especially) `directory`
                             # may not even be a real git checkout.
