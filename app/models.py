@@ -151,6 +151,8 @@ class Ticket(Base):
     # Claude CLI session id of the most recent attempt, so a human can take a
     # stuck run over with `claude --resume <id>`.
     session_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Drag-order rank, ascending; see CLAIM_ORDER_BY in worker.py.
+    order: Mapped[int] = mapped_column(Integer, default=0, nullable=False, server_default="0")
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 

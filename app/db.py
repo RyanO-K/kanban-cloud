@@ -28,6 +28,14 @@ _PHASE1_COLUMNS = [
     ("workers", "running INTEGER NOT NULL DEFAULT 0"),
 ]
 
+# (table, column DDL) pairs added by the ticket-ordering change. "order" is a
+# reserved word in both backends, so the DDL quotes it; _add_missing_columns
+# strips the quotes back off before comparing against the inspector's column
+# names.
+_PHASE2_COLUMNS = [
+    ("tickets", '"order" INTEGER NOT NULL DEFAULT 0'),
+]
+
 
 def resolve_db_url(db_url: str | None = None) -> str:
     url = db_url or os.environ.get("DATABASE_URL") or DEFAULT_SQLITE_URL
@@ -135,10 +143,10 @@ def _add_missing_columns(engine) -> None:
     insp = inspect(engine)
     tables = set(insp.get_table_names())
     with engine.begin() as conn:
-        for table, ddl in _PHASE1_COLUMNS:
+        for table, ddl in _PHASE1_COLUMNS + _PHASE2_COLUMNS:
             if table not in tables:
                 continue  # a brand-new DB: create_all() already built the shape
-            column = ddl.split()[0]
+            column = ddl.split()[0].strip('"')
             if column in {c["name"] for c in insp.get_columns(table)}:
                 continue
             conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {ddl}"))

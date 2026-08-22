@@ -93,6 +93,7 @@ def test_models_have_phase1_columns():
             "use_worktrees", "repo_url"} <= board_cols
     assert "directory" not in board_cols  # per-PC, never a server column
     assert "session_id" in {c.name for c in Ticket.__table__.columns}
+    assert "order" in {c.name for c in Ticket.__table__.columns}
     assert {"concurrency", "running"} <= {c.name for c in Worker.__table__.columns}
 
 
@@ -113,6 +114,23 @@ def test_migration_adds_phase1_columns_to_an_existing_db(tmp_path):
     insp = sa.inspect(engine)
     for table, ddl in _PHASE1_COLUMNS:
         assert ddl.split()[0] in {c["name"] for c in insp.get_columns(table)}, ddl
+
+
+def test_migration_adds_ticket_order_column_to_an_existing_db(tmp_path):
+    """A database created before tickets.order must reach the new shape."""
+    from app.db import _PHASE2_COLUMNS
+
+    engine = make_engine(f"sqlite:///{tmp_path / 'old2.db'}")
+    Base.metadata.create_all(engine)
+    with engine.begin() as conn:
+        for table, ddl in _PHASE2_COLUMNS:
+            conn.execute(sa.text(f"ALTER TABLE {table} DROP COLUMN {ddl.split()[0]}"))
+
+    run_migrations(engine)
+    run_migrations(engine)  # idempotent
+
+    insp = sa.inspect(engine)
+    assert "order" in {c["name"] for c in insp.get_columns("tickets")}
 
 
 def test_phase1_slot_defaults_are_backward_compatible(tmp_path):

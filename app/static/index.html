@@ -541,7 +541,9 @@ async function loadBoard() {
   el.innerHTML = COLS.map(col => {
     const cards = tickets.filter(t => t.status === col).map(t => `
       <div class="card" onclick="openTicketModal(${t.id})" draggable="${sessionMode !== "spectator"}"
-           ondragstart="event.dataTransfer.setData('text/plain','${t.id}')">
+           ondragstart="event.dataTransfer.setData('text/plain','${t.id}')"
+           ondragover="event.preventDefault(); event.stopPropagation()"
+           ondrop="dropOnCard(event,${t.id})">
         <div class="tid">#${t.id}${t.target_worker ? " → " + esc(workerName(t.target_worker)) : ""}</div>
         <div>${esc(t.title)}</div>
         ${t.assigned_worker && (t.status === "doing") ? `<span class="badge">on ${esc(workerName(t.assigned_worker))}</span>` : ""}
@@ -560,6 +562,28 @@ async function dropTicket(ev, col) {
   const id = ev.dataTransfer.getData("text/plain");
   await api("PATCH", `./api/tickets/${id}`, {status: col});
   if (col === "ready") toast("Queued for agent");
+  loadBoard(); loadQueue();
+}
+
+// Dropping directly on a card reorders within that card's column (ranking it
+// ahead of/behind the others), instead of just moving to the column at large.
+async function dropOnCard(ev, targetId) {
+  if (isFileDrag(ev)) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  if (sessionMode === "spectator") return;
+  const id = Number(ev.dataTransfer.getData("text/plain"));
+  const target = tickets.find(t => t.id === targetId);
+  const dragged = tickets.find(t => t.id === id);
+  if (!target || !dragged || id === targetId) return;
+  const col = target.status;
+  if (dragged.status !== col) {
+    await api("PATCH", `./api/tickets/${id}`, {status: col});
+  }
+  const ids = tickets.filter(t => t.status === col && t.id !== id).map(t => t.id);
+  ids.splice(ids.indexOf(targetId), 0, id);
+  await api("PATCH", `./api/boards/${currentBoard.id}/reorder`, {status: col, ticket_ids: ids});
+  if (col === "ready" && dragged.status !== col) toast("Queued for agent");
   loadBoard(); loadQueue();
 }
 

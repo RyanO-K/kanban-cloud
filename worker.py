@@ -76,13 +76,23 @@ MAX_ATTEMPTS = 2  # keep in sync with app/models.py MAX_ATTEMPTS
 UTC_NOW = "(now() at time zone 'utc')"
 
 # Atomic, race-safe claim: SKIP LOCKED means concurrent workers never block
-# or double-claim; the subquery orders by queue age and honors target_worker.
-# The board filter keeps a PC from claiming work it cannot do: a ticket is
-# claimable here when its board either has a --set-path entry configured on
-# this PC (in %(boards)s), or the board itself has a repo_url set, in which
-# case resolve_directory() can clone/refresh it on demand — no --set-path
-# needed. A NULL %(boards)s disables the configured-boards half entirely,
-# which is how --stub (no repo needed) opts out and still claims everything.
+# or double-claim; the subquery orders by ticket rank ahead of queue age and
+# honors target_worker. The board filter keeps a PC from claiming work it
+# cannot do: a ticket is claimable here when its board either has a
+# --set-path entry configured on this PC (in %(boards)s), or the board itself
+# has a repo_url set, in which case resolve_directory() can clone/refresh it
+# on demand — no --set-path needed. A NULL %(boards)s disables the
+# configured-boards half entirely, which is how --stub (no repo needed) opts
+# out and still claims everything.
+#
+# t."order" lets a human rank a ticket ahead of others via UI drag (lower
+# claims first); most tickets are never dragged and share the default 0, so
+# queued_at (then id) is the deterministic tie-break. Shared as its own
+# constant so tests can run this exact ORDER BY against the SQLite test DB —
+# the rest of CLAIM_SQL (SKIP LOCKED, ::int[] casts) is Postgres-only and
+# can't run there.
+CLAIM_ORDER_BY = 't."order", wq.queued_at, wq.id'
+
 CLAIM_SQL = f"""
 UPDATE work_queue SET status='claimed', claimed_by=%(wid)s, claimed_at={UTC_NOW}
 WHERE id = (
@@ -94,7 +104,7 @@ WHERE id = (
          OR t.board_id = ANY(%(boards)s::int[])
          OR EXISTS (SELECT 1 FROM boards b
                     WHERE b.id = t.board_id AND COALESCE(b.repo_url, '') <> ''))
-  ORDER BY wq.queued_at, wq.id
+  ORDER BY {CLAIM_ORDER_BY}
   FOR UPDATE OF wq SKIP LOCKED
   LIMIT 1
 )

@@ -80,6 +80,10 @@ CREATE TABLE IF NOT EXISTS tickets (
     attempts        INTEGER NOT NULL DEFAULT 0,
     -- Claude CLI session of the latest attempt: `claude --resume <id>`.
     session_id      VARCHAR(64),
+    -- Drag-order rank, ascending. Claimed ahead of queue age by CLAIM_SQL;
+    -- ties (the common case — most tickets never get dragged) fall back to
+    -- queued_at. Not unique or contiguous: only relative order matters.
+    "order"         INTEGER NOT NULL DEFAULT 0,
     created_at      TIMESTAMP NOT NULL DEFAULT now(),
     updated_at      TIMESTAMP NOT NULL DEFAULT now()
 );
