@@ -12,6 +12,19 @@ from .models import Worker
 
 DEFAULT_SQLITE_URL = "sqlite:///./kanban_cloud.db"
 
+# (table, column DDL) pairs added by the "agents do real repo work" change.
+# Every entry is nullable or carries a DEFAULT: existing rows back-fill from
+# the default, and already-deployed workers never write these columns.
+_PHASE1_COLUMNS = [
+    ("boards", "description TEXT"),
+    ("boards", "out_of_scope TEXT"),
+    ("boards", "commit_requirements TEXT"),
+    ("boards", "use_worktrees BOOLEAN NOT NULL DEFAULT 0"),
+    ("tickets", "session_id VARCHAR(64)"),
+    ("workers", "concurrency INTEGER NOT NULL DEFAULT 1"),
+    ("workers", "running INTEGER NOT NULL DEFAULT 0"),
+]
+
 
 def resolve_db_url(db_url: str | None = None) -> str:
     url = db_url or os.environ.get("DATABASE_URL") or DEFAULT_SQLITE_URL
@@ -72,6 +85,7 @@ def run_migrations(engine) -> None:
         # the kanban_worker group's SELECT grant on it) from DBs created
         # before this change.
         conn.execute(text("DROP TABLE IF EXISTS cluster_settings"))
+    _add_missing_columns(engine)
 
 
 def _migrate_sqlite_workers(engine) -> None:
@@ -106,3 +120,22 @@ def _migrate_sqlite_workers(engine) -> None:
             conn.execute(text("ALTER TABLE workers ADD COLUMN role_name VARCHAR(64)"))
         if "revoked" not in columns:
             conn.execute(text("ALTER TABLE workers ADD COLUMN revoked BOOLEAN NOT NULL DEFAULT 0"))
+
+
+def _add_missing_columns(engine) -> None:
+    """Add any of `_PHASE1_COLUMNS` the database does not have yet.
+
+    Backend-agnostic on purpose: it asks the database what columns exist rather
+    than relying on `ADD COLUMN IF NOT EXISTS`, which SQLite does not support.
+    That keeps one code path for Neon and for a developer's local SQLite file.
+    """
+    insp = inspect(engine)
+    tables = set(insp.get_table_names())
+    with engine.begin() as conn:
+        for table, ddl in _PHASE1_COLUMNS:
+            if table not in tables:
+                continue  # a brand-new DB: create_all() already built the shape
+            column = ddl.split()[0]
+            if column in {c["name"] for c in insp.get_columns(table)}:
+                continue
+            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {ddl}"))

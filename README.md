@@ -167,10 +167,57 @@ Claude Code configuration already exists on that machine.
 Default poll interval is 10s (`--poll N` to change it, `--once` to poll a
 single time and exit).
 
-The workers panel in the UI shows each PC and whether it is online (heartbeat
-within 30s), and has an owner-only **revoke** button per worker (see
-"Revocation" above). Per ticket, "Run on" selects a specific PC or "any
-worker".
+### Setting up a worker PC
+
+Two things have to be configured before a PC can do real repo work, and they
+live in two different places on purpose.
+
+**On the board (server side):** open the board settings (the gear next to the
+board picker, owner only) and fill in what every agent working this board
+should know — a short project description, anything explicitly out of scope,
+what has to hold before a commit, and whether agents should isolate their work
+in a git worktree. This is project knowledge, so it is shared by every PC.
+
+**On each PC (worker side):** tell the worker which folder on *this* machine
+holds each board's code. The same board is worked by several PCs with
+different layouts, so the folder is never stored on the server.
+
+```powershell
+py worker.py --list-boards                       # ids, names, configured paths
+py worker.py --set-path site-page=C:\repos\site-page
+py worker.py --set-path 7=D:\work\devtool-invoice   # by id, if names collide
+```
+
+A fresh enrollment walks you through this interactively. Paths are saved in
+`.worker_config.json` keyed by board id, so renaming a board does not orphan
+them.
+
+A PC only claims tickets for boards it has a folder for — one with nothing
+configured stays idle rather than claiming work it would have to abandon.
+(`--stub` ignores this: it needs no repo.)
+
+**How much this PC runs at once** is also the PC's own setting:
+
+```powershell
+py worker.py --concurrency 3        # three tickets in flight; saved to config
+```
+
+Each slot is an independent claim/run/report loop with its own database
+connection, so a slot inside a long agent run never holds up the others. The
+default is 1.
+
+Agents run with `Read,Edit,Write,Bash,Grep,Glob` granted; `--allowed-tools`
+overrides the list. Without an explicit grant a headless `claude -p` cannot
+get permission to edit a file, so it looks like it ran and changed nothing.
+
+Agents are told not to push. They work on a branch (`<ticket-id>-<slug>`) or
+in a worktree, and their final summary is posted back to the ticket as a
+comment.
+
+The workers panel in the UI shows each PC, whether it is online (heartbeat
+within 30s), and its slot usage (`2/3 running`), and has an owner-only
+**revoke** button per worker (see "Revocation" above). Per ticket, "Run on"
+selects a specific PC or "any worker".
 
 **Neon compute note:** while a worker is running, its polling counts as
 activity and keeps the database's compute awake — Neon's free-tier

@@ -28,11 +28,14 @@ Note: while this worker runs, its polling keeps Neon compute awake
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 
 try:
@@ -44,8 +47,15 @@ except ImportError as exc:
         'Then re-run: py worker.py --enroll --join-code ABC12345'
     )
 
+from app.prompt import build_agent_prompt
+
 DEFAULT_SERVER = "https://kanban-cloud.onrender.com"
 TEST_SERVER = "http://localhost:8900"
+
+# The local .kanban tool's `default` profile list. Without an explicit grant a
+# headless `claude -p` cannot get permission to edit a file, so an agent with
+# no tools looks like it ran and silently changed nothing.
+DEFAULT_ALLOWED_TOOLS = "Read,Edit,Write,Bash,Grep,Glob"
 
 
 def app_dir() -> Path:
@@ -65,6 +75,9 @@ UTC_NOW = "(now() at time zone 'utc')"
 
 # Atomic, race-safe claim: SKIP LOCKED means concurrent workers never block
 # or double-claim; the subquery orders by queue age and honors target_worker.
+# The board filter keeps a PC from claiming work it cannot do: a ticket whose
+# board has no folder configured here would otherwise be claimed and then fail.
+# A NULL %(boards)s disables it, which is how --stub (no repo needed) opts out.
 CLAIM_SQL = f"""
 UPDATE work_queue SET status='claimed', claimed_by=%(wid)s, claimed_at={UTC_NOW}
 WHERE id = (
@@ -72,6 +85,7 @@ WHERE id = (
   JOIN tickets t ON t.id = wq.ticket_id
   WHERE wq.status='queued' AND wq.cluster_id=%(cid)s
     AND (t.target_worker IS NULL OR t.target_worker = %(wid)s)
+    AND (%(boards)s::int[] IS NULL OR t.board_id = ANY(%(boards)s::int[]))
   ORDER BY wq.queued_at, wq.id
   FOR UPDATE OF wq SKIP LOCKED
   LIMIT 1
@@ -80,14 +94,14 @@ RETURNING id, ticket_id
 """
 
 
-# ---------- executors (unchanged from v1) ----------
+# ---------- executors ----------
 
 class StubExecutor:
     """Fake executor: waits a moment and produces a canned result."""
 
     name = "stub"
 
-    def run(self, ticket: dict) -> tuple[bool, str]:
+    def run(self, ticket, board=None, directory=None, session_id=None):
         print(f"  [stub] pretending to work on ticket #{ticket['id']}: {ticket['title']}")
         time.sleep(2)
         return True, (
@@ -98,29 +112,49 @@ class StubExecutor:
 
 
 class ClaudeExecutor:
-    """Real executor: shells out to the Claude CLI, which authenticates using
-    whatever local configuration already exists on this PC (a `claude login`
-    session, or the operator's own ANTHROPIC_API_KEY) — the cluster no longer
-    stores or forwards a key."""
+    """Real executor: runs the Claude CLI inside the board's checkout.
+
+    The CLI authenticates from whatever local configuration this PC already
+    has — a `claude login` session, or the operator's own ANTHROPIC_API_KEY.
+    The cluster neither stores nor forwards a key.
+    """
 
     name = "claude"
 
-    def run(self, ticket: dict) -> tuple[bool, str]:
-        prompt = (
-            f"You are working a kanban ticket.\n"
-            f"Title: {ticket['title']}\n\n"
-            f"Details:\n{ticket.get('body') or '(no details)'}\n\n"
-            f"Do the work described, then reply with a concise summary of what you did."
-        )
-        print(f"  [claude] running `claude -p ...` for ticket #{ticket['id']}")
-        try:
-            proc = subprocess.run(
-                ["claude", "-p", prompt],
-                capture_output=True,
-                text=True,
-                timeout=1800,
-                shell=(os.name == "nt"),  # find claude.cmd shim on Windows
+    def __init__(self, allowed_tools: str = DEFAULT_ALLOWED_TOOLS):
+        self.allowed_tools = allowed_tools
+
+    def run(self, ticket, board=None, directory=None, session_id=None):
+        board = board or {}
+        name = board.get("name", "?")
+        if not directory:
+            return False, (
+                f"This PC has no folder configured for board '{name}'. Set one "
+                f"with: kanban-worker --set-path \"{name}=<path to the repo>\""
             )
+        if not Path(directory).is_dir():
+            return False, (
+                f"The configured folder for board '{name}' no longer exists: "
+                f"{directory}. Fix it with --set-path."
+            )
+
+        # Resolve the CLI ourselves rather than passing shell=True. On Windows
+        # shell=True re-parses the argument list through cmd.exe, which cuts the
+        # multi-line prompt off at its first newline — the agent then saw the
+        # title and none of the ticket body. shutil.which finds the .CMD/.EXE
+        # shim that shell=True was there for.
+        exe = shutil.which("claude")
+        if not exe:
+            return False, "`claude` CLI not found on this PC's PATH."
+
+        prompt = build_agent_prompt(ticket, board, directory)
+        cmd = [exe, "-p", prompt, "--allowedTools", self.allowed_tools]
+        if session_id:
+            cmd += ["--session-id", session_id]
+        print(f"  [claude] running in {directory} for ticket #{ticket['id']}")
+        try:
+            proc = subprocess.run(cmd, cwd=directory,
+                                  capture_output=True, text=True, timeout=1800)
         except FileNotFoundError:
             return False, "`claude` CLI not found on this PC's PATH."
         except subprocess.TimeoutExpired:
@@ -147,6 +181,112 @@ def save_config(cfg: dict) -> None:
               "Move the exe to a writable folder and run it again.")
         raise
     print(f"Saved worker config to {CONFIG_PATH}")
+
+
+# ---------- per-PC board paths ----------
+#
+# Which folder a board's code lives in is this machine's business: the same
+# board is worked by several PCs with different layouts, so the mapping lives
+# here rather than in the database.
+
+def board_paths(cfg: dict) -> dict:
+    """{board_id_as_str: absolute path} for the boards this PC can work."""
+    return cfg.get("boards") or {}
+
+
+def configured_board_ids(cfg: dict) -> list:
+    """Board ids this PC has a checkout for, as ints for the claim query."""
+    out = []
+    for key in board_paths(cfg):
+        try:
+            out.append(int(key))
+        except (TypeError, ValueError):
+            continue  # a hand-edited config should not stop the worker
+    return out
+
+
+def list_cluster_boards(conn, cluster_id: int) -> list:
+    with conn.cursor() as cur:
+        cur.execute("SELECT id, name FROM boards WHERE cluster_id=%s ORDER BY id",
+                    (cluster_id,))
+        return [{"id": r[0], "name": r[1]} for r in cur.fetchall()]
+
+
+def resolve_board(conn, cluster_id: int, token: str):
+    """Map a board id or name to (id, name). Names are case-insensitive.
+
+    A name that matches no board, or more than one, is rejected rather than
+    guessed — picking one silently would point an agent at the wrong repo.
+    """
+    rows = [(b["id"], b["name"]) for b in list_cluster_boards(conn, cluster_id)]
+    token = (token or "").strip()
+    if token.isdigit():
+        for bid, name in rows:
+            if bid == int(token):
+                return bid, name
+        raise ValueError(f"no board with id {token} in this cluster")
+    matches = [r for r in rows if r[1].lower() == token.lower()]
+    if len(matches) > 1:
+        raise ValueError(f"'{token}' matches {len(matches)} boards; use the id instead")
+    if not matches:
+        known = ", ".join(f"{b}:{n}" for b, n in rows) or "(none)"
+        raise ValueError(f"no board named '{token}'. Known boards: {known}")
+    return matches[0]
+
+
+def parse_set_path(arg: str):
+    """Split a --set-path value into (board token, path) on the FIRST '='.
+
+    Splitting on the first one keeps Windows paths containing '=' intact.
+    """
+    if "=" not in (arg or ""):
+        raise ValueError("--set-path needs <board-id-or-name>=<path>")
+    token, path = arg.split("=", 1)
+    if not token.strip() or not path.strip():
+        raise ValueError("--set-path needs <board-id-or-name>=<path>")
+    return token.strip(), path.strip()
+
+
+def apply_set_path(conn, cfg: dict, arg: str) -> dict:
+    """Validate and record one board->path mapping; saves and returns cfg."""
+    token, path = parse_set_path(arg)
+    board_id, name = resolve_board(conn, cfg["cluster_id"], token)
+    resolved = Path(path).expanduser()
+    if not resolved.is_dir():
+        raise ValueError(f"{resolved} does not exist (or is not a directory)")
+    cfg.setdefault("boards", {})[str(board_id)] = str(resolved)
+    save_config(cfg)
+    print(f"Board {board_id} ({name}) -> {resolved}")
+    return cfg
+
+
+def prompt_for_board_paths(conn, cfg: dict) -> dict:
+    """Walk the cluster's boards after enrollment, asking for a folder for each.
+
+    Blank input skips a board, which simply means this PC never claims its
+    tickets. Skipped entirely when stdin is not a terminal, so scripted and
+    service runs never hang waiting for input.
+    """
+    if not (sys.stdin is not None and sys.stdin.isatty()):
+        return cfg
+    boards = list_cluster_boards(conn, cfg["cluster_id"])
+    if not boards:
+        return cfg
+    print("\nWhich folder on this PC holds each board's code?")
+    print("Press Enter to skip a board (this PC then never claims its tickets).")
+    for b in boards:
+        try:
+            answer = input(f"  {b['name']}: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        if not answer:
+            continue
+        try:
+            apply_set_path(conn, cfg, f"{b['id']}={answer}")
+        except ValueError as e:
+            print(f"    skipped: {e}")
+    return cfg
 
 
 def enroll(server: str, join_code: str, name: str) -> dict:
@@ -221,11 +361,17 @@ def heartbeat(conn, worker_id: int) -> None:
         )
 
 
-def claim_next(conn, worker_id: int, cluster_id: int) -> dict | None:
-    """Claim the oldest eligible queued item; returns the v1 poll payload
-    shape or None. One transaction: claim + ticket flip."""
+def claim_next(conn, worker_id: int, cluster_id: int, board_ids=None) -> dict | None:
+    """Claim the oldest eligible queued item; returns a work payload or None.
+
+    `board_ids` limits the claim to boards this PC has a checkout for. None
+    means no limit, which is what the stub executor uses — it needs no repo.
+
+    One transaction: claim + ticket flip + board read.
+    """
     with conn.transaction(), conn.cursor() as cur:
-        cur.execute(CLAIM_SQL, {"wid": worker_id, "cid": cluster_id})
+        cur.execute(CLAIM_SQL, {"wid": worker_id, "cid": cluster_id,
+                                "boards": board_ids})
         row = cur.fetchone()
         if row is None:
             cur.execute(
@@ -241,12 +387,29 @@ def claim_next(conn, worker_id: int, cluster_id: int) -> dict | None:
             (worker_id, ticket_id),
         )
         board_id, title, body, attempts = cur.fetchone()
+        # Minted here so the id is recorded even if the worker dies mid-run:
+        # `claude --resume <id>` in the board folder then replays the session.
+        session_id = str(uuid.uuid4())
+        cur.execute("UPDATE tickets SET session_id=%s WHERE id=%s",
+                    (session_id, ticket_id))
         cur.execute(
             f"UPDATE workers SET status='working', last_seen={UTC_NOW} WHERE id=%s",
             (worker_id,),
         )
+        cur.execute(
+            "SELECT name, description, out_of_scope, commit_requirements, "
+            "use_worktrees FROM boards WHERE id=%s",
+            (board_id,),
+        )
+        b = cur.fetchone()
         return {
             "assignment_id": item_id,
+            "session_id": session_id,
+            "board": {
+                "id": board_id, "name": b[0], "description": b[1],
+                "out_of_scope": b[2], "commit_requirements": b[3],
+                "use_worktrees": bool(b[4]),
+            } if b else None,
             "ticket": {
                 "id": ticket_id, "board_id": board_id, "title": title,
                 "body": body, "status": "doing", "attempts": attempts,
@@ -328,6 +491,92 @@ def finish_work(conn, worker_id: int, worker_name: str, item_id: int,
 
 # ---------- argument parser & executor selection ----------
 
+# ---------- concurrency slots ----------
+#
+# How much this PC runs at once is the PC's own business: the server never
+# schedules, it only publishes queued work. Each slot is an independent
+# claim->run->finish loop with its own connection, so a slot sitting in a
+# 30-minute agent run never holds up its neighbors.
+
+_SLOT_LOCK = threading.Lock()
+_RUNNING = {"n": 0}
+
+
+def running_count() -> int:
+    """How many slots are inside an executor run right now."""
+    with _SLOT_LOCK:
+        return _RUNNING["n"]
+
+
+def set_slot_counts(conn, worker_id: int, concurrency: int, running: int) -> None:
+    """Publish this PC's limit and current load. Advisory only — the server
+    reads these to draw the Workers panel; nothing schedules on them."""
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            f"UPDATE workers SET concurrency=%s, running=%s, "
+            f"status=%s, last_seen={UTC_NOW} WHERE id=%s",
+            (concurrency, running, "working" if running else "idle", worker_id),
+        )
+
+
+def resolve_concurrency(args, cfg: dict) -> int:
+    """Flag beats saved config beats 1. Never below 1."""
+    value = args.concurrency if args.concurrency is not None else cfg.get("concurrency")
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return 1
+
+
+def run_slot(cfg, args, executor, stop_event, slot_no: int) -> None:
+    """One independent claim->run->finish loop with its own DB connection.
+
+    Slots share nothing but the config dict (read-only) and the stop event.
+    """
+    boards = None if isinstance(executor, StubExecutor) else configured_board_ids(cfg)
+    paths = board_paths(cfg)
+    conn = None
+    while not stop_event.is_set():
+        try:
+            if conn is None or conn.closed:
+                conn = psycopg.connect(cfg["dsn"], connect_timeout=15)
+            work = claim_next(conn, cfg["worker_id"], cfg["cluster_id"], boards)
+            if work:
+                ticket = work["ticket"]
+                with _SLOT_LOCK:
+                    _RUNNING["n"] += 1
+                print(f"[slot {slot_no}] claimed #{ticket['id']} '{ticket['title']}'")
+                try:
+                    ok, comment = executor.run(
+                        ticket,
+                        board=work.get("board"),
+                        directory=paths.get(str(ticket["board_id"])),
+                        session_id=work.get("session_id"))
+                except Exception as exc:
+                    ok, comment = False, f"Executor error: {exc!r}"
+                finally:
+                    with _SLOT_LOCK:
+                        _RUNNING["n"] -= 1
+                status = finish_work(conn, cfg["worker_id"], cfg["name"],
+                                     work["assignment_id"], ticket["id"], ok, comment)
+                print(f"[slot {slot_no}] #{ticket['id']} -> {status}")
+        except psycopg.OperationalError as e:
+            msg = str(e)
+            print(f"[slot {slot_no}] database unreachable ({msg[:150]}); retrying...")
+            if "password authentication failed" in msg or "does not exist" in msg:
+                print("Credentials rejected — this PC may be revoked. Re-enroll.")
+                stop_event.set()  # one slot learning this is enough for all of them
+                return
+            conn = None
+        except Exception as exc:  # a slot must never die silently
+            print(f"[slot {slot_no}] unexpected error: {exc!r}")
+        if args.once:
+            break
+        stop_event.wait(args.poll)
+    if conn is not None and not conn.closed:
+        conn.close()
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="kanban-cloud worker (v2 direct-DB)")
     parser.add_argument("--enroll", action="store_true",
@@ -347,11 +596,24 @@ def build_parser() -> argparse.ArgumentParser:
                         help=f"poll interval seconds (default {POLL_SECONDS})")
     parser.add_argument("--once", action="store_true",
                         help="poll a single time then exit (for testing)")
+    parser.add_argument("--set-path", action="append", metavar="BOARD=PATH",
+                        help="map a board (id or name) to its folder on this PC; "
+                             "repeatable")
+    parser.add_argument("--list-boards", action="store_true",
+                        help="list this cluster's boards and their configured paths")
+    parser.add_argument("--concurrency", type=int, default=None,
+                        help="tickets this PC runs at once (default 1; saved to "
+                             "the config so it sticks)")
+    parser.add_argument("--allowed-tools", default=DEFAULT_ALLOWED_TOOLS,
+                        help=f"comma-separated tools the agent may use "
+                             f"(default: {DEFAULT_ALLOWED_TOOLS})")
     return parser
 
 
 def pick_executor(args):
-    return StubExecutor() if args.stub else ClaudeExecutor()
+    if args.stub:
+        return StubExecutor()
+    return ClaudeExecutor(allowed_tools=args.allowed_tools)
 
 
 def resolve_server(args) -> str:
@@ -386,51 +648,84 @@ def main() -> int:
         if cfg is None:
             pause_if_frozen()
             return 2
+        try:
+            conn = psycopg.connect(cfg["dsn"], connect_timeout=15)
+            try:
+                cfg = prompt_for_board_paths(conn, cfg)
+            finally:
+                conn.close()
+        except psycopg.OperationalError as e:
+            print(f"Enrolled, but could not list boards ({str(e)[:120]}).")
+            print("Set folders later with --set-path <board>=<path>.")
+
+    if args.list_boards or args.set_path:
+        conn = psycopg.connect(cfg["dsn"], connect_timeout=15)
+        try:
+            for arg in args.set_path or []:
+                try:
+                    cfg = apply_set_path(conn, cfg, arg)
+                except ValueError as e:
+                    print(f"--set-path {arg}: {e}")
+                    return 2
+            if args.list_boards:
+                paths = board_paths(cfg)
+                print(f"{'id':>4}  {'board':<24} path")
+                for b in list_cluster_boards(conn, cfg["cluster_id"]):
+                    print(f"{b['id']:>4}  {b['name']:<24} "
+                          f"{paths.get(str(b['id']), '(not configured)')}")
+        finally:
+            conn.close()
+        return 0
 
     executor = pick_executor(args)
+    concurrency = resolve_concurrency(args, cfg)
+    if concurrency != cfg.get("concurrency"):
+        cfg["concurrency"] = concurrency
+        save_config(cfg)
+
+    if not isinstance(executor, StubExecutor) and not configured_board_ids(cfg):
+        print("WARNING: no board folders configured on this PC, so nothing will "
+              "be claimed.\n         Fix with: --list-boards, then "
+              "--set-path <board>=<path>")
+
     print(f"Worker '{cfg['name']}' polling Postgres every {args.poll}s "
-          f"(executor: {executor.name}). Ctrl+C to stop.")
+          f"({concurrency} slot{'s' if concurrency > 1 else ''}, "
+          f"executor: {executor.name}). Ctrl+C to stop.")
 
-    conn = None
-    while True:
-        try:
-            if conn is None or conn.closed:
-                conn = psycopg.connect(cfg["dsn"], connect_timeout=15)
-            work = claim_next(conn, cfg["worker_id"], cfg["cluster_id"])
-            if work:
-                ticket = work["ticket"]
-                item_id = work["assignment_id"]
-                print(f"Claimed ticket #{ticket['id']} '{ticket['title']}' "
-                      f"(assignment {item_id})")
-                try:
-                    ok, comment = executor.run(ticket)
-                except Exception as exc:
-                    ok, comment = False, f"Executor error: {exc!r}"
-                status = finish_work(conn, cfg["worker_id"], cfg["name"],
-                                     item_id, ticket["id"], ok, comment)
-                print(f"  reported {'success' if ok else 'FAILURE'} -> "
-                      f"ticket status: {status}")
-            else:
-                heartbeat(conn, cfg["worker_id"])
-        except psycopg.OperationalError as e:
-            msg = str(e)
-            print(f"Database unreachable ({msg[:200]}); retrying...")
-            if "password authentication failed" in msg or "does not exist" in msg:
-                print("Credentials rejected — this PC may be revoked. Re-enroll.")
-                pause_if_frozen()
-                return 1
-            conn = None
-        except KeyboardInterrupt:
-            print("\nStopping worker.")
-            return 0
+    stop_event = threading.Event()
+    slots = [threading.Thread(target=run_slot, name=f"slot-{i}",
+                              args=(cfg, args, executor, stop_event, i),
+                              daemon=True)
+             for i in range(concurrency)]
+    for t in slots:
+        t.start()
 
-        if args.once:
-            return 0
-        try:
+    # The heartbeat lives on the main thread so a PC with every slot busy in a
+    # 30-minute agent run still reports online — it used to ride on the claim
+    # query, which is exactly what a busy worker stops issuing.
+    hb_conn = None
+    try:
+        while any(t.is_alive() for t in slots):
+            try:
+                if hb_conn is None or hb_conn.closed:
+                    hb_conn = psycopg.connect(cfg["dsn"], connect_timeout=15)
+                set_slot_counts(hb_conn, cfg["worker_id"], concurrency,
+                                running_count())
+            except psycopg.OperationalError:
+                hb_conn = None
+            except Exception:
+                pass
+            if args.once:
+                break
             time.sleep(args.poll)
-        except KeyboardInterrupt:
-            print("\nStopping worker.")
-            return 0
+    except KeyboardInterrupt:
+        print("\nStopping worker; slots will finish the ticket in hand.")
+    stop_event.set()
+    for t in slots:
+        t.join(timeout=30 if args.once else None)
+    if hb_conn is not None and not hb_conn.closed:
+        hb_conn.close()
+    return 0
 
 
 if __name__ == "__main__":
