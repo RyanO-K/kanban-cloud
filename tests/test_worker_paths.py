@@ -161,6 +161,18 @@ def test_claim_sql_filters_on_configured_boards():
     assert "t.board_id = ANY(" in worker.CLAIM_SQL
 
 
+def test_claim_sql_also_admits_boards_with_a_repo_url():
+    """A board with no --set-path entry anywhere but a repo_url configured must
+    still be claimable, via an EXISTS check against the boards table — this is
+    a construction-level assertion on the SQL text only (same limitation as
+    test_claim_sql_filters_on_configured_boards above): CLAIM_SQL is Postgres
+    syntax (SKIP LOCKED, ::int[] casts) that can't run against the SQLite/
+    FakeCursor test harness in this file, so we can't execute it end-to-end
+    here."""
+    assert "repo_url" in worker.CLAIM_SQL
+    assert "EXISTS" in worker.CLAIM_SQL.upper()
+
+
 def test_claim_next_passes_configured_boards():
     conn = FakeConn()
     worker.claim_next(conn, 3, 1, [4, 7])

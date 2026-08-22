@@ -28,6 +28,7 @@ Note: while this worker runs, its polling keeps Neon compute awake
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -37,6 +38,7 @@ import urllib.error
 import urllib.request
 import uuid
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 try:
     import psycopg
@@ -75,9 +77,12 @@ UTC_NOW = "(now() at time zone 'utc')"
 
 # Atomic, race-safe claim: SKIP LOCKED means concurrent workers never block
 # or double-claim; the subquery orders by queue age and honors target_worker.
-# The board filter keeps a PC from claiming work it cannot do: a ticket whose
-# board has no folder configured here would otherwise be claimed and then fail.
-# A NULL %(boards)s disables it, which is how --stub (no repo needed) opts out.
+# The board filter keeps a PC from claiming work it cannot do: a ticket is
+# claimable here when its board either has a --set-path entry configured on
+# this PC (in %(boards)s), or the board itself has a repo_url set, in which
+# case resolve_directory() can clone/refresh it on demand — no --set-path
+# needed. A NULL %(boards)s disables the configured-boards half entirely,
+# which is how --stub (no repo needed) opts out and still claims everything.
 CLAIM_SQL = f"""
 UPDATE work_queue SET status='claimed', claimed_by=%(wid)s, claimed_at={UTC_NOW}
 WHERE id = (
@@ -85,7 +90,10 @@ WHERE id = (
   JOIN tickets t ON t.id = wq.ticket_id
   WHERE wq.status='queued' AND wq.cluster_id=%(cid)s
     AND (t.target_worker IS NULL OR t.target_worker = %(wid)s)
-    AND (%(boards)s::int[] IS NULL OR t.board_id = ANY(%(boards)s::int[]))
+    AND (%(boards)s::int[] IS NULL
+         OR t.board_id = ANY(%(boards)s::int[])
+         OR EXISTS (SELECT 1 FROM boards b
+                    WHERE b.id = t.board_id AND COALESCE(b.repo_url, '') <> ''))
   ORDER BY wq.queued_at, wq.id
   FOR UPDATE OF wq SKIP LOCKED
   LIMIT 1
@@ -309,8 +317,62 @@ def app_data_boards_dir() -> Path:
     return root / "kanban-worker" / "boards"
 
 
+# A repo_url can carry embedded credentials (https://user:token@host/...).
+# resolve_directory's errors get written verbatim into a ticket comment —
+# visible to every cluster member and mirrored to Discord — so any URL that
+# reaches a returned message must have its userinfo stripped first, whether
+# it came from board config (repo_url/origin) or from git's own stderr,
+# which can echo a credentialed URL back just as easily.
+_CREDENTIALED_URL_RE = re.compile(r"://[^\s/@]+@")
+
+
+def _redact_url(url: str) -> str:
+    """Strip `user:pass@` (or `user:token@`) userinfo from a single URL."""
+    if not url:
+        return url
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return _redact_text(url)
+    if parts.netloc and "@" in parts.netloc:
+        parts = parts._replace(netloc=parts.netloc.rsplit("@", 1)[-1])
+        return urlunsplit(parts)
+    return url
+
+
+def _redact_text(text: str) -> str:
+    """Strip credentials from any URL(s) embedded in arbitrary text, e.g. raw
+    git stderr, which is not necessarily just a bare URL."""
+    if not text:
+        return text
+    return _CREDENTIALED_URL_RE.sub("://", text)
+
+
+GIT_TIMEOUT_SECONDS = 600
+
+
 def _run_git(args: list, cwd: str | None = None) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+    """Run one git subcommand with no chance of hanging the slot forever.
+
+    A repo_url that needs credentials not ambiently available can otherwise
+    make git prompt on inherited stdin and block indefinitely (same class of
+    risk as ClaudeExecutor.run's own timeout above). stdin is closed and the
+    usual interactive-prompt env vars are disabled so git fails fast instead
+    of waiting on a prompt nobody can answer; a hard timeout is the backstop
+    in case some git/credential-helper combination prompts anyway.
+    """
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "Never"}
+    cmd = ["git", *args]
+    try:
+        return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
+                              stdin=subprocess.DEVNULL, env=env,
+                              timeout=GIT_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            cmd, returncode=1,
+            stdout="",
+            stderr=f"git command timed out after {GIT_TIMEOUT_SECONDS}s",
+        )
 
 
 def resolve_directory(board: dict, cfg: dict) -> tuple:
@@ -340,49 +402,54 @@ def resolve_directory(board: dict, cfg: dict) -> tuple:
     directory = app_data_boards_dir() / str(board_id)
     if not directory.exists():
         directory.parent.mkdir(parents=True, exist_ok=True)
+        print(f"  [git] cloning {name}'s repo into {directory}")
         proc = _run_git(["clone", repo_url, str(directory)])
         if proc.returncode != 0:
-            return None, (
-                f"git clone failed for board '{name}': "
-                f"{(proc.stderr or proc.stdout).strip()[:2000]}"
-            )
+            stderr = _redact_text((proc.stderr or proc.stdout).strip()[:2000])
+            return None, f"git clone failed for board '{name}': {stderr}"
     else:
         proc = _run_git(["remote", "get-url", "origin"], cwd=str(directory))
         if proc.returncode != 0:
+            stderr = _redact_text(proc.stderr.strip()[:500])
             return None, (
                 f"Could not read the git remote for board '{name}' at "
-                f"{directory}: {proc.stderr.strip()[:500]}"
+                f"{directory}: {stderr}"
             )
         origin = proc.stdout.strip()
         if origin != repo_url:
             return None, (
-                f"The Repo URL configured for board '{name}' ({repo_url}) "
-                f"does not match this PC's existing clone's origin "
-                f"({origin}) at {directory}. If this is intentional, remove "
-                "that folder by hand — nothing here does that automatically."
+                f"The Repo URL configured for board '{name}' "
+                f"({_redact_url(repo_url)}) does not match this PC's "
+                f"existing clone's origin ({_redact_url(origin)}) at "
+                f"{directory}. If this is intentional, remove that folder "
+                "by hand — nothing here does that automatically."
             )
+        print(f"  [git] refreshing {name}'s checkout at {directory}")
 
     proc = _run_git(["fetch", "origin"], cwd=str(directory))
     if proc.returncode != 0:
-        return None, f"git fetch failed for board '{name}': {proc.stderr.strip()[:2000]}"
+        stderr = _redact_text(proc.stderr.strip()[:2000])
+        return None, f"git fetch failed for board '{name}': {stderr}"
 
     proc = _run_git(["rev-parse", "--abbrev-ref", "origin/HEAD"], cwd=str(directory))
     if proc.returncode != 0:
-        return None, (
-            f"Could not determine the default branch for board '{name}': "
-            f"{proc.stderr.strip()[:500]}"
-        )
+        stderr = _redact_text(proc.stderr.strip()[:500])
+        return None, f"Could not determine the default branch for board '{name}': {stderr}"
     default_branch = proc.stdout.strip().split("/", 1)[-1]
 
-    for args in (["checkout", default_branch],
+    # --force: a dirty working tree (leftover from a previous run) must not
+    # make checkout refuse and permanently wedge this board — reset --hard
+    # right after is what actually cleans the tree, but only runs if checkout
+    # itself succeeds first. This directory is exclusively owned by this
+    # feature's auto-clone (never an operator's hand-tended checkout), so
+    # forcing past local changes here is safe.
+    for args in (["checkout", "--force", default_branch],
                  ["reset", "--hard", f"origin/{default_branch}"],
                  ["clean", "-fd"]):
         proc = _run_git(args, cwd=str(directory))
         if proc.returncode != 0:
-            return None, (
-                f"git {' '.join(args)} failed for board '{name}': "
-                f"{proc.stderr.strip()[:2000]}"
-            )
+            stderr = _redact_text(proc.stderr.strip()[:2000])
+            return None, f"git {' '.join(args)} failed for board '{name}': {stderr}"
 
     return str(directory), None
 
@@ -792,8 +859,9 @@ def main() -> int:
         save_config(cfg)
 
     if not isinstance(executor, StubExecutor) and not configured_board_ids(cfg):
-        print("WARNING: no board folders configured on this PC, so nothing will "
-              "be claimed.\n         Fix with: --list-boards, then "
+        print("WARNING: no board folders configured on this PC via --set-path; "
+              "only boards with a Repo URL set (auto-clone) will be claimable "
+              "here.\n         Fix with: --list-boards, then "
               "--set-path <board>=<path>")
 
     print(f"Worker '{cfg['name']}' polling Postgres every {args.poll}s "

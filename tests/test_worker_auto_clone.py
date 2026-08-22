@@ -55,6 +55,13 @@ def test_clones_when_the_appdata_directory_is_missing(monkeypatch, tmp_path):
     clone_cmd = fake.calls[0][0]
     assert clone_cmd[2] == BOARD["repo_url"]
     assert clone_cmd[3] == str(boards_root / "9")
+    # The clone itself has no cwd to run inside yet (the directory doesn't
+    # exist until git creates it); every call after that must run inside the
+    # board's own directory — a regression that dropped cwd here would run
+    # fetch/checkout/reset/clean in the worker's own repo instead.
+    assert fake.calls[0][1].get("cwd") is None
+    for cmd, kwargs in fake.calls[1:]:
+        assert kwargs.get("cwd") == str(boards_root / "9"), cmd
 
 
 def test_refreshes_an_existing_clone_instead_of_recloning(monkeypatch, tmp_path):
@@ -73,6 +80,10 @@ def test_refreshes_an_existing_clone_instead_of_recloning(monkeypatch, tmp_path)
     subcommands = [c[0][1] for c in fake.calls]
     assert "clone" not in subcommands
     assert subcommands == ["remote", "fetch", "rev-parse", "checkout", "reset", "clean"]
+    # Every one of these destructive/refresh calls must run inside the
+    # board's own existing checkout, never the worker's own repo.
+    for cmd, kwargs in fake.calls:
+        assert kwargs.get("cwd") == str(existing), cmd
 
 
 def test_default_branch_is_read_from_origin_head(monkeypatch, tmp_path):
@@ -83,7 +94,11 @@ def test_default_branch_is_read_from_origin_head(monkeypatch, tmp_path):
     worker.resolve_directory(BOARD, {})
     checkout_cmd = next(c[0] for c in fake.calls if c[0][1] == "checkout")
     reset_cmd = next(c[0] for c in fake.calls if c[0][1] == "reset")
-    assert checkout_cmd[2] == "develop"
+    # --force: a dirty working tree must not permanently wedge this board's
+    # auto-managed checkout by making checkout fail before reset --hard can
+    # clean it up.
+    assert checkout_cmd[2] == "--force"
+    assert checkout_cmd[3] == "develop"
     assert reset_cmd[3] == "origin/develop"
 
 
@@ -108,6 +123,61 @@ def test_clone_failure_is_reported_not_raised(monkeypatch, tmp_path):
     monkeypatch.setattr(subprocess, "run", fake)
     directory, error = worker.resolve_directory(BOARD, {})
     assert directory is None
+    assert "Authentication failed" in error
+
+
+def test_git_timeout_is_reported_not_raised(monkeypatch, tmp_path):
+    """A git process that hangs (e.g. an interactive credential prompt with no
+    ambient auth) must not hang resolve_directory forever or propagate an
+    exception — it should come back as an ordinary (None, error) result."""
+    boards_root = tmp_path / "appdata" / "boards"
+    monkeypatch.setattr(worker, "app_data_boards_dir", lambda: boards_root)
+
+    def timeout_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, 600)
+
+    monkeypatch.setattr(subprocess, "run", timeout_run)
+    directory, error = worker.resolve_directory(BOARD, {})
+    assert directory is None
+    assert "timed out" in error.lower()
+
+
+def test_origin_mismatch_error_redacts_credentials_from_both_urls(monkeypatch, tmp_path):
+    """A repo_url with embedded credentials must never reach the error string
+    resolve_directory returns — that string is written verbatim into a
+    ticket comment, visible to the whole cluster and mirrored to Discord."""
+    boards_root = tmp_path / "appdata" / "boards"
+    existing = boards_root / "9"
+    existing.mkdir(parents=True)
+    monkeypatch.setattr(worker, "app_data_boards_dir", lambda: boards_root)
+    fake = FakeGit(outputs={
+        "remote": (0, "https://other:secret@github.com/org/other-repo.git\n", ""),
+    })
+    monkeypatch.setattr(subprocess, "run", fake)
+    board = {"id": 9, "name": "site-page",
+             "repo_url": "https://user:secret@github.com/org/repo.git"}
+    directory, error = worker.resolve_directory(board, {})
+    assert directory is None
+    assert "secret" not in error
+    assert "does not match" in error
+
+
+def test_clone_failure_stderr_redacts_credentials(monkeypatch, tmp_path):
+    """git's own stderr can echo a credentialed URL back verbatim even when
+    the caller only ever handed git a bare repo_url string."""
+    boards_root = tmp_path / "appdata" / "boards"
+    monkeypatch.setattr(worker, "app_data_boards_dir", lambda: boards_root)
+    fake = FakeGit(outputs={"clone": (
+        128, "",
+        "fatal: Authentication failed for "
+        "'https://user:secret@github.com/org/repo.git/'",
+    )})
+    monkeypatch.setattr(subprocess, "run", fake)
+    board = {"id": 9, "name": "site-page",
+             "repo_url": "https://user:secret@github.com/org/repo.git"}
+    directory, error = worker.resolve_directory(board, {})
+    assert directory is None
+    assert "secret" not in error
     assert "Authentication failed" in error
 
 
