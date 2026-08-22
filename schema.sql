@@ -86,6 +86,10 @@ CREATE TABLE IF NOT EXISTS tickets (
     -- ties (the common case — most tickets never get dragged) fall back to
     -- queued_at. Not unique or contiguous: only relative order matters.
     "order"         INTEGER NOT NULL DEFAULT 0,
+    -- NULL = not yet triaged. Set once by initial triage (worker.py's
+    -- triage_todo_tickets), which promotes the ticket todo -> ready in the
+    -- same guarded UPDATE; never overwritten afterward.
+    model           VARCHAR(32),
     created_at      TIMESTAMP NOT NULL DEFAULT now(),
     updated_at      TIMESTAMP NOT NULL DEFAULT now()
 );

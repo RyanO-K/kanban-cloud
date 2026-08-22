@@ -44,6 +44,13 @@ _PHASE3_COLUMNS = [
     ("work_queue", "heartbeat_at TIMESTAMP"),
 ]
 
+# (table, column DDL) pairs added by initial triage (gap analysis phase 5).
+# Nullable: NULL means "not yet triaged", which worker.triage_todo_tickets'
+# guard (`WHERE status='todo' AND model IS NULL`) relies on.
+_PHASE5_COLUMNS = [
+    ("tickets", "model VARCHAR(32)"),
+]
+
 
 def resolve_db_url(db_url: str | None = None) -> str:
     url = db_url or os.environ.get("DATABASE_URL") or DEFAULT_SQLITE_URL
@@ -151,7 +158,8 @@ def _add_missing_columns(engine) -> None:
     insp = inspect(engine)
     tables = set(insp.get_table_names())
     with engine.begin() as conn:
-        for table, ddl in _PHASE1_COLUMNS + _PHASE2_COLUMNS + _PHASE3_COLUMNS:
+        for table, ddl in (_PHASE1_COLUMNS + _PHASE2_COLUMNS + _PHASE3_COLUMNS
+                          + _PHASE5_COLUMNS):
             if table not in tables:
                 continue  # a brand-new DB: create_all() already built the shape
             column = ddl.split()[0].strip('"')

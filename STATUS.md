@@ -2,6 +2,54 @@
 
 Last updated: 2026-08-22
 
+## Initial triage: opportunistic, in every worker (2026-08-22)
+
+Gap analysis §8 Phase 5, items 13-14 — "the one genuinely new architectural
+question in the whole gap analysis": where does triage run? Design:
+`docs/superpowers/specs/2026-08-22-triage-design.md`. The ticket's own framing
+of the simplest option ("the app already holds the cluster API key") turned out
+to be stale — that key and `cluster_settings` were deleted entirely by the
+"Workers authenticate with local Claude Code config" change earlier in this
+file. With no server-side credential to lean on, the decision landed on a
+fourth shape none of the three offered options quite named: **opportunistic
+triage in every worker**, piggybacked on the same main-loop tick as the
+stale-claim reaper — no elected leader, no Render cron, no new credential. Each
+worker's own already-authenticated `claude` CLI does the inference; the
+`kanban_worker` group role already grants cluster-wide `UPDATE`/`INSERT`, same
+as the reaper already relies on.
+
+`tickets.model` is a new nullable column (`NULL` = not yet triaged).
+`app/triage.py` (stdlib-only, like `app/prompt.py`, so it can ride into the
+worker exe) builds the triage prompt from a ticket plus every other ticket on
+its board, and validates the reply strictly: `model` must be one of
+`haiku`/`sonnet`/`opus`, `depends_on` a list of real candidate ids excluding
+the ticket itself, or the whole reply is rejected. `worker.py`'s
+`triage_todo_tickets` selects `todo` tickets with no model yet, calls the CLI
+(injectable `run_llm`, defaulting to a plain `claude -p` shellout — no tool
+grants or streaming needed for a one-line JSON answer), and applies a valid
+result atomically: `_apply_triage_one`'s `UPDATE ... WHERE status='todo' AND
+model IS NULL` is the same guarded-rowcount pattern `_reap_one`/`finish_work`
+already use, so a second pass over an already-triaged ticket (or two workers
+racing the same one) is a no-op for every writer but the first — this is what
+makes triage idempotent. A triage failure — the CLI errors, times out, or
+replies with anything `parse_triage_result` rejects — leaves the ticket
+untouched in `todo`; nothing is written, so there is no separate failure path
+to get wrong. A successful apply also inserts the inferred `ticket_deps` rows
+and a fresh `work_queue` row, same as a human promoting a ticket by hand.
+
+`kanban_worker`'s grants (`app/enrollment.py`) picked up `INSERT` on
+`ticket_deps`, which no worker role needed before now.
+
+Tests: 300 → 330 (17 pure prompt/validation tests, 11 apply/idempotency/
+race/failure tests against a real embedded SQLite DB via the same shim
+pattern `tests/test_reaper.py` established, 2 migration tests).
+
+Not yet done: dispatch-time triage (choosing which *ready* ticket to run next,
+and with which profile — gap analysis item 4, blocked on profiles existing at
+all); no backoff on a ticket that keeps failing triage (retried every poll
+cycle, forever, by every online worker); profiles themselves (item 12) are a
+separate, not-yet-done ticket.
+
 ## Ticket dependencies gate claiming (2026-08-22)
 
 Phase 2 of the gap analysis (`docs/2026-08-22-local-vs-cloud-gap-analysis.md`,
