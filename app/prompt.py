@@ -28,6 +28,16 @@ def _filled(board: dict, key: str) -> str:
     return (board.get(key) or "").strip()
 
 
+def ticket_branch_name(ticket: dict) -> str:
+    """The deterministic branch name an agent creates for one ticket.
+
+    worker.py recomputes this same name after the agent finishes, to push
+    whatever branch it just committed — so this must stay the single source
+    both sides call.
+    """
+    return f"{ticket['id']}-{slugify(ticket.get('title', ''))}"
+
+
 def build_agent_prompt(ticket: dict, board: dict, directory: str) -> str:
     """Compose the full instruction for one ticket.
 
@@ -35,7 +45,7 @@ def build_agent_prompt(ticket: dict, board: dict, directory: str) -> str:
     no metadata yields a short prompt rather than a form full of blank
     headings.
     """
-    branch = f"{ticket['id']}-{slugify(ticket.get('title', ''))}"
+    branch = ticket_branch_name(ticket)
     parts = [
         "You are working a single kanban ticket. Keep changes minimal and "
         "focused on what the ticket asks for.",

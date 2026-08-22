@@ -49,7 +49,7 @@ except ImportError as exc:
         'Then re-run: py worker.py --enroll --join-code ABC12345'
     )
 
-from app.prompt import build_agent_prompt
+from app.prompt import build_agent_prompt, ticket_branch_name
 
 DEFAULT_SERVER = "https://kanban-cloud.onrender.com"
 TEST_SERVER = "http://localhost:8900"
@@ -454,6 +454,33 @@ def resolve_directory(board: dict, cfg: dict) -> tuple:
     return str(directory), None
 
 
+# ---------- push: land a finished ticket's branch on the remote ----------
+#
+# The agent is told (app/prompt.py) to commit but never push — "pushing is
+# handled separately" — because push credentials are this PC's own ambient
+# git auth and should never be something the agent's prompt has to reason
+# about. This is the "separately": after a successful run, push whatever
+# branch the agent committed so the work doesn't strand itself on this PC.
+
+def push_ticket_branch(directory: str, branch: str) -> str | None:
+    """Best-effort push of `branch` to origin. Returns a note to append to
+    the ticket comment, or None when there is nothing to report (no such
+    branch — the agent made no commits, e.g. a no-op ticket).
+
+    Never fails the ticket: a push failure (no network, no credentials, a
+    protected branch) is surfaced in the comment instead so a human can push
+    by hand, same as today, rather than losing the run's result.
+    """
+    proc = _run_git(["rev-parse", "--verify", "--quiet", branch], cwd=directory)
+    if proc.returncode != 0:
+        return None
+    proc = _run_git(["push", "origin", branch], cwd=directory)
+    if proc.returncode != 0:
+        stderr = _redact_text((proc.stderr or proc.stdout).strip()[:1000])
+        return f"\n\n(Could not push branch `{branch}` to origin: {stderr})"
+    return f"\n\n(Pushed branch `{branch}` to origin.)"
+
+
 def enroll(server: str, join_code: str, name: str) -> dict:
     """One-time HTTP call; the server creates this PC's Postgres role and
     returns a ready-to-use DSN."""
@@ -727,6 +754,11 @@ def run_slot(cfg, args, executor, stop_event, slot_no: int) -> None:
                                 ticket, board=work.get("board"),
                                 directory=directory,
                                 session_id=work.get("session_id"))
+                            if ok:
+                                push_note = push_ticket_branch(
+                                    directory, ticket_branch_name(ticket))
+                                if push_note:
+                                    comment = (comment or "") + push_note
                 except Exception as exc:
                     ok, comment = False, f"Executor error: {exc!r}"
                 finally:
