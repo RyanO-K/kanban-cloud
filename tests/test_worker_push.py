@@ -80,7 +80,7 @@ def test_run_slot_appends_push_note_to_the_review_comment(monkeypatch):
     ticket = {"id": 5, "board_id": 6, "title": "My Ticket", "attempts": 1}
 
     class FakeExecutor:
-        def run(self, ticket, board=None, directory=None, session_id=None):
+        def run(self, ticket, board=None, directory=None, session_id=None, progress_cb=None):
             return True, "Implemented the thing."
 
     monkeypatch.setattr(worker, "resolve_directory", lambda board, cfg: ("/repo", None))
