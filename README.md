@@ -259,9 +259,9 @@ queue, so an enrolled worker cannot claim one even though two of them sit in
 
 The **Import** button in the header (owner-only) loads a board from the local
 file-based `.kanban` tool. Click it and pick a board folder, or drag the folder
-onto the board area. One board per import: pick `.kanban/boards/ai-kanban`, not
-`.kanban` itself — dropping the root tells you which boards it found instead of
-importing all of them.
+onto the board area. One board per import: pick a single board folder (e.g.
+`.kanban/ai-kanban`), not the `.kanban` root — dropping the root tells you which
+boards it found instead of importing all of them.
 
 Import **always creates a new board**, named after the folder, suffixed `(2)`,
 `(3)` on a name clash. It never merges into or edits an existing board, so
