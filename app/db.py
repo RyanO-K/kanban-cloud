@@ -26,6 +26,7 @@ _PHASE1_COLUMNS = [
     ("tickets", "session_id VARCHAR(64)"),
     ("workers", "concurrency INTEGER NOT NULL DEFAULT 1"),
     ("workers", "running INTEGER NOT NULL DEFAULT 0"),
+    ("work_queue", "kill_requested BOOLEAN NOT NULL DEFAULT FALSE"),
 ]
 
 # (table, column DDL) pairs added by the ticket-ordering change. "order" is a

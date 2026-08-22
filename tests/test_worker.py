@@ -117,6 +117,47 @@ def test_executor_selection():
     assert worker.ClaudeExecutor().name == "claude"
 
 
+class _NullCtx:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class _FakeCursor(_NullCtx):
+    def __init__(self, row):
+        self._row = row
+
+    def execute(self, *a, **k):
+        pass
+
+    def fetchone(self):
+        return self._row
+
+
+class _FakeConn:
+    def __init__(self, row):
+        self._row = row
+
+    def cursor(self):
+        return _FakeCursor(self._row)
+
+    def transaction(self):
+        return _NullCtx()
+
+
+def test_kill_requested_reads_the_live_flag():
+    assert worker.kill_requested(_FakeConn((True,)), 1) is True
+    assert worker.kill_requested(_FakeConn((False,)), 1) is False
+
+
+def test_kill_requested_defaults_false_when_the_row_is_gone():
+    """The claim finished (or never existed) by the time we polled — treat
+    that the same as "no kill", not an error."""
+    assert worker.kill_requested(_FakeConn(None), 1) is False
+
+
 def test_test_flag_targets_local_server():
     args = worker.build_parser().parse_args(["--enroll", "--join-code", "X", "--test"])
     assert worker.resolve_server(args) == worker.TEST_SERVER

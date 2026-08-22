@@ -1,6 +1,7 @@
 """The executor's contract with the Claude CLI: right folder, right
-permissions, and (Phase 3) incremental streaming instead of an
-all-or-nothing block on process exit.
+permissions, incremental streaming instead of an all-or-nothing block on
+process exit, and a live should_kill()/timeout poll that can interrupt a
+run in progress.
 
 The prompt is multi-line, which is exactly what `shell=True` destroys on
 Windows — see test_never_uses_shell_true.
@@ -8,6 +9,7 @@ Windows — see test_never_uses_shell_true.
 import json
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -34,12 +36,17 @@ def result_line(text):
 
 class _FakeStdout:
     """Iterates a canned list of stdout lines, optionally raising partway
-    through to simulate a crashed/broken subprocess pipe."""
+    through to simulate a crashed/broken subprocess pipe. `still_running`
+    makes the iterator block past the canned lines (like a live child with
+    no output yet) until stop() is called — that's what lets the kill/
+    timeout poll loop be exercised without a real subprocess."""
 
-    def __init__(self, lines, crash_after=None, crash_exc=None):
+    def __init__(self, lines, crash_after=None, crash_exc=None, still_running=False):
         self._lines = list(lines)
         self._crash_after = crash_after
         self._crash_exc = crash_exc or OSError("pipe broke")
+        self._still_running = still_running
+        self._stopped = threading.Event()
         self._i = 0
 
     def __iter__(self):
@@ -48,27 +55,40 @@ class _FakeStdout:
     def __next__(self):
         if self._crash_after is not None and self._i == self._crash_after:
             raise self._crash_exc
-        if self._i >= len(self._lines):
-            raise StopIteration
-        line = self._lines[self._i]
-        self._i += 1
-        return line
+        if self._i < len(self._lines):
+            line = self._lines[self._i]
+            self._i += 1
+            return line
+        if self._still_running and not self._stopped.is_set():
+            self._stopped.wait(0.01)
+            return self.__next__()
+        raise StopIteration
+
+    def stop(self):
+        self._stopped.set()
 
     def close(self):
         pass
 
 
 class FakeProc:
-    def __init__(self, lines, returncode=0, crash_after=None, crash_exc=None):
-        self.stdout = _FakeStdout(lines, crash_after, crash_exc)
+    def __init__(self, lines=(), returncode=0, crash_after=None, crash_exc=None,
+                 still_running=False):
+        self.stdout = _FakeStdout(lines, crash_after, crash_exc, still_running)
         self.returncode = returncode
         self.killed = False
+        self.terminated = False
 
     def wait(self):
         return self.returncode
 
     def kill(self):
         self.killed = True
+        self.stdout.stop()
+
+    def terminate(self):
+        self.terminated = True
+        self.stdout.stop()
 
 
 def fake_popen(proc, captured):
@@ -204,7 +224,7 @@ def test_custom_allowed_tools(monkeypatch, tmp_path):
 def test_stub_executor_still_takes_the_new_kwargs():
     ok, out = worker.StubExecutor().run(TICKET, board=None,
                                         directory=None, session_id=None,
-                                        progress_cb=None)
+                                        progress_cb=None, should_kill=lambda: False)
     assert ok and "StubExecutor" in out
 
 
@@ -299,3 +319,60 @@ def test_progress_callback_error_does_not_abort_the_run(monkeypatch, tmp_path):
         TICKET, board=BOARD, directory=str(tmp_path), session_id="s",
         progress_cb=flaky)
     assert ok and out == "a\ndone"
+
+
+# ---------- kill support (worker.py's Popen migration) ----------
+
+def test_kill_flag_terminates_the_child_and_reports_the_distinct_status(monkeypatch, tmp_path):
+    """A should_kill() that fires mid-run must terminate the process tree and
+    signal the distinct 'killed' outcome (KilledByRequest), not a plain
+    failure — run_slot maps that to work_queue/tickets' 'killed' status,
+    which finish_work does not treat as a genuine failure."""
+    captured = {}
+    terminated = []
+    proc = FakeProc(still_running=True)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen(proc, captured))
+    monkeypatch.setattr(worker, "KILL_POLL_SECONDS", 0.01)
+
+    def fake_terminate(p):
+        terminated.append(p)
+        p.kill()  # ends the fake "still running" pipe, as a real kill would
+
+    monkeypatch.setattr(worker, "_terminate_process_tree", fake_terminate)
+
+    try:
+        worker.ClaudeExecutor().run(TICKET, board=BOARD, directory=str(tmp_path),
+                                    session_id="s", should_kill=lambda: True)
+        assert False, "expected KilledByRequest"
+    except worker.KilledByRequest:
+        pass
+    assert len(terminated) == 1
+
+
+def test_should_kill_ignored_once_the_process_already_exited(monkeypatch, tmp_path):
+    """A kill_requested flag flipped after the CLI already finished must not
+    turn a successful attempt into a spurious failure — should_kill() is only
+    ever consulted while still waiting on the child."""
+    calls = {"n": 0}
+
+    def should_kill():
+        calls["n"] += 1
+        return True  # would kill it -- if the loop ever asked
+
+    captured = {}
+    proc = FakeProc([result_line("done")], returncode=0)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen(proc, captured))
+    ok, out = worker.ClaudeExecutor().run(TICKET, board=BOARD, directory=str(tmp_path),
+                                          session_id="s", should_kill=should_kill)
+    assert ok and out == "done"
+    assert calls["n"] == 0
+
+
+def test_no_should_kill_defaults_to_never_killing(monkeypatch, tmp_path):
+    """should_kill is optional; omitting it must not crash the poll loop."""
+    captured = {}
+    proc = FakeProc([result_line("done")], returncode=0)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen(proc, captured))
+    ok, out = worker.ClaudeExecutor().run(TICKET, board=BOARD,
+                                          directory=str(tmp_path), session_id="s")
+    assert ok and out == "done"

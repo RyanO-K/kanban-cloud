@@ -140,12 +140,42 @@ RETURNING id, ticket_id
 
 # ---------- executors ----------
 
+class KilledByRequest(RuntimeError):
+    """Raised by an executor when it terminates its own child process because
+    work_queue.kill_requested was set for the in-flight claim. Distinct from
+    a genuine executor failure so run_slot can report it as such."""
+
+
+# How often a running agent's Popen is polled for exit and for a kill
+# request. Small enough to feel responsive; large enough not to hammer the
+# DB with a SELECT every run of the loop.
+KILL_POLL_SECONDS = 2
+
+AGENT_TIMEOUT_SECONDS = 1800
+
+
+def _terminate_process_tree(proc: subprocess.Popen) -> None:
+    """Kill the CLI and any child processes it spawned. A plain terminate()
+    only signals the immediate child; the Claude CLI's own subprocesses (the
+    tools it shells out to) would otherwise survive it."""
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                       capture_output=True)
+    else:
+        proc.kill()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
 class StubExecutor:
     """Fake executor: waits a moment and produces a canned result."""
 
     name = "stub"
 
-    def run(self, ticket, board=None, directory=None, session_id=None, progress_cb=None):
+    def run(self, ticket, board=None, directory=None, session_id=None,
+            progress_cb=None, should_kill=None):
         print(f"  [stub] pretending to work on ticket #{ticket['id']}: {ticket['title']}")
         time.sleep(2)
         return True, (
@@ -211,9 +241,11 @@ class ClaudeExecutor:
         # one per line.
         self.progress_batch = max(1, progress_batch)
 
-    def run(self, ticket, board=None, directory=None, session_id=None, progress_cb=None):
+    def run(self, ticket, board=None, directory=None, session_id=None,
+            progress_cb=None, should_kill=None):
         board = board or {}
         name = board.get("name", "?")
+        should_kill = should_kill or (lambda: False)
         if not directory:
             return False, (
                 f"This PC has no folder configured for board '{name}'. Set one "
@@ -251,27 +283,74 @@ class ClaudeExecutor:
         try:
             # Popen + incremental reads (rather than subprocess.run with
             # capture_output=True, which blocks until the process exits) is
-            # what makes streaming possible at all. As a side effect it also
-            # removes the old 30-minute all-or-nothing timeout: whatever the
-            # agent produced before a stall or crash is already visible
-            # instead of being discarded along with the rest.
+            # what makes streaming possible at all. Reading happens on a
+            # background thread so this method can still poll should_kill()
+            # and the overall timeout while a chatty (or silent) child is
+            # in-flight — a plain blocking `for raw_line in proc.stdout`
+            # can't be interrupted once it's waiting on the pipe.
             proc = subprocess.Popen(cmd, cwd=directory, stdout=subprocess.PIPE,
                                     stderr=subprocess.STDOUT, text=True, bufsize=1)
         except FileNotFoundError:
             return False, "`claude` CLI not found on this PC's PATH."
 
+        should_kill = should_kill or (lambda: False)
         seen_lines = []
         pending = []
+        reader_errors = []
+
+        def _read_stream():
+            try:
+                for raw_line in proc.stdout:
+                    seen_lines.append(raw_line)
+                    text = _stream_json_text(raw_line)
+                    if text:
+                        pending.append(text)
+                        if len(pending) >= self.progress_batch:
+                            emit("\n".join(pending))
+                            pending.clear()
+            except Exception as exc:
+                reader_errors.append(exc)
+
+        reader = threading.Thread(target=_read_stream, daemon=True)
+        reader.start()
+
+        # Polled (not a single blocking join) so should_kill() and the
+        # timeout both get a chance to fire while the child is still running;
+        # reader.join with a short timeout is the same live-poll shape
+        # ClaudeExecutor uses to wait on the subprocess itself.
+        deadline = time.monotonic() + AGENT_TIMEOUT_SECONDS
+        while reader.is_alive():
+            reader.join(timeout=KILL_POLL_SECONDS)
+            if not reader.is_alive():
+                break
+            # Only ever consulted while still waiting on the child: once it
+            # has exited above, a kill_requested flag that arrives too late
+            # to matter is never even read, let alone acted on.
+            if should_kill():
+                emit("\n".join(pending))
+                _terminate_process_tree(proc)
+                reader.join(timeout=5)
+                try:
+                    proc.stdout.close()
+                except Exception:
+                    pass
+                raise KilledByRequest("Killed by request.")
+            if time.monotonic() >= deadline:
+                emit("\n".join(pending))
+                _terminate_process_tree(proc)
+                reader.join(timeout=5)
+                try:
+                    proc.stdout.close()
+                except Exception:
+                    pass
+                return False, "Claude CLI timed out after 30 minutes."
+
         try:
-            for raw_line in proc.stdout:
-                seen_lines.append(raw_line)
-                text = _stream_json_text(raw_line)
-                if text:
-                    pending.append(text)
-                    if len(pending) >= self.progress_batch:
-                        emit("\n".join(pending))
-                        pending = []
-        except Exception as exc:
+            proc.stdout.close()
+        except Exception:
+            pass
+
+        if reader_errors:
             emit("\n".join(pending))
             try:
                 proc.kill()
@@ -279,14 +358,9 @@ class ClaudeExecutor:
             except Exception:
                 pass
             partial = _render_stream_lines(seen_lines)
-            crash_msg = f"Claude CLI crashed while streaming output: {exc!r}"
+            crash_msg = f"Claude CLI crashed while streaming output: {reader_errors[0]!r}"
             comment = f"{crash_msg}\n\n{partial}" if partial else crash_msg
             return False, comment[:10000]
-        finally:
-            try:
-                proc.stdout.close()
-            except Exception:
-                pass
 
         emit("\n".join(pending))
         returncode = proc.wait()
@@ -777,17 +851,38 @@ def add_progress(conn, worker_id: int, worker_name: str, ticket_id: int, message
         )
 
 
+def kill_requested(conn, item_id: int) -> bool:
+    """Live read of one in-flight claim's kill flag, via the slot's own
+    connection (same thread, sequential with everything else the slot does —
+    no concurrent use of `conn`). A transient DB hiccup here must not abort
+    an otherwise-healthy agent run, so it fails open (treated as "no kill")."""
+    try:
+        with conn.transaction(), conn.cursor() as cur:
+            cur.execute("SELECT kill_requested FROM work_queue WHERE id=%s", (item_id,))
+            row = cur.fetchone()
+            return bool(row and row[0])
+    except psycopg.OperationalError:
+        return False
+
+
 def finish_work(conn, worker_id: int, worker_name: str, item_id: int,
-                ticket_id: int, ok: bool, comment: str | None) -> str:
+                ticket_id: int, ok: bool, comment: str | None,
+                killed: bool = False) -> str:
     """Record the result. Mirrors v1 delegation.finish_work: success ->
-    review; failure -> requeue until MAX_ATTEMPTS then failed. The rowcount
-    guard on the first UPDATE preserves v1's 409-on-superseded semantics:
-    if the claim was superseded while we worked, nothing else is written."""
+    review; failure -> requeue until MAX_ATTEMPTS then failed. A kill (owner
+    request, not a genuine failure) -> killed, with the claim-time attempt
+    charge refunded so it does not burn the ticket's retry budget, and no
+    auto-requeue (unlike a failure, restarting it is the owner's call). The
+    rowcount guard on the first UPDATE preserves v1's 409-on-superseded
+    semantics: if the claim was superseded while we worked — including a kill
+    request that lands after this ticket already finished — nothing else is
+    written, so a late kill can never masquerade as a fresh failure."""
+    wq_status = "done" if ok else ("killed" if killed else "failed")
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             f"UPDATE work_queue SET status=%s, finished_at={UTC_NOW}, result=%s "
             f"WHERE id=%s AND status='claimed' AND claimed_by=%s",
-            ("done" if ok else "failed", (comment or "")[:10000], item_id, worker_id),
+            (wq_status, (comment or "")[:10000], item_id, worker_id),
         )
         if cur.rowcount != 1:
             cur.execute(
@@ -805,6 +900,14 @@ def finish_work(conn, worker_id: int, worker_name: str, item_id: int,
             ticket_status = "review"
             cur.execute(
                 f"UPDATE tickets SET status='review', updated_at={UTC_NOW} WHERE id=%s",
+                (ticket_id,),
+            )
+        elif killed:
+            ticket_status = "killed"
+            cur.execute(
+                f"UPDATE tickets SET status='killed', "
+                f"attempts=GREATEST(COALESCE(attempts,0)-1, 0), "
+                f"updated_at={UTC_NOW} WHERE id=%s",
                 (ticket_id,),
             )
         else:
@@ -992,13 +1095,15 @@ def run_slot(cfg, args, executor, stop_event, slot_no: int) -> None:
                     daemon=True,
                 )
                 hb_thread.start()
+                should_kill = lambda: kill_requested(conn, work["assignment_id"])  # noqa: E731
+                killed = False
                 try:
                     if isinstance(executor, StubExecutor):
                         ok, comment = executor.run(
                             ticket, board=work.get("board"),
                             directory=paths.get(str(ticket["board_id"])),
                             session_id=work.get("session_id"),
-                            progress_cb=progress_cb)
+                            progress_cb=progress_cb, should_kill=should_kill)
                     else:
                         directory, resolve_error = resolve_directory(
                             work.get("board") or {}, cfg)
@@ -1009,12 +1114,14 @@ def run_slot(cfg, args, executor, stop_event, slot_no: int) -> None:
                                 ticket, board=work.get("board"),
                                 directory=directory,
                                 session_id=work.get("session_id"),
-                                progress_cb=progress_cb)
+                                progress_cb=progress_cb, should_kill=should_kill)
                             if ok:
                                 push_note = push_ticket_branch(
                                     directory, ticket_branch_name(ticket))
                                 if push_note:
                                     comment = (comment or "") + push_note
+                except KilledByRequest as exc:
+                    ok, comment, killed = False, str(exc), True
                 except Exception as exc:
                     ok, comment = False, f"Executor error: {exc!r}"
                 finally:
@@ -1023,7 +1130,8 @@ def run_slot(cfg, args, executor, stop_event, slot_no: int) -> None:
                     with _SLOT_LOCK:
                         _RUNNING["n"] -= 1
                 status = finish_work(conn, cfg["worker_id"], cfg["name"],
-                                     work["assignment_id"], ticket["id"], ok, comment)
+                                     work["assignment_id"], ticket["id"], ok, comment,
+                                     killed=killed)
                 print(f"[slot {slot_no}] #{ticket['id']} -> {status}")
         except psycopg.OperationalError as e:
             msg = str(e)

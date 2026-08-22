@@ -7,6 +7,8 @@ Status vocabulary (borrowed/adapted from the local .kanban tool):
   review - agent finished, awaiting human review
   done   - completed
   failed - agent gave up after max attempts
+  killed - owner terminated a running attempt; distinct from failed, so it
+           does not consume a retry attempt
 """
 import datetime
 import secrets
@@ -24,7 +26,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-TICKET_STATUSES = ["todo", "ready", "doing", "review", "done", "failed"]
+TICKET_STATUSES = ["todo", "ready", "doing", "review", "done", "failed", "killed"]
 # Moving a ticket into this status queues it for an agent.
 AGENT_READY_STATUS = "ready"
 MAX_ATTEMPTS = 2  # keep in sync with worker.py MAX_ATTEMPTS
@@ -193,9 +195,14 @@ class WorkItem(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     ticket_id: Mapped[int] = mapped_column(ForeignKey("tickets.id"), nullable=False)
     cluster_id: Mapped[int] = mapped_column(ForeignKey("clusters.id"), nullable=False)
-    # queued | claimed | done | failed
+    # queued | claimed | done | failed | killed
     status: Mapped[str] = mapped_column(String(32), default="queued", nullable=False)
     claimed_by: Mapped[int | None] = mapped_column(ForeignKey("workers.id"), nullable=True)
+    # Owner-requested cancellation of the in-flight claim; the worker polls
+    # this while the agent runs and terminates the child process when set.
+    kill_requested: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False, server_default="0"
+    )
     queued_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow)
     claimed_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
     # Set at claim time and refreshed periodically by the running slot while

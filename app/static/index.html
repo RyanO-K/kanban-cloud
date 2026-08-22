@@ -148,6 +148,7 @@
       <option value="review">review</option>
       <option value="done">done</option>
       <option value="failed">failed</option>
+      <option value="killed">killed</option>
     </select>
     <label>Run on</label>
     <select id="tTarget"><option value="">any worker</option></select>
@@ -157,6 +158,7 @@
     <div class="row owner-only">
       <button onclick="saveTicket()">Save</button>
       <button class="ghost" id="runBtn" onclick="runTicket()">Run on agent now</button>
+      <button class="ghost" style="color:var(--bad); border-color:var(--bad)" id="killBtn" onclick="killTicket(editingTicket.id)">Kill</button>
       <div class="spacer"></div>
       <button class="ghost" style="color:var(--bad); border-color:var(--bad)" id="delBtn" onclick="deleteTicket()">Delete</button>
     </div>
@@ -212,7 +214,7 @@
 <div id="toast"></div>
 
 <script>
-const COLS = ["todo", "ready", "doing", "review", "done", "failed"];
+const COLS = ["todo", "ready", "doing", "review", "done", "failed", "killed"];
 let token = localStorage.getItem("kc_token") || null;
 let clusters = [], boards = [], tickets = [], workers = [];
 let currentCluster = null, currentBoard = null, editingTicket = null;
@@ -553,6 +555,7 @@ async function loadBoard() {
         ${t.blocked ? `<span class="badge blocked">blocked</span>` : ""}
         ${t.assigned_worker && (t.status === "doing") ? `<span class="badge">on ${esc(workerName(t.assigned_worker))}</span>` : ""}
         ${t.comments.length ? `<span class="badge">${t.comments.length} 💬</span>` : ""}
+        ${t.status === "doing" ? `<div><button class="small ghost owner-only" style="color:var(--bad); border-color:var(--bad); margin-top:4px" onclick="event.stopPropagation(); killTicket(${t.id})">Kill</button></div>` : ""}
       </div>`).join("");
     return `<div class="col" ondragover="event.preventDefault()" ondrop="dropTicket(event,'${col}')">
       <h3><span>${col}</span><span>${tickets.filter(t => t.status === col).length}</span></h3>${cards}</div>`;
@@ -617,6 +620,7 @@ function openTicketModal(id) {
   document.getElementById("tBlockedNote").style.display = editingTicket && editingTicket.blocked ? "" : "none";
   document.getElementById("delBtn").style.display = editingTicket ? "" : "none";
   document.getElementById("runBtn").style.display = editingTicket ? "" : "none";
+  document.getElementById("killBtn").style.display = editingTicket && editingTicket.status === "doing" ? "" : "none";
   document.getElementById("commentsWrap").style.display = editingTicket ? "" : "none";
   if (editingTicket) renderComments(editingTicket);
   document.getElementById("ticketOverlay").classList.add("show");
@@ -656,6 +660,11 @@ async function deleteTicket() {
   if (!editingTicket || !confirm("Delete ticket #" + editingTicket.id + "?")) return;
   await api("DELETE", `./api/tickets/${editingTicket.id}`);
   closeTicketModal(); loadBoard();
+}
+async function killTicket(id) {
+  if (!confirm("Kill this ticket's running agent?")) return;
+  await api("POST", `./api/tickets/${id}/kill`);
+  toast("Kill requested"); closeTicketModal(); loadBoard(); loadQueue();
 }
 async function addComment() {
   const msg = document.getElementById("newComment").value.trim();
