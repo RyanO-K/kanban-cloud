@@ -158,3 +158,17 @@ CREATE TABLE IF NOT EXISTS ticket_questions (
     created_at   TIMESTAMP NOT NULL DEFAULT now(),
     answered_at  TIMESTAMP
 );
+
+-- A human's mid-run message queued for delivery to the agent's live stdin,
+-- replacing the local `.kanban` tool's per-run JSONL inbox. delivered_at is
+-- set once the worker's chat pump has written the row to the CLI's stdin;
+-- unset rows are what a pump run picks up, in id order, whether they were
+-- queued before the agent started or typed while it was already running.
+CREATE TABLE IF NOT EXISTS ticket_chat (
+    id           SERIAL PRIMARY KEY,
+    ticket_id    INTEGER NOT NULL REFERENCES tickets(id),
+    sender       VARCHAR(255) NOT NULL,
+    message      TEXT NOT NULL,
+    created_at   TIMESTAMP NOT NULL DEFAULT now(),
+    delivered_at TIMESTAMP
+);

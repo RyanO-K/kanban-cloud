@@ -22,13 +22,16 @@ PASSWORD_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 # the retry row itself); INSERT on ticket_questions is the blocked-status
 # equivalent (worker inserts the question itself when an agent escalates).
 # No DELETE/UPDATE on ticket_questions — answering is a human, browser-side
-# action through the server's own DB session, never the worker role. No
-# DELETE anywhere; users/auth_tokens untouched.
+# action through the server's own DB session, never the worker role. UPDATE on
+# ticket_chat is the chat pump's delivered_at ack (mark_chat_delivered); a
+# human's own chat messages are inserted through the server's own DB session,
+# same as ticket_questions answers, so the worker role never needs INSERT
+# there. No DELETE anywhere; users/auth_tokens untouched.
 GROUP_GRANTS = [
     f"GRANT SELECT ON tickets, boards, clusters, workers, "
-    f"work_queue, comments, ticket_deps, ticket_questions TO {GROUP_ROLE}",
+    f"work_queue, comments, ticket_deps, ticket_questions, ticket_chat TO {GROUP_ROLE}",
     f"GRANT INSERT ON comments, work_queue, ticket_questions TO {GROUP_ROLE}",
-    f"GRANT UPDATE ON work_queue, tickets, workers TO {GROUP_ROLE}",
+    f"GRANT UPDATE ON work_queue, tickets, workers, ticket_chat TO {GROUP_ROLE}",
     f"GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {GROUP_ROLE}",
 ]
 

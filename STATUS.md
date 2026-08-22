@@ -91,6 +91,40 @@ UPDATE sees rowcount 0" guarantee this code relies on under Postgres READ
 COMMITTED. Verified stable across repeated runs (8x back-to-back), not just
 once.
 
+## Agent chat: a `ticket_chat` table pumped onto the CLI's live stdin (2026-08-22)
+
+Gap analysis §8 item 11 (phase 4). A human's mid-run message now has
+somewhere to go and a way to actually reach the agent: the new `ticket_chat`
+table (`sender`, `message`, `delivered_at`) replaces the local `.kanban`
+tool's per-run JSONL inbox, and `ClaudeExecutor` pumps undelivered rows onto
+the CLI's stdin exactly as the local orchestrator's `_chat_pump` does — this
+is what depending on the Popen/live-stdin work from progress streaming
+(f9b1e7c) unlocks. `worker.py` grew `chat_encode`/`chat_pump`/`chat_close`
+(pure, ported from the local tool's already-unit-tested `chat_*` helpers)
+plus `_chat_pump_loop`, which runs on its own thread for the run's whole
+duration: it polls a `chat_source()` callable — its first poll happens
+before any wait, so messages already queued when the process starts are not
+lost — writes each pending message to stdin in order as one stream-json user
+turn, acknowledges delivery via `chat_delivered()`, and always closes stdin
+on the way out (crash or clean exit) so the CLI sees EOF instead of an
+abandoned pipe. `run_slot` wires this to `fetch_pending_chat`/
+`mark_chat_delivered` over a connection of its own — separate from the
+slot's main connection, since the pump thread's DB calls would otherwise run
+concurrently with `progress_cb`'s.
+
+The CLI is now always started with `--input-format stream-json` and a piped
+stdin; a run with no `chat_source` closes stdin immediately rather than
+holding it open for nothing.
+
+No API endpoint or chat-box UI yet — those are separate, later gap-analysis
+items (§5/§6); this ticket was scoped to the table and the worker-side pump
+only, so a message currently has to be inserted into `ticket_chat` by hand
+(or a future endpoint) to be delivered.
+
+Tests: 207 → 220 (8 chat pump/encode/close pure-function tests, 5 executor
+wiring tests covering in-order delivery, messages queued before start,
+and clean stdin close on both normal exit and a crashed subprocess).
+
 ## Agents do real repo work, and PCs limit their own concurrency (2026-08-22)
 
 Cloud agents could not do repo work at all: `ClaudeExecutor` ran `claude -p`

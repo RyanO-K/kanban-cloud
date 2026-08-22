@@ -188,6 +188,23 @@ class Comment(Base):
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class TicketChat(Base):
+    """A human's mid-run message queued for delivery to the agent's live
+    stdin — the cloud analogue of the local tool's per-run JSONL inbox.
+    `delivered_at` is set once the worker's chat pump has written the row to
+    the CLI's stdin; unset rows are what a pump run picks up, in id order,
+    whether they were queued before the agent started or typed while it was
+    already running.
+    """
+    __tablename__ = "ticket_chat"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ticket_id: Mapped[int] = mapped_column(ForeignKey("tickets.id"), nullable=False)
+    sender: Mapped[str] = mapped_column(String(255), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow)
+    delivered_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class WorkItem(Base):
     """Work queue + assignment log. One row per delegation attempt."""
     __tablename__ = "work_queue"
