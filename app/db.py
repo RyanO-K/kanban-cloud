@@ -22,6 +22,7 @@ _PHASE1_COLUMNS = [
     ("boards", "out_of_scope TEXT"),
     ("boards", "commit_requirements TEXT"),
     ("boards", "use_worktrees BOOLEAN NOT NULL DEFAULT FALSE"),
+    ("boards", "repo_url TEXT"),
     ("tickets", "session_id VARCHAR(64)"),
     ("workers", "concurrency INTEGER NOT NULL DEFAULT 1"),
     ("workers", "running INTEGER NOT NULL DEFAULT 0"),

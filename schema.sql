@@ -33,9 +33,11 @@ CREATE TABLE IF NOT EXISTS cluster_members (
 );
 
 -- description/out_of_scope/commit_requirements/use_worktrees are the project
--- context injected into every agent prompt built for this board. The folder the
--- code lives in is deliberately NOT here: it is per-PC and lives in each
--- worker's own .worker_config.json.
+-- context injected into every agent prompt built for this board. repo_url is
+-- the git clone URL a worker with no --set-path entry auto-clones under its
+-- own AppData folder. The folder the code actually lives in on a given PC is
+-- deliberately NOT here: it is per-PC and lives in each worker's own
+-- .worker_config.json (or is derived from repo_url).
 CREATE TABLE IF NOT EXISTS boards (
     id                  SERIAL PRIMARY KEY,
     cluster_id          INTEGER NOT NULL REFERENCES clusters(id),
@@ -44,6 +46,7 @@ CREATE TABLE IF NOT EXISTS boards (
     out_of_scope        TEXT,
     commit_requirements TEXT,
     use_worktrees       BOOLEAN NOT NULL DEFAULT FALSE,
+    repo_url            TEXT,
     created_at          TIMESTAMP NOT NULL DEFAULT now()
 );
 

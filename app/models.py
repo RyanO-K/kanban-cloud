@@ -88,9 +88,12 @@ class Board(Base):
     """A project. The metadata below is the context every agent working one of
     this board's tickets is given (see app/prompt.build_agent_prompt).
 
-    Note what is NOT here: the folder the code lives in. That is per-PC — the
-    same board is worked by several machines with different layouts — so it
-    lives in each worker's own config, not in this table.
+    `repo_url` is the shared clone source for every worker on this board —
+    where its code lives on any given PC is a different thing: that folder is
+    per-PC (the same board is worked by several machines with different
+    layouts) and is either set by hand (`--set-path`) or derived from
+    `repo_url` under the worker's own AppData folder. Neither the folder nor
+    that derivation lives in this table.
     """
     __tablename__ = "boards"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -102,6 +105,7 @@ class Board(Base):
     use_worktrees: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False, server_default="0"
     )
+    repo_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow)
 
 
