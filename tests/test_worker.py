@@ -53,3 +53,21 @@ def test_max_attempts_matches_server():
 def test_executor_selection():
     assert worker.StubExecutor().name == "stub"
     assert worker.ClaudeExecutor().name == "claude"
+
+
+def test_test_flag_targets_local_server():
+    args = worker.build_parser().parse_args(["--enroll", "--join-code", "X", "--test"])
+    assert worker.resolve_server(args) == worker.TEST_SERVER
+    assert worker.TEST_SERVER != worker.DEFAULT_SERVER
+
+
+def test_explicit_server_flag_overrides_test_flag():
+    args = worker.build_parser().parse_args(
+        ["--enroll", "--join-code", "X", "--test", "--server", "https://custom.example"]
+    )
+    assert worker.resolve_server(args) == "https://custom.example"
+
+
+def test_no_flags_targets_default_server():
+    args = worker.build_parser().parse_args(["--enroll", "--join-code", "X"])
+    assert worker.resolve_server(args) == worker.DEFAULT_SERVER
