@@ -217,7 +217,7 @@ def test_claim_next_returns_repo_url_on_the_board_dict():
     conn = FakeConnWithBoardRow([
         (5, 9),                                             # claim: item_id, ticket_id
         (2, "Fix the thing", "Details.", 1),                 # ticket flip: board_id, title, body, attempts
-        ("site-page", "Desc", None, None, False, "https://github.com/org/repo.git"),  # board row
+        ("site-page", "Desc", None, None, False, "https://github.com/org/repo.git", False),  # board row
     ])
     work = worker.claim_next(conn, worker_id=1, cluster_id=1, board_ids=None)
     assert work["board"]["repo_url"] == "https://github.com/org/repo.git"

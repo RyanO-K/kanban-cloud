@@ -155,3 +155,17 @@ def test_kill_button_only_shown_for_in_progress_tickets(markup):
 def test_killed_is_a_board_column_and_ticket_status_option(markup):
     assert '"killed"' in markup
     assert '<option value="killed">killed</option>' in markup
+
+
+# ---------- commit gate + auto-push (ticket #15) ----------
+
+def test_auto_push_checkbox_present_and_wired(markup):
+    assert 'id="bAutoPush"' in markup
+    assert 'document.getElementById("bAutoPush").checked = !!b.auto_push' in markup
+    assert 'auto_push: document.getElementById("bAutoPush").checked' in markup
+
+
+def test_ticket_modal_shows_the_commit_gate(markup):
+    assert 'id="tCommitGate"' in markup
+    assert "editingTicket.commit_gate" in markup
+    assert "requirements_met" in markup

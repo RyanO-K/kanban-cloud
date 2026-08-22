@@ -37,7 +37,11 @@ CREATE TABLE IF NOT EXISTS cluster_members (
 -- the git clone URL a worker with no --set-path entry auto-clones under its
 -- own AppData folder. The folder the code actually lives in on a given PC is
 -- deliberately NOT here: it is per-PC and lives in each worker's own
--- .worker_config.json (or is derived from repo_url).
+-- .worker_config.json (or is derived from repo_url). auto_push is an opt-in
+-- switch (default off): a worker only pushes a finished ticket's branch to
+-- origin when this is true, and even then only if the ticket's commit_gate
+-- (see tickets below) reports requirements_met — push credentials are the
+-- worker PC's own ambient git auth and never reach this server either way.
 CREATE TABLE IF NOT EXISTS boards (
     id                  SERIAL PRIMARY KEY,
     cluster_id          INTEGER NOT NULL REFERENCES clusters(id),
@@ -47,6 +51,7 @@ CREATE TABLE IF NOT EXISTS boards (
     commit_requirements TEXT,
     use_worktrees       BOOLEAN NOT NULL DEFAULT FALSE,
     repo_url            TEXT,
+    auto_push           BOOLEAN NOT NULL DEFAULT FALSE,
     created_at          TIMESTAMP NOT NULL DEFAULT now()
 );
 
@@ -89,6 +94,12 @@ CREATE TABLE IF NOT EXISTS tickets (
     -- ties (the common case — most tickets never get dragged) fall back to
     -- queued_at. Not unique or contiguous: only relative order matters.
     "order"         INTEGER NOT NULL DEFAULT 0,
+    -- The agent's self-reported verdict on the board's commit_requirements,
+    -- JSON-encoded {"requirements_met": bool, "summary": str}. Written by the
+    -- worker (worker.py's finish_work) from the KANBAN_COMMIT_GATE: marker in
+    -- its captured output (see app/prompt.py's parse_commit_gate); NULL when
+    -- the board has no commit_requirements or the agent never reported one.
+    commit_gate     TEXT,
     created_at      TIMESTAMP NOT NULL DEFAULT now(),
     updated_at      TIMESTAMP NOT NULL DEFAULT now()
 );

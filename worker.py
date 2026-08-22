@@ -50,7 +50,12 @@ except ImportError as exc:
         'Then re-run: py worker.py --enroll --join-code ABC12345'
     )
 
-from app.prompt import build_agent_prompt, parse_question, ticket_branch_name
+from app.prompt import (
+    build_agent_prompt,
+    parse_commit_gate,
+    parse_question,
+    ticket_branch_name,
+)
 
 DEFAULT_SERVER = "https://kanban-cloud.onrender.com"
 TEST_SERVER = "http://localhost:8900"
@@ -920,7 +925,7 @@ def claim_next(conn, worker_id: int, cluster_id: int, board_ids=None) -> dict | 
         )
         cur.execute(
             "SELECT name, description, out_of_scope, commit_requirements, "
-            "use_worktrees, repo_url FROM boards WHERE id=%s",
+            "use_worktrees, repo_url, auto_push FROM boards WHERE id=%s",
             (board_id,),
         )
         b = cur.fetchone()
@@ -931,6 +936,7 @@ def claim_next(conn, worker_id: int, cluster_id: int, board_ids=None) -> dict | 
                 "id": board_id, "name": b[0], "description": b[1],
                 "out_of_scope": b[2], "commit_requirements": b[3],
                 "use_worktrees": bool(b[4]), "repo_url": b[5],
+                "auto_push": bool(b[6]),
             } if b else None,
             "ticket": {
                 "id": ticket_id, "board_id": board_id, "title": title,
@@ -989,7 +995,7 @@ def mark_chat_delivered(conn, chat_ids: list) -> None:
 
 def finish_work(conn, worker_id: int, worker_name: str, item_id: int,
                 ticket_id: int, ok: bool, comment: str | None,
-                killed: bool = False) -> str:
+                killed: bool = False, commit_gate: dict | None = None) -> str:
     """Record the result. Mirrors v1 delegation.finish_work: success ->
     review; failure -> requeue until MAX_ATTEMPTS then failed. A kill (owner
     request, not a genuine failure) -> killed, with the claim-time attempt
@@ -998,7 +1004,13 @@ def finish_work(conn, worker_id: int, worker_name: str, item_id: int,
     rowcount guard on the first UPDATE preserves v1's 409-on-superseded
     semantics: if the claim was superseded while we worked — including a kill
     request that lands after this ticket already finished — nothing else is
-    written, so a late kill can never masquerade as a fresh failure."""
+    written, so a late kill can never masquerade as a fresh failure.
+
+    `commit_gate`, when given, is the agent's self-reported verdict on the
+    board's commit_requirements (see app/prompt.parse_commit_gate) and is
+    recorded on tickets.commit_gate regardless of ok/killed, so a human can
+    see why a run did not push even when the run itself succeeded.
+    """
     wq_status = "done" if ok else ("killed" if killed else "failed")
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
@@ -1017,6 +1029,11 @@ def finish_work(conn, worker_id: int, worker_name: str, item_id: int,
                 f"INSERT INTO comments (ticket_id, writer, message, created_at) "
                 f"VALUES (%s, %s, %s, {UTC_NOW})",
                 (ticket_id, f"worker:{worker_name}", comment),
+            )
+        if commit_gate is not None:
+            cur.execute(
+                "UPDATE tickets SET commit_gate=%s WHERE id=%s",
+                (json.dumps(commit_gate), ticket_id),
             )
         if ok:
             ticket_status = "review"
@@ -1276,6 +1293,7 @@ def run_slot(cfg, args, executor, stop_event, slot_no: int) -> None:
                 hb_thread.start()
                 should_kill = lambda: kill_requested(conn, work["assignment_id"])  # noqa: E731
                 killed = False
+                commit_gate = None
 
                 # The chat pump runs on its own thread inside executor.run()
                 # for the run's whole duration, so it gets a connection of
@@ -1325,10 +1343,30 @@ def run_slot(cfg, args, executor, stop_event, slot_no: int) -> None:
                             # push yet, and (in tests especially) `directory`
                             # may not even be a real git checkout.
                             if ok and not parse_question(comment):
-                                push_note = push_ticket_branch(
-                                    directory, ticket_branch_name(ticket))
-                                if push_note:
-                                    comment = (comment or "") + push_note
+                                board = work.get("board") or {}
+                                commit_gate = parse_commit_gate(comment)
+                                # A board with commit_requirements refuses to
+                                # push unless the agent's own gate says they
+                                # were met — an unreported gate (marker
+                                # missing/malformed) is treated the same as an
+                                # explicit False, not as "nothing to check".
+                                gate_unmet = (
+                                    bool(board.get("commit_requirements"))
+                                    and not (commit_gate and commit_gate["requirements_met"])
+                                )
+                                if not board.get("auto_push"):
+                                    pass  # opt-in: this board never auto-pushes
+                                elif gate_unmet:
+                                    comment = (comment or "") + (
+                                        "\n\n(Not pushed: the commit gate did not "
+                                        "report the board's commit requirements "
+                                        "were met.)"
+                                    )
+                                else:
+                                    push_note = push_ticket_branch(
+                                        directory, ticket_branch_name(ticket))
+                                    if push_note:
+                                        comment = (comment or "") + push_note
                 except KilledByRequest as exc:
                     ok, comment, killed = False, str(exc), True
                 except Exception as exc:
@@ -1354,7 +1392,7 @@ def run_slot(cfg, args, executor, stop_event, slot_no: int) -> None:
                 else:
                     status = finish_work(conn, cfg["worker_id"], cfg["name"],
                                          work["assignment_id"], ticket["id"], ok, comment,
-                                         killed=killed)
+                                         killed=killed, commit_gate=commit_gate)
                 print(f"[slot {slot_no}] #{ticket['id']} -> {status}")
         except psycopg.OperationalError as e:
             msg = str(e)

@@ -24,6 +24,13 @@ MAX_SLUG_WORDS = 6
 QUESTION_MARKER = "KANBAN_QUESTION:"
 QUESTION_TYPES = ("input", "choice")
 
+# Appended to the agent's normal summary (not a replacement for it, unlike
+# QUESTION_MARKER) when the board has commit_requirements: the agent's own
+# verdict on whether it satisfied them. worker.py records this on
+# tickets.commit_gate and, when the board has auto_push on, refuses to push a
+# branch whose gate says requirements were not met — see parse_commit_gate.
+COMMIT_GATE_MARKER = "KANBAN_COMMIT_GATE:"
+
 
 def slugify(text: str) -> str:
     """A branch-safe slug for a ticket title. Never returns an empty string."""
@@ -89,7 +96,11 @@ def build_agent_prompt(ticket: dict, board: dict, directory: str) -> str:
             "\nBefore you commit, this project requires:\n"
             f"{_filled(board, 'commit_requirements')}\n"
             "If you cannot satisfy that, stop and say so in your summary rather "
-            "than committing anyway."
+            "than committing anyway.\n"
+            "Either way, end your final reply with this line reporting your "
+            "verdict — in addition to your normal summary, not instead of it:\n"
+            f'{COMMIT_GATE_MARKER} {{"requirements_met": true or false, "summary": '
+            '"<one line: what you checked and what you found>"}'
         )
 
     parts.append(
@@ -141,4 +152,31 @@ def parse_question(text: str) -> dict | None:
         "format": (str(data["format"]).strip() or None) if data.get("format") else None,
         "options": options,
         "multi": bool(data.get("multi")),
+    }
+
+
+def parse_commit_gate(text: str) -> dict | None:
+    """Pull the agent's self-reported commit-gate verdict out of its captured
+    output. Returns None when the marker is absent, the JSON after it is
+    malformed, or "requirements_met" is missing/not a bool — any of which
+    means the caller cannot treat the requirement as verified, the same as an
+    explicit False.
+
+    Unlike QUESTION_MARKER, this marker is appended after a normal summary
+    rather than replacing the whole reply, so only the text after the LAST
+    occurrence is parsed — same reasoning as parse_question: the guidance
+    text itself contains the marker as an example.
+    """
+    if not text or COMMIT_GATE_MARKER not in text:
+        return None
+    _, _, tail = text.rpartition(COMMIT_GATE_MARKER)
+    try:
+        data = json.loads(tail.strip())
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("requirements_met"), bool):
+        return None
+    return {
+        "requirements_met": data["requirements_met"],
+        "summary": str(data.get("summary") or "").strip(),
     }

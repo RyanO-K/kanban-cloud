@@ -51,6 +51,16 @@ _PHASE4_COLUMNS = [
     ("workers", "desired_concurrency INTEGER"),
 ]
 
+# (table, column DDL) pairs added by the commit gate / auto-commit change
+# (gap analysis phase 6, ticket #15). auto_push defaults FALSE — a board
+# created before this column existed gets no new pushing behavior, matching
+# "auto-push is opt-in per board". commit_gate is nullable text (JSON); NULL
+# means the board has no commit_requirements or the agent never reported one.
+_PHASE5_COLUMNS = [
+    ("boards", "auto_push BOOLEAN NOT NULL DEFAULT FALSE"),
+    ("tickets", "commit_gate TEXT"),
+]
+
 
 def resolve_db_url(db_url: str | None = None) -> str:
     url = db_url or os.environ.get("DATABASE_URL") or DEFAULT_SQLITE_URL
@@ -158,7 +168,8 @@ def _add_missing_columns(engine) -> None:
     insp = inspect(engine)
     tables = set(insp.get_table_names())
     with engine.begin() as conn:
-        for table, ddl in _PHASE1_COLUMNS + _PHASE2_COLUMNS + _PHASE3_COLUMNS + _PHASE4_COLUMNS:
+        for table, ddl in (_PHASE1_COLUMNS + _PHASE2_COLUMNS + _PHASE3_COLUMNS
+                          + _PHASE4_COLUMNS + _PHASE5_COLUMNS):
             if table not in tables:
                 continue  # a brand-new DB: create_all() already built the shape
             column = ddl.split()[0].strip('"')

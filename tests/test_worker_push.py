@@ -102,14 +102,14 @@ def test_run_slot_appends_push_note_to_the_review_comment(monkeypatch):
             return None
         return {
             "assignment_id": 1, "session_id": "sid",
-            "board": {"id": 6, "use_worktrees": True, "repo_url": "x"},
+            "board": {"id": 6, "use_worktrees": True, "repo_url": "x", "auto_push": True},
             "ticket": ticket,
         }
 
     finished = {}
 
     def fake_finish_work(conn, worker_id, worker_name, item_id, ticket_id, ok, comment,
-                         killed=False):
+                         killed=False, commit_gate=None):
         finished["comment"] = comment
         return "review"
 

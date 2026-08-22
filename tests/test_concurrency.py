@@ -316,7 +316,8 @@ def test_resolve_error_skips_the_executor_entirely(monkeypatch, tmp_path):
         def run(self, *a, **k):
             raise AssertionError("executor.run must not be called")
 
-    def fake_finish(conn, wname, wid, item_id, ticket_id, ok, comment, killed=False):
+    def fake_finish(conn, wname, wid, item_id, ticket_id, ok, comment, killed=False,
+                    commit_gate=None):
         finished["ok"], finished["comment"], finished["killed"] = ok, comment, killed
         return "failed"
 
@@ -351,7 +352,8 @@ def test_run_slot_reports_a_kill_as_the_distinct_status(monkeypatch, tmp_path):
         def run(self, *a, **k):
             raise worker.KilledByRequest("Killed by request.")
 
-    def fake_finish(conn, wid, wname, item_id, ticket_id, ok, comment, killed=False):
+    def fake_finish(conn, wid, wname, item_id, ticket_id, ok, comment, killed=False,
+                    commit_gate=None):
         finished["ok"], finished["comment"], finished["killed"] = ok, comment, killed
         return "killed"
 

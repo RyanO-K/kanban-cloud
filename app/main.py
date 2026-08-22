@@ -99,6 +99,7 @@ class BoardPatch(BaseModel):
     commit_requirements: str | None = None
     use_worktrees: bool | None = None
     repo_url: str | None = None
+    auto_push: bool | None = None
 
 
 class ImportBody(BaseModel):
@@ -359,6 +360,7 @@ def create_app(
             "commit_requirements": b.commit_requirements,
             "use_worktrees": bool(b.use_worktrees),
             "repo_url": b.repo_url,
+            "auto_push": bool(b.auto_push),
         }
 
     def depends_on_ids(db: Session, ticket_id: int) -> list[int]:
@@ -467,6 +469,7 @@ def create_app(
             "blocks": blocks_ids(db, t.id),
             "blocked": is_blocked(db, t.id),
             "question": ticket_question_json(question) if question else None,
+            "commit_gate": json.loads(t.commit_gate) if t.commit_gate else None,
             "comments": [
                 {
                     "writer": c.writer,
@@ -693,7 +696,7 @@ def create_app(
         """
         board = board_for_user(db, user, board_id)
         for field in ("description", "out_of_scope", "commit_requirements",
-                      "use_worktrees", "repo_url"):
+                      "use_worktrees", "repo_url", "auto_push"):
             value = getattr(body, field)
             if value is not None:
                 setattr(board, field, value)

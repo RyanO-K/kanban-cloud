@@ -109,6 +109,12 @@ class Board(Base):
         Boolean, default=False, nullable=False, server_default="0"
     )
     repo_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Opt-in switch (default off): a worker only pushes a finished ticket's
+    # branch to origin when this is true, and even then only if the ticket's
+    # commit_gate reports requirements_met — see worker.py's run_slot.
+    auto_push: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False, server_default="0"
+    )
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow)
 
 
@@ -161,6 +167,10 @@ class Ticket(Base):
     session_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # Drag-order rank, ascending; see CLAIM_ORDER_BY in worker.py.
     order: Mapped[int] = mapped_column(Integer, default=0, nullable=False, server_default="0")
+    # JSON-encoded {"requirements_met": bool, "summary": str}, the agent's
+    # self-reported verdict on the board's commit_requirements. Written by
+    # worker.py's finish_work; see app/prompt.py's parse_commit_gate.
+    commit_gate: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 

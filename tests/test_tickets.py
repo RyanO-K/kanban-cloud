@@ -82,3 +82,48 @@ def test_create_ticket_rejects_foreign_target_worker(client, user, cluster):
     assert r.status_code == 400
 
 
+# ---------- commit_gate round trip (ticket #15) ----------
+# The real write is worker.finish_work's raw SQL (Postgres-only, covered
+# against a fake cursor in tests/test_commit_gate.py); simulated here with
+# direct SQL against the test DB, same convention test_blocked_endpoint.py
+# uses for a worker's raise_question.
+
+def set_commit_gate(client, ticket_id, requirements_met, summary):
+    import json
+
+    from sqlalchemy import text
+
+    engine = client.app.state.engine
+    with engine.begin() as conn:
+        conn.execute(
+            text("UPDATE tickets SET commit_gate=:g WHERE id=:t"),
+            {"g": json.dumps({"requirements_met": requirements_met, "summary": summary}),
+             "t": ticket_id},
+        )
+
+
+def test_ticket_has_no_commit_gate_by_default(client, user, cluster):
+    t = make_ticket(client, user, cluster["board_id"])
+    assert t["commit_gate"] is None
+
+
+def test_commit_gate_round_trips_to_the_ticket_api(client, user, cluster):
+    t = make_ticket(client, user, cluster["board_id"])
+    set_commit_gate(client, t["id"], True, "Ran the suite, all green.")
+    listed = client.get(f"/api/boards/{cluster['board_id']}/tickets",
+                        headers=user["headers"]).json()
+    fresh = [x for x in listed if x["id"] == t["id"]][0]
+    assert fresh["commit_gate"] == {"requirements_met": True,
+                                    "summary": "Ran the suite, all green."}
+
+
+def test_commit_gate_round_trips_an_unmet_verdict(client, user, cluster):
+    t = make_ticket(client, user, cluster["board_id"])
+    set_commit_gate(client, t["id"], False, "Two tests still fail.")
+    listed = client.get(f"/api/boards/{cluster['board_id']}/tickets",
+                        headers=user["headers"]).json()
+    fresh = [x for x in listed if x["id"] == t["id"]][0]
+    assert fresh["commit_gate"] == {"requirements_met": False,
+                                    "summary": "Two tests still fail."}
+
+
