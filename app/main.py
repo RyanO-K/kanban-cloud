@@ -8,6 +8,7 @@ Env:  DATABASE_URL (optional; Neon Postgres). Falls back to ./kanban_cloud.db.
       a "Sign in with GitHub" button — e.g. /auth/github?return=/board/).
 """
 import hmac
+import json
 import os
 import re
 from pathlib import Path
@@ -31,6 +32,7 @@ from .models import (
     ClusterMember,
     Comment,
     Ticket,
+    TicketQuestion,
     User,
     WorkItem,
     Worker,
@@ -54,7 +56,7 @@ SPECTATOR_ALLOWED_RE = re.compile(
     r"^(?:/"
     r"|/api/health"
     r"|/api/session"
-    r"|/api/clusters/\d+/(?:boards|workers|queue)"
+    r"|/api/clusters/\d+/(?:boards|workers|queue|blocked)"
     r"|/api/boards/\d+/tickets"
     r")$"
 )
@@ -124,6 +126,14 @@ class TicketPatch(BaseModel):
 
 class CommentBody(BaseModel):
     message: str
+
+
+class AnswerBody(BaseModel):
+    """A human's answer to an agent's question. `notes` is authoritative over
+    `value` when both are given — same convention as the local .kanban tool's
+    answer shape."""
+    value: str
+    notes: str | None = None
 
 
 class WorkerEnrollBody(BaseModel):
@@ -308,10 +318,33 @@ def create_app(
             "repo_url": b.repo_url,
         }
 
+    def ticket_question_json(q: TicketQuestion) -> dict:
+        return {
+            "id": q.id,
+            "ticket_id": q.ticket_id,
+            "question": q.question,
+            "type": q.type,
+            "format": q.format,
+            "options": json.loads(q.options) if q.options else None,
+            "multi": bool(q.multi),
+            "answer_value": q.answer_value,
+            "answer_notes": q.answer_notes,
+            "created_at": q.created_at.isoformat(),
+            "answered_at": q.answered_at.isoformat() if q.answered_at else None,
+        }
+
+    def open_question(db: Session, ticket_id: int) -> TicketQuestion | None:
+        return db.scalar(
+            select(TicketQuestion)
+            .where(TicketQuestion.ticket_id == ticket_id, TicketQuestion.answered_at.is_(None))
+            .order_by(TicketQuestion.id.desc())
+        )
+
     def ticket_json(db: Session, t: Ticket) -> dict:
         comments = db.scalars(
             select(Comment).where(Comment.ticket_id == t.id).order_by(Comment.created_at)
         ).all()
+        question = open_question(db, t.id)
         return {
             "id": t.id,
             "board_id": t.board_id,
@@ -324,6 +357,7 @@ def create_app(
             "attempts": t.attempts,
             "created_at": t.created_at.isoformat(),
             "updated_at": t.updated_at.isoformat(),
+            "question": ticket_question_json(question) if question else None,
             "comments": [
                 {
                     "writer": c.writer,
@@ -495,6 +529,34 @@ def create_app(
             }
             for i in items
         ]
+
+    @app.get("/api/clusters/{cluster_id}/blocked")
+    def blocked_tickets(
+        cluster_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)
+    ):
+        """Every blocked ticket in the cluster with its open question,
+        across all boards — what the notification bell polls."""
+        require_member(db, user, cluster_id)
+        board_ids = db.scalars(
+            select(Board.id).where(Board.cluster_id == cluster_id)
+        ).all()
+        if not board_ids:
+            return []
+        tickets = db.scalars(
+            select(Ticket)
+            .where(Ticket.board_id.in_(board_ids), Ticket.status == "blocked")
+            .order_by(Ticket.updated_at.desc())
+        ).all()
+        out = []
+        for t in tickets:
+            q = open_question(db, t.id)
+            out.append({
+                "ticket_id": t.id,
+                "board_id": t.board_id,
+                "title": t.title,
+                "question": ticket_question_json(q) if q else None,
+            })
+        return out
 
     # ----- boards & tickets -----
 
@@ -720,6 +782,36 @@ def create_app(
         db.commit()
         return ticket_json(db, ticket)
 
+    @app.post("/api/tickets/{ticket_id}/questions/{question_id}/answer")
+    def answer_question(
+        ticket_id: int,
+        question_id: int,
+        body: AnswerBody,
+        user: User = Depends(current_user),
+        db: Session = Depends(get_db),
+    ):
+        """A human resolves an agent's escalation. Auto-requeues the ticket
+        exactly once: an already-answered question 409s rather than enqueuing
+        a second work item."""
+        ticket = ticket_for_user(db, user, ticket_id)
+        question = db.get(TicketQuestion, question_id)
+        if question is None or question.ticket_id != ticket.id:
+            raise HTTPException(404, "Question not found")
+        if question.answered_at is not None:
+            raise HTTPException(409, "Question already answered")
+        question.answer_value = body.value
+        question.answer_notes = body.notes
+        question.answered_at = utcnow()
+        note = f" ({body.notes})" if body.notes else ""
+        db.add(Comment(
+            ticket_id=ticket.id, writer=user.email,
+            message=f"Answered: {body.value}{note}",
+        ))
+        db.commit()
+        if ticket.status == "blocked":
+            delegation.enqueue_ticket(db, ticket)
+        return ticket_json(db, ticket)
+
     @app.delete("/api/tickets/{ticket_id}")
     def delete_ticket(
         ticket_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)
@@ -729,6 +821,8 @@ def create_app(
             db.delete(c)
         for i in db.scalars(select(WorkItem).where(WorkItem.ticket_id == ticket.id)):
             db.delete(i)
+        for q in db.scalars(select(TicketQuestion).where(TicketQuestion.ticket_id == ticket.id)):
+            db.delete(q)
         db.delete(ticket)
         db.commit()
         return {"ok": True}

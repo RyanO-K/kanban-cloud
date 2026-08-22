@@ -12,9 +12,17 @@ The `directory` argument is a parameter rather than a board field on purpose.
 The same board is worked by several machines with different layouts, so the
 folder is per-PC state and lives in each worker's own config.
 """
+import json
 import re
 
 MAX_SLUG_WORDS = 6
+
+# The agent's entire final reply must be this one line when it needs to stop
+# and ask a human something — see the escalation guidance appended in
+# build_agent_prompt, and parse_question below which reads it back out of the
+# executor's captured output.
+QUESTION_MARKER = "KANBAN_QUESTION:"
+QUESTION_TYPES = ("input", "choice")
 
 
 def slugify(text: str) -> str:
@@ -75,8 +83,52 @@ def build_agent_prompt(ticket: dict, board: dict, directory: str) -> str:
         )
 
     parts.append(
+        "\nIf you hit a genuine ambiguity you cannot resolve yourself, stop "
+        "before making any further changes and reply with ONLY this one line "
+        "(nothing before or after it):\n"
+        f'{QUESTION_MARKER} {{"question": "<your question>", "type": "input", '
+        '"format": null, "options": null, "multi": false}\n'
+        'Use "type": "choice" with an "options" array of strings when you\'re '
+        'offering a fixed set of choices ("multi": true allows more than one). '
+        "The ticket is parked as blocked and a human's answer requeues it — "
+        "do not guess and do not fail the ticket over it."
+    )
+    parts.append(
         "\nWhen you are done, reply with a concise summary of what you changed "
         "and why. That summary is posted back to the ticket as a comment, so it "
         "is the only thing a human will see by default."
     )
     return "\n".join(parts)
+
+
+def parse_question(text: str) -> dict | None:
+    """Pull a structured question out of an agent's captured output.
+
+    Returns None for a normal completion (no marker), a malformed/incomplete
+    marker, or a marker with no non-blank "question" text — any of which means
+    the caller should treat the run as an ordinary success/failure instead of
+    an escalation. Only the text after the LAST marker occurrence is parsed,
+    so the guidance text above (which itself contains the marker as an
+    example) never self-triggers.
+    """
+    if not text or QUESTION_MARKER not in text:
+        return None
+    _, _, tail = text.rpartition(QUESTION_MARKER)
+    try:
+        data = json.loads(tail.strip())
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    question = str(data.get("question") or "").strip()
+    if not question:
+        return None
+    qtype = data.get("type") if data.get("type") in QUESTION_TYPES else "input"
+    options = data.get("options") if isinstance(data.get("options"), list) else None
+    return {
+        "question": question,
+        "type": qtype,
+        "format": (str(data["format"]).strip() or None) if data.get("format") else None,
+        "options": options,
+        "multi": bool(data.get("multi")),
+    }

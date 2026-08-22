@@ -66,7 +66,9 @@ CREATE TABLE IF NOT EXISTS workers (
     UNIQUE (cluster_id, name)
 );
 
--- status: todo | ready | doing | review | done | failed
+-- status: todo | ready | doing | blocked | review | done | failed
+-- blocked = the agent raised a question (see ticket_questions) and released
+-- its work_queue slot; answering the question auto-requeues it.
 -- target_worker NULL = any worker in the cluster may claim.
 CREATE TABLE IF NOT EXISTS tickets (
     id              SERIAL PRIMARY KEY,
@@ -99,7 +101,9 @@ CREATE TABLE IF NOT EXISTS work_queue (
     id          SERIAL PRIMARY KEY,
     ticket_id   INTEGER NOT NULL REFERENCES tickets(id),
     cluster_id  INTEGER NOT NULL REFERENCES clusters(id),
-    status      VARCHAR(32) NOT NULL DEFAULT 'queued',  -- queued | claimed | done | failed
+    -- queued | claimed | done | failed | blocked (agent raised a question;
+    -- never re-claimed — a fresh row is queued when the question is answered)
+    status      VARCHAR(32) NOT NULL DEFAULT 'queued',
     claimed_by  INTEGER REFERENCES workers(id),
     queued_at   TIMESTAMP NOT NULL DEFAULT now(),
     claimed_at  TIMESTAMP,
@@ -109,3 +113,22 @@ CREATE TABLE IF NOT EXISTS work_queue (
 
 CREATE INDEX IF NOT EXISTS idx_work_queue_claim
     ON work_queue (cluster_id, status, queued_at);
+
+-- An agent's human-in-the-loop escalation (cloud counterpart of the local
+-- tool's orchestrator.question). type: input | choice. options is a
+-- JSON-encoded list of strings, meaningful only for type='choice'. Answering
+-- (answer_value/answer_notes/answered_at set) is what auto-requeues the
+-- ticket — see app/main.py's /api/tickets/{id}/questions/{id}/answer.
+CREATE TABLE IF NOT EXISTS ticket_questions (
+    id           SERIAL PRIMARY KEY,
+    ticket_id    INTEGER NOT NULL REFERENCES tickets(id),
+    question     TEXT NOT NULL,
+    type         VARCHAR(16) NOT NULL DEFAULT 'input',
+    format       VARCHAR(32),
+    options      TEXT,
+    multi        BOOLEAN NOT NULL DEFAULT FALSE,
+    answer_value TEXT,
+    answer_notes TEXT,
+    created_at   TIMESTAMP NOT NULL DEFAULT now(),
+    answered_at  TIMESTAMP
+);

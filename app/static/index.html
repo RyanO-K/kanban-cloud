@@ -100,6 +100,10 @@
     <input type="file" id="importInput" webkitdirectory directory multiple
            style="display:none" onchange="onImportPicked(event)">
     <div class="spacer"></div>
+    <button class="small ghost owner-only" id="bellBtn" onclick="openBlockedModal()"
+            title="Tickets waiting on a human answer" style="position:relative">
+      &#128276;<span id="bellBadge" class="badge" style="display:none; position:absolute; top:-6px; right:-6px; background:var(--bad); color:#fff">0</span>
+    </button>
     <span id="spectatorNote">viewing read-only</span>
     <div class="accountWrap">
       <button class="small" id="accountBtn" onclick="toggleAccountMenu()">
@@ -144,6 +148,7 @@
       <option value="todo">todo</option>
       <option value="ready">ready (queue for agent)</option>
       <option value="doing">doing</option>
+      <option value="blocked">blocked (waiting on a human answer)</option>
       <option value="review">review</option>
       <option value="done">done</option>
       <option value="failed">failed</option>
@@ -205,10 +210,22 @@
   </div>
 </div>
 
+<!-- notification bell: blocked tickets awaiting a human answer -->
+<div class="overlay" id="blockedOverlay" onclick="if(event.target===this) this.classList.remove('show')">
+  <div class="modal">
+    <h2>Needs your attention</h2>
+    <p class="muted" style="margin-top:0">Agents that hit an ambiguity, parked here instead of guessing.</p>
+    <div id="blockedList"><p class="muted">Nothing blocked right now.</p></div>
+    <div class="row">
+      <button class="ghost" onclick="document.getElementById('blockedOverlay').classList.remove('show')">Close</button>
+    </div>
+  </div>
+</div>
+
 <div id="toast"></div>
 
 <script>
-const COLS = ["todo", "ready", "doing", "review", "done", "failed"];
+const COLS = ["todo", "ready", "doing", "blocked", "review", "done", "failed"];
 let token = localStorage.getItem("kc_token") || null;
 let clusters = [], boards = [], tickets = [], workers = [];
 let currentCluster = null, currentBoard = null, editingTicket = null;
@@ -326,7 +343,7 @@ async function refreshClusterBits() {
   bs.innerHTML = boards.map(b => `<option value="${b.id}">${esc(b.name)}</option>`).join("");
   currentBoard = boards.find(b => b.id === sessionBoardId) || boards[0] || null;
   if (currentBoard) bs.value = currentBoard.id;
-  const jobs = [loadBoard(), loadWorkers(), loadQueue()];
+  const jobs = [loadBoard(), loadWorkers(), loadQueue(), loadBlocked()];
   await Promise.all(jobs);
 }
 
@@ -663,6 +680,54 @@ async function loadQueue() {
     : "No delegations yet.";
 }
 
+// ---------- notification bell: blocked tickets awaiting a human answer ----------
+let blockedTickets = [];
+async function loadBlocked() {
+  if (!currentCluster || sessionMode === "spectator") return;
+  blockedTickets = await api("GET", `./api/clusters/${currentCluster.id}/blocked`);
+  const badge = document.getElementById("bellBadge");
+  if (blockedTickets.length) { badge.textContent = blockedTickets.length; badge.style.display = ""; }
+  else badge.style.display = "none";
+  if (document.getElementById("blockedOverlay").classList.contains("show")) renderBlockedList();
+}
+
+function openBlockedModal() {
+  renderBlockedList();
+  document.getElementById("blockedOverlay").classList.add("show");
+}
+
+function renderBlockedList() {
+  document.getElementById("blockedList").innerHTML = blockedTickets.length ? blockedTickets.map(b => {
+    const q = b.question;
+    if (!q) return `<div class="comment"><b>#${b.ticket_id}</b> ${esc(b.title)}</div>`;
+    const field = (q.type === "choice" && q.options && q.options.length)
+      ? `<select id="ans_${q.id}" ${q.multi ? "multiple" : ""}>${q.options.map(o => `<option value="${esc(o)}">${esc(o)}</option>`).join("")}</select>`
+      : `<input id="ans_${q.id}" placeholder="Answer">`;
+    return `<div class="comment">
+      <b>#${b.ticket_id}</b> ${esc(b.title)}
+      <p>${esc(q.question)}</p>
+      <label>Answer</label>${field}
+      <label>Notes</label><textarea id="note_${q.id}" placeholder="optional"></textarea>
+      <div class="row"><button class="small" onclick="answerQuestion(${b.ticket_id}, ${q.id})">Answer &amp; requeue</button></div>
+    </div>`;
+  }).join("") : `<p class="muted">Nothing blocked right now.</p>`;
+}
+
+async function answerQuestion(ticketId, questionId) {
+  const field = document.getElementById(`ans_${questionId}`);
+  const value = (field.tagName === "SELECT"
+    ? Array.from(field.selectedOptions).map(o => o.value).join(", ")
+    : field.value).trim();
+  if (!value) { toast("Enter an answer first"); return; }
+  const notes = document.getElementById(`note_${questionId}`).value.trim();
+  await api("POST", `./api/tickets/${ticketId}/questions/${questionId}/answer`,
+            {value, notes: notes || null});
+  toast("Answered — ticket requeued");
+  await loadBlocked();
+  renderBlockedList();
+  loadBoard(); loadQueue();
+}
+
 function esc(s) {
   return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 }
@@ -671,7 +736,7 @@ function esc(s) {
 setInterval(() => {
   if ((token || sessionMode !== "local") && currentCluster &&
       document.getElementById("appView").style.display !== "none") {
-    loadWorkers(); loadQueue();
+    loadWorkers(); loadQueue(); loadBlocked();
     if (!document.getElementById("ticketOverlay").classList.contains("show")) loadBoard();
   }
 }, 5000);
