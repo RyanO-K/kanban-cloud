@@ -198,6 +198,46 @@ def test_executor_prompt_carries_project_context(monkeypatch, tmp_path):
     assert str(tmp_path) in prompt
 
 
+# ---------- resume ----------
+
+RESUME = {"question": "Which branch?", "answer_value": "main", "answer_notes": None}
+
+
+def test_resume_run_uses_resume_flag_not_session_id(monkeypatch, tmp_path):
+    captured = {}
+    proc = FakeProc([result_line("done")])
+    monkeypatch.setattr(subprocess, "Popen", fake_popen(proc, captured))
+    worker.ClaudeExecutor().run(TICKET, board=BOARD, directory=str(tmp_path),
+                                session_id="prior-sid", resume=RESUME)
+    cmd = captured["cmd"]
+    assert "--resume" in cmd
+    assert cmd[cmd.index("--resume") + 1] == "prior-sid"
+    assert "--session-id" not in cmd
+
+
+def test_resume_run_sends_the_short_resume_prompt_not_the_full_one(monkeypatch, tmp_path):
+    captured = {}
+    proc = FakeProc([result_line("done")])
+    monkeypatch.setattr(subprocess, "Popen", fake_popen(proc, captured))
+    worker.ClaudeExecutor().run(TICKET, board=BOARD, directory=str(tmp_path),
+                                session_id="prior-sid", resume=RESUME)
+    prompt = captured["cmd"][captured["cmd"].index("-p") + 1]
+    assert "Which branch?" in prompt
+    assert "main" in prompt
+    assert "Details." not in prompt  # the full ticket body was not resent
+
+
+def test_non_resume_run_still_uses_session_id(monkeypatch, tmp_path):
+    captured = {}
+    proc = FakeProc([result_line("done")])
+    monkeypatch.setattr(subprocess, "Popen", fake_popen(proc, captured))
+    worker.ClaudeExecutor().run(TICKET, board=BOARD, directory=str(tmp_path),
+                                session_id="sid-1", resume=None)
+    cmd = captured["cmd"]
+    assert "--session-id" in cmd
+    assert "--resume" not in cmd
+
+
 def test_never_uses_shell_true(monkeypatch, tmp_path):
     """Regression: on Windows `shell=True` re-parses the argument list through
     cmd.exe, which truncates the multi-line prompt at its first newline. The

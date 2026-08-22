@@ -111,6 +111,29 @@ def build_agent_prompt(ticket: dict, board: dict, directory: str) -> str:
     return "\n".join(parts)
 
 
+def build_resume_prompt(resume: dict) -> str:
+    """The short continuation sent when an unblocked ticket resumes its own
+    prior Claude CLI session (`claude --resume <session_id>`) instead of
+    restarting from build_agent_prompt. The resumed session already has the
+    ticket, project context and prior conversation loaded — only the question
+    and its answer need repeating.
+    """
+    parts = [
+        "You asked a question and were paused. A human has now answered it:",
+        f"\nYour question:\n{resume['question']}",
+        f"\nAnswer: {resume['answer_value']}",
+    ]
+    if (resume.get("answer_notes") or "").strip():
+        parts.append(f"\nNotes: {resume['answer_notes']}")
+    parts.append(
+        "\nContinue the ticket using this answer — do not restart or redo "
+        "work already done. If you hit another genuine ambiguity, use the "
+        f"same {QUESTION_MARKER} escalation as before. When you are done, "
+        "reply with a concise summary of what you changed and why."
+    )
+    return "\n".join(parts)
+
+
 def parse_question(text: str) -> dict | None:
     """Pull a structured question out of an agent's captured output.
 

@@ -133,6 +133,11 @@ CREATE TABLE IF NOT EXISTS work_queue (
     -- Owner-requested cancellation of the in-flight claim; the worker polls
     -- this while the agent runs and terminates the child process when set.
     kill_requested BOOLEAN NOT NULL DEFAULT FALSE,
+    -- Set when this row exists because a blocked ticket's question was just
+    -- answered. On claim, the worker continues the ticket's prior Claude CLI
+    -- session (`claude --resume <session_id>`) with a short answer-only
+    -- prompt instead of restarting the ticket from scratch.
+    resume       BOOLEAN NOT NULL DEFAULT FALSE,
     queued_at    TIMESTAMP NOT NULL DEFAULT now(),
     claimed_at   TIMESTAMP,
     heartbeat_at TIMESTAMP,

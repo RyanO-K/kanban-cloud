@@ -215,9 +215,40 @@ class FakeConnWithBoardRow(FakeConn):
 
 def test_claim_next_returns_repo_url_on_the_board_dict():
     conn = FakeConnWithBoardRow([
-        (5, 9),                                             # claim: item_id, ticket_id
-        (2, "Fix the thing", "Details.", 1),                 # ticket flip: board_id, title, body, attempts
+        (5, 9, False),                                        # claim: item_id, ticket_id, resume
+        (2, "Fix the thing", "Details.", 1, None),            # ticket flip: board_id, title, body, attempts, session_id
         ("site-page", "Desc", None, None, False, "https://github.com/org/repo.git"),  # board row
     ])
     work = worker.claim_next(conn, worker_id=1, cluster_id=1, board_ids=None)
     assert work["board"]["repo_url"] == "https://github.com/org/repo.git"
+    assert work["resume"] is None
+
+
+# ---------- claim_next resume ----------
+
+def test_claim_next_builds_resume_context_from_the_answered_question():
+    conn = FakeConnWithBoardRow([
+        (5, 9, True),                                          # claim: item_id, ticket_id, resume=True
+        (2, "Fix the thing", "Details.", 1, "prior-sid"),      # ticket flip, carries a prior session_id
+        ("What now?", "do it", "please"),                      # answered question row
+        ("site-page", "Desc", None, None, False, None),        # board row
+    ])
+    work = worker.claim_next(conn, worker_id=1, cluster_id=1, board_ids=None)
+    assert work["resume"] == {
+        "question": "What now?", "answer_value": "do it", "answer_notes": "please",
+    }
+    assert work["session_id"] == "prior-sid"  # kept, not re-minted
+
+
+def test_claim_next_ignores_resume_flag_without_a_prior_session():
+    """resume=True with no prior session_id (e.g. a very old ticket) falls
+    back to an ordinary fresh run rather than passing --resume with nothing
+    to resume."""
+    conn = FakeConnWithBoardRow([
+        (5, 9, True),
+        (2, "Fix the thing", "Details.", 1, None),             # no prior session_id
+        ("site-page", "Desc", None, None, False, None),        # board row (no question fetch)
+    ])
+    work = worker.claim_next(conn, worker_id=1, cluster_id=1, board_ids=None)
+    assert work["resume"] is None
+    assert work["session_id"] is not None  # a fresh one was minted

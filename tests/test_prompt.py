@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from app.prompt import build_agent_prompt, slugify  # noqa: E402
+from app.prompt import build_agent_prompt, build_resume_prompt, slugify  # noqa: E402
 
 TICKET = {"id": 12, "title": "Fix the footer", "body": "It overlaps on mobile."}
 BOARD = {"name": "site-page", "description": "The portfolio site.",
@@ -79,6 +79,35 @@ def test_slugify():
 def test_slugify_caps_length():
     assert slugify("one two three four five six seven eight") == \
         "one-two-three-four-five-six"
+
+
+# ---------- resume prompt ----------
+
+def test_resume_prompt_carries_question_and_answer():
+    p = build_resume_prompt({"question": "Which branch?", "answer_value": "main",
+                             "answer_notes": None})
+    assert "Which branch?" in p
+    assert "main" in p
+
+
+def test_resume_prompt_includes_notes_when_present():
+    p = build_resume_prompt({"question": "Delete the old table?",
+                             "answer_value": "yes", "answer_notes": "It's unused."})
+    assert "It's unused." in p
+
+
+def test_resume_prompt_omits_notes_section_when_blank():
+    p = build_resume_prompt({"question": "Q", "answer_value": "A", "answer_notes": ""})
+    assert "Notes:" not in p
+
+
+def test_resume_prompt_is_much_shorter_than_a_fresh_prompt():
+    """The whole point: the resumed session already has the ticket and repo
+    context loaded, so this should not re-send build_agent_prompt's bulk."""
+    fresh = build_agent_prompt(TICKET, BOARD, "/repo")
+    resumed = build_resume_prompt({"question": "Q", "answer_value": "A",
+                                   "answer_notes": None})
+    assert len(resumed) < len(fresh)
 
 
 def test_module_is_stdlib_only():

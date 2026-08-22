@@ -2,6 +2,43 @@
 
 Last updated: 2026-08-22
 
+## Session resume: an unblocked ticket continues its own agent session (ticket #16, 2026-08-22)
+
+Gap analysis §8 phase 7, item 19 (`docs/2026-08-22-local-vs-cloud-gap-analysis.md`)
+— one item picked out of that phase's long tail of candidates because it was
+the most concretely specified and builds directly on infrastructure Phase 1
+and ticket #11 already shipped: every claim already mints a `tickets.session_id`
+(for `claude --resume <id>` by a human), and answering a blocked ticket's
+question already auto-requeues it — but the requeued run restarted from
+`build_agent_prompt` under a brand-new session id, discarding the agent's own
+prior conversation and re-sending the whole ticket from scratch. The rest of
+phase 7 (history/audit table, unread tracking, clear-done, `__all__` view,
+model discovery, spec attachment, usage-limit pause, activity feed) is left
+for its own ticket if and when one of them is actually wanted, per this
+ticket's own framing.
+
+`work_queue` gained a `resume` boolean (`app/db.py`'s `_PHASE5_COLUMNS`,
+migrated the same way as every prior phase's columns). `app/main.py`'s
+`answer_question` now calls `delegation.enqueue_ticket(db, ticket,
+resume=True)` instead of the bare call, flagging the fresh work item.
+`worker.py`'s `CLAIM_SQL` returns that flag; `claim_next`, on a resume claim
+with a prior `session_id` still on the ticket, fetches the most recently
+answered `ticket_questions` row and hands it back as `resume` on the work
+payload instead of minting a new session id. `ClaudeExecutor.run` then
+invokes `claude --resume <session_id>` with a short prompt built by the new
+`app/prompt.build_resume_prompt` (just the question and answer) rather than
+`--session-id` plus the full `build_agent_prompt`. A resume claim with no
+prior session (e.g. a pre-existing ticket from before this shipped) falls
+back to an ordinary fresh run rather than passing `--resume` with nothing to
+resume against.
+
+Tests: 322 → 334 (5 prompt, 4 claim_next resume-context, 3 executor
+`--resume` vs `--session-id`, 2 migration/model, 2 blocked-endpoint
+`resume` flag on the queue row; 8 pre-existing worker-slot fake executors
+across `test_blocked.py`/`test_concurrency.py`/`test_reaper.py`/
+`test_worker_push.py` picked up the new `resume=None` kwarg run_slot now
+passes to every executor call).
+
 ## Website-side worker control: rename a PC, cap its concurrency (ticket #18, 2026-08-22)
 
 Concurrency used to be worker-local only ("Agents do real repo work, and PCs

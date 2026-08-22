@@ -139,7 +139,7 @@ def test_slots_run_concurrently_and_never_exceed_the_limit(monkeypatch, tmp_path
 
         def run(self, ticket, board=None, directory=None, session_id=None,
                 progress_cb=None, should_kill=None,
-                chat_source=None, chat_delivered=None):
+                chat_source=None, chat_delivered=None, resume=None):
             with lock:
                 live.append(ticket["id"])
                 peak["n"] = max(peak["n"], len(live))
@@ -282,7 +282,7 @@ def test_real_slots_auto_clone_when_no_set_path_is_configured(monkeypatch, tmp_p
 
         def run(self, ticket, board=None, directory=None, session_id=None,
                 progress_cb=None, should_kill=None,
-                chat_source=None, chat_delivered=None):
+                chat_source=None, chat_delivered=None, resume=None):
             seen["directory"] = directory
             return True, "ok"
 
@@ -386,7 +386,7 @@ def test_run_slot_passes_a_live_kill_check_into_the_executor(monkeypatch, tmp_pa
 
         def run(self, ticket, board=None, directory=None, session_id=None,
                 progress_cb=None, should_kill=None,
-                chat_source=None, chat_delivered=None):
+                chat_source=None, chat_delivered=None, resume=None):
             flag["kill"] = True  # flips only after the executor started
             seen["should_kill"] = should_kill()
             return True, "ok"

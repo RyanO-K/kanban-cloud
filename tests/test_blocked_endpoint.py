@@ -79,6 +79,10 @@ def test_answering_requeues_the_ticket_exactly_once(client, user, cluster):
     queued = [row for row in rows if row["status"] == "queued"]
     assert len(queued) == 1
     assert queued[0]["ticket_id"] == t["id"]
+    # Flagged so worker.py's claim_next continues the agent's prior session
+    # instead of restarting the ticket from scratch — see gap analysis phase
+    # 7 item 19 / ticket #16.
+    assert queued[0]["resume"] is True
 
     # answering a second time must not enqueue a second work item
     r2 = client.post(f"/api/tickets/{t['id']}/questions/{qid}/answer",
@@ -138,6 +142,15 @@ def test_blocked_endpoint_omits_resolved_tickets(client, user, cluster):
                json={"value": "x"}, headers=user["headers"])
     r = client.get(f"/api/clusters/{cluster['id']}/blocked", headers=user["headers"])
     assert r.json() == []
+
+
+def test_an_ordinary_ready_delegation_is_not_flagged_resume(client, user, cluster):
+    """Only an unblock-requeue sets resume=True; a plain move-to-ready must
+    start the agent fresh, same as before this feature existed."""
+    make_ticket(client, user, cluster["board_id"], status="ready")
+    rows = queue_rows(client, user, cluster["id"])
+    assert len(rows) == 1
+    assert rows[0]["resume"] is False
 
 
 def test_blocked_status_is_a_valid_manual_status(client, user, cluster):

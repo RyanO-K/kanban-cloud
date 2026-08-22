@@ -226,6 +226,12 @@ class WorkItem(Base):
     kill_requested: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False, server_default="0"
     )
+    # Set when this row exists because a blocked ticket's question was just
+    # answered. worker.py's claim_next reads it to continue the ticket's
+    # prior Claude CLI session instead of restarting from scratch.
+    resume: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False, server_default="0"
+    )
     queued_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow)
     claimed_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
     # Set at claim time and refreshed periodically by the running slot while
