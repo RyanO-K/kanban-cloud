@@ -90,6 +90,8 @@
     <h1>kanban-cloud</h1>
     <select id="clusterSel" onchange="switchCluster()"></select>
     <select id="boardSel" onchange="loadBoard()"></select>
+    <button class="small ghost owner-only" id="boardSettingsBtn" onclick="openBoardSettings()"
+            title="Project settings — the context agents working this board are given">&#9881;</button>
     <button class="small ghost owner-only" onclick="openClusterModal()">+ cluster</button>
     <button class="small ghost owner-only" onclick="newBoard()">+ board</button>
     <button class="small owner-only" onclick="openTicketModal(null)">+ ticket</button>
@@ -183,6 +185,30 @@
     <div class="row" style="margin-top:0"><input id="newClusterName" placeholder="Team name" style="flex:1"><button class="small" onclick="createCluster()">Create</button></div>
     <label>Or join with a code</label>
     <div class="row" style="margin-top:0"><input id="joinCodeInput" placeholder="ABC12345" style="flex:1"><button class="small" onclick="joinCluster()">Join</button></div>
+  </div>
+</div>
+
+<!-- board project settings modal -->
+<div class="overlay" id="boardOverlay" onclick="if(event.target===this) this.classList.remove('show')">
+  <div class="modal">
+    <h2>Project settings</h2>
+    <p class="muted" style="margin-top:0">Context every agent working this board is given.</p>
+    <label>Description</label>
+    <textarea id="bDescription" placeholder="One paragraph of background an agent needs before touching a ticket."></textarea>
+    <label>Out of scope</label>
+    <textarea id="bOutOfScope" placeholder="What agents must not touch."></textarea>
+    <label>Commit requirements</label>
+    <textarea id="bCommitReq" placeholder="e.g. All tests must pass before committing."></textarea>
+    <label style="display:flex; align-items:center; gap:6px; margin-top:8px">
+      <input type="checkbox" id="bUseWorktrees"> Use git worktrees for this project
+    </label>
+    <p class="muted" style="font-size:12px">Each worker PC sets its own folder for this board with
+      <code>kanban-worker --set-path</code>. Folders are never stored here — the same board is
+      worked by machines with different layouts.</p>
+    <div class="row">
+      <button onclick="saveBoardSettings()">Save</button>
+      <button class="ghost" onclick="document.getElementById('boardOverlay').classList.remove('show')">Cancel</button>
+    </div>
   </div>
 </div>
 
@@ -332,6 +358,34 @@ async function newBoard() {
   if (!name) return;
   await api("POST", `./api/clusters/${currentCluster.id}/boards`, {name});
   refreshClusterBits();
+}
+
+// ---------- board project settings ----------
+// The metadata edited here is what app/prompt.py turns into the agent's
+// prompt. The board's folder on disk is deliberately absent: each worker PC
+// sets its own with `kanban-worker --set-path`.
+function openBoardSettings() {
+  const b = boards.find(x => x.id === Number(document.getElementById("boardSel").value));
+  if (!b) return;
+  document.getElementById("bDescription").value = b.description || "";
+  document.getElementById("bOutOfScope").value = b.out_of_scope || "";
+  document.getElementById("bCommitReq").value = b.commit_requirements || "";
+  document.getElementById("bUseWorktrees").checked = !!b.use_worktrees;
+  document.getElementById("boardOverlay").classList.add("show");
+}
+
+async function saveBoardSettings() {
+  const id = Number(document.getElementById("boardSel").value);
+  if (!id) return;
+  await api("PATCH", `./api/boards/${id}`, {
+    description: document.getElementById("bDescription").value,
+    out_of_scope: document.getElementById("bOutOfScope").value,
+    commit_requirements: document.getElementById("bCommitReq").value,
+    use_worktrees: document.getElementById("bUseWorktrees").checked,
+  });
+  document.getElementById("boardOverlay").classList.remove("show");
+  await refreshClusterBits();
+  toast("Project settings saved");
 }
 
 // ---------- import a local .kanban board ----------
@@ -589,7 +643,8 @@ async function loadWorkers() {
     ? workers.map(w => `<div class="worker-row"><span class="dot ${w.online && !w.revoked ? "on" : ""}"></span>
         <b>${esc(w.name)}</b>
         ${w.revoked ? '<span class="muted">(revoked)</span>'
-          : `<span class="muted">${w.online ? w.status : "offline"}</span>
+          : `<span class="muted">${w.online
+                ? `${w.running || 0}/${w.concurrency || 1} running` : "offline"}</span>
              <button class="ghost small owner-only" onclick="revokeWorker(${w.id})">Revoke</button>`}</div>`).join("")
     : `<span class="muted">No PCs enrolled yet. On the PC:<br>
        <code>py worker.py --enroll --server ${esc(enrollServer())} --join-code &lt;code&gt;</code></span>`;

@@ -69,3 +69,19 @@ def test_create_board_returns_the_metadata_shape(client, user, cluster):
     assert r.status_code == 200, r.text
     assert r.json()["use_worktrees"] is False
     assert r.json()["description"] is None
+
+
+def test_workers_api_reports_slot_counts(client, user, cluster):
+    from sqlalchemy import text
+
+    engine = client.app.state.engine
+    with engine.begin() as conn:
+        conn.execute(text(
+            "INSERT INTO workers (cluster_id, name, revoked, status, concurrency,"
+            " running, last_seen, created_at) VALUES"
+            " (:c,'pc',0,'working',3,2,'2030-01-01','2030-01-01')"
+        ), {"c": cluster["id"]})
+    w = client.get(f"/api/clusters/{cluster['id']}/workers",
+                   headers=user["headers"]).json()[0]
+    assert w["concurrency"] == 3
+    assert w["running"] == 2

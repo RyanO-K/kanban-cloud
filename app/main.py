@@ -493,6 +493,10 @@ def create_app(
                 "id": w.id,
                 "name": w.name,
                 "status": w.status,
+                # The PC's own limit and current load. Advisory: the server
+                # displays these, it does not schedule on them.
+                "concurrency": w.concurrency,
+                "running": w.running,
                 "online": w.is_online(now),
                 "last_seen": w.last_seen.isoformat(),
                 "revoked": w.revoked,

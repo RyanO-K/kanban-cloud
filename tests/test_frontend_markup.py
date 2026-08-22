@@ -67,3 +67,21 @@ def test_ticket_drag_and_folder_drop_do_not_collide(markup):
     assert 'includes("Files")' in markup
     body = markup[markup.index("async function dropTicket"):]
     assert "isFileDrag(ev)" in body[:body.index("}")]
+
+
+def test_board_settings_modal_markup_present(markup):
+    for token in ("boardSettingsBtn", "boardOverlay", "bDescription",
+                  "bOutOfScope", "bCommitReq", "bUseWorktrees",
+                  "openBoardSettings", "saveBoardSettings"):
+        assert token in markup, token
+
+
+def test_board_settings_button_is_owner_only(markup):
+    """The gear opens a mutating panel, so spectators must not see it."""
+    assert 'owner-only" id="boardSettingsBtn"' in markup
+
+
+def test_workers_panel_renders_slot_counts(markup):
+    """A PC's own concurrency limit and current load are shown next to it."""
+    assert "w.running" in markup
+    assert "w.concurrency" in markup
