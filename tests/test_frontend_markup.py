@@ -155,3 +155,31 @@ def test_kill_button_only_shown_for_in_progress_tickets(markup):
 def test_killed_is_a_board_column_and_ticket_status_option(markup):
     assert '"killed"' in markup
     assert '<option value="killed">killed</option>' in markup
+
+
+# ---------- live agent output + chat ----------
+
+def test_live_log_and_chat_panels_present(markup):
+    for token in ("logWrap", "chatWrap", 'id="agentLog"', 'id="agentChat"',
+                  'id="newChat"', "startLivePoll", "stopLivePoll", "sendChat"):
+        assert token in markup, token
+
+
+def test_chat_send_is_owner_only(markup):
+    """Spectators must not see it: the endpoint would 403 anyway."""
+    assert '<div class="row owner-only">\n        <input id="newChat"' in markup
+
+
+def test_send_chat_hits_the_chat_endpoint(markup):
+    body = markup[markup.index("async function sendChat"):]
+    body = body[:body.index("\n}\n")]
+    assert "/api/tickets/${editingTicket.id}/chat" in body
+
+
+def test_live_poll_starts_and_stops_with_the_modal(markup):
+    open_fn = markup[markup.index("function openTicketModal"):]
+    open_fn = open_fn[:open_fn.index("\n}\n")]
+    assert "startLivePoll()" in open_fn and "stopLivePoll()" in open_fn
+    close_fn = markup[markup.index("function closeTicketModal"):]
+    close_fn = close_fn[:close_fn.index("\n}")]
+    assert "stopLivePoll()" in close_fn

@@ -210,6 +210,30 @@ class TicketChat(Base):
     delivered_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
 
 
+class TicketLog(Base):
+    """Fine-grained live transcript of one agent run, one row per parsed
+    stream-json turn as the worker reads it — the cloud analogue of the local
+    `.kanban` tool's per-run log file. Kept in Postgres rather than a local
+    file because worker PCs have no durable/shared disk and no inbound
+    reachability from a browser: the DB is what makes a run's transcript
+    visible from any browser live, and what survives a worker PC's disk being
+    wiped (the worker also writes the raw stream to a local file per run, but
+    that copy is best-effort/debugging-only). `work_queue_id` scopes rows to
+    one attempt, since a retried ticket's earlier attempt has its own
+    transcript; `seq` is assigned by the worker (the only writer for a given
+    run) and is what a live viewer's `since_seq` polling tails.
+    """
+    __tablename__ = "ticket_log"
+    __table_args__ = (Index("idx_ticket_log_ticket_seq", "ticket_id", "seq"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ticket_id: Mapped[int] = mapped_column(ForeignKey("tickets.id"), nullable=False)
+    work_queue_id: Mapped[int | None] = mapped_column(ForeignKey("work_queue.id"), nullable=True)
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    role: Mapped[str] = mapped_column(String(16), default="assistant", nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class WorkItem(Base):
     """Work queue + assignment log. One row per delegation attempt."""
     __tablename__ = "work_queue"

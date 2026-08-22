@@ -33,7 +33,9 @@ from .models import (
     ClusterMember,
     Comment,
     Ticket,
+    TicketChat,
     TicketDep,
+    TicketLog,
     TicketQuestion,
     User,
     WorkItem,
@@ -60,6 +62,7 @@ SPECTATOR_ALLOWED_RE = re.compile(
     r"|/api/session"
     r"|/api/clusters/\d+/(?:boards|workers|queue|blocked)"
     r"|/api/boards/\d+/tickets"
+    r"|/api/tickets/\d+/log"
     r")$"
 )
 
@@ -136,6 +139,14 @@ class ReorderBody(BaseModel):
 
 
 class CommentBody(BaseModel):
+    message: str
+
+
+class ChatBody(BaseModel):
+    """A human's mid-run message for the agent's live stdin (see
+    worker.py's chat pump). Queuing one on a ticket that isn't currently
+    running just sits undelivered until the next run picks it up, same as
+    the local `.kanban` tool's pendingChat."""
     message: str
 
 
@@ -924,6 +935,85 @@ def create_app(
         db.add(Comment(ticket_id=ticket.id, writer=user.email, message=body.message))
         db.commit()
         return ticket_json(db, ticket)
+
+    @app.get("/api/tickets/{ticket_id}/log")
+    def get_ticket_log(
+        ticket_id: int,
+        since_seq: int = 0,
+        user: User = Depends(current_user),
+        db: Session = Depends(get_db),
+    ):
+        """The live transcript of a ticket's most recent run, for a browser
+        polling with an ever-increasing `since_seq` (start at 0). Always the
+        latest work_queue attempt — an earlier attempt's transcript is not
+        reachable here, matching the local `.kanban` tool's log viewer, which
+        also only ever shows the current run."""
+        ticket = ticket_for_user(db, user, ticket_id)
+        latest_wq_id = db.scalar(
+            select(WorkItem.id)
+            .where(WorkItem.ticket_id == ticket.id)
+            .order_by(WorkItem.id.desc())
+        )
+        lines = []
+        if latest_wq_id is not None:
+            rows = db.scalars(
+                select(TicketLog)
+                .where(
+                    TicketLog.ticket_id == ticket.id,
+                    TicketLog.work_queue_id == latest_wq_id,
+                    TicketLog.seq > since_seq,
+                )
+                .order_by(TicketLog.seq)
+            ).all()
+            lines = [
+                {"seq": r.seq, "role": r.role, "text": r.text,
+                 "created_at": r.created_at.isoformat()}
+                for r in rows
+            ]
+        return {"lines": lines, "status": ticket.status, "running": ticket.status == "doing"}
+
+    @app.get("/api/tickets/{ticket_id}/chat")
+    def get_ticket_chat(
+        ticket_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)
+    ):
+        ticket = ticket_for_user(db, user, ticket_id)
+        rows = db.scalars(
+            select(TicketChat).where(TicketChat.ticket_id == ticket.id).order_by(TicketChat.id)
+        ).all()
+        return [
+            {
+                "id": c.id, "sender": c.sender, "message": c.message,
+                "created_at": c.created_at.isoformat(),
+                "delivered": c.delivered_at is not None,
+            }
+            for c in rows
+        ]
+
+    @app.post("/api/tickets/{ticket_id}/chat")
+    def send_ticket_chat(
+        ticket_id: int,
+        body: ChatBody,
+        user: User = Depends(current_user),
+        db: Session = Depends(get_db),
+    ):
+        """Queue a message for the agent's live stdin (worker.py's chat pump
+        delivers it, whether the agent is running right now or picks it up on
+        its next dispatch). Rejected only for tickets with no plausible future
+        run — a fresh message on one of those would just sit undelivered
+        forever."""
+        ticket = ticket_for_user(db, user, ticket_id)
+        if ticket.status in ("done", "failed", "killed"):
+            raise HTTPException(409, f"Ticket is {ticket.status}; nothing will ever read this")
+        message = body.message.strip()
+        if not message:
+            raise HTTPException(400, "message must not be empty")
+        chat = TicketChat(ticket_id=ticket.id, sender=user.email, message=message)
+        db.add(chat)
+        db.commit()
+        return {
+            "id": chat.id, "sender": chat.sender, "message": chat.message,
+            "created_at": chat.created_at.isoformat(), "delivered": False,
+        }
 
     @app.post("/api/tickets/{ticket_id}/questions/{question_id}/answer")
     def answer_question(

@@ -175,3 +175,24 @@ CREATE TABLE IF NOT EXISTS ticket_chat (
     created_at   TIMESTAMP NOT NULL DEFAULT now(),
     delivered_at TIMESTAMP
 );
+
+-- Fine-grained live transcript of one agent run (one row per parsed
+-- stream-json turn), replacing the batched-every-4-turns `comments` rows
+-- ticket #9 used for anything the UI needs to tail live. work_queue_id scopes
+-- rows to one attempt; seq is assigned by the worker and is what a live
+-- viewer's ?since_seq= polling tails. The worker also writes the raw stream
+-- to a local file per run, but that copy is best-effort/debugging-only — this
+-- table is the durable, browser-visible copy. Pruned for long-finished
+-- tickets by worker.prune_ticket_log (see worker.py).
+CREATE TABLE IF NOT EXISTS ticket_log (
+    id            BIGSERIAL PRIMARY KEY,
+    ticket_id     INTEGER NOT NULL REFERENCES tickets(id),
+    work_queue_id INTEGER REFERENCES work_queue(id),
+    seq           INTEGER NOT NULL,
+    role          VARCHAR(16) NOT NULL DEFAULT 'assistant',
+    text          TEXT NOT NULL,
+    created_at    TIMESTAMP NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_ticket_log_ticket_seq
+    ON ticket_log (ticket_id, seq);

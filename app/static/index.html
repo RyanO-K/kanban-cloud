@@ -175,6 +175,18 @@
         <button class="small" onclick="addComment()">Post</button>
       </div>
     </div>
+    <div id="logWrap" style="margin-top:14px; display:none">
+      <h3 style="font-size:13px; margin:0 0 4px">Live agent output</h3>
+      <div id="agentLog" style="max-height:260px; overflow-y:auto; font-family:ui-monospace,Consolas,monospace; font-size:12px; white-space:pre-wrap; border:1px solid var(--border); border-radius:6px; padding:8px; background:var(--bg)"></div>
+    </div>
+    <div id="chatWrap" style="margin-top:14px; display:none">
+      <h3 style="font-size:13px; margin:0 0 4px">Chat with the agent</h3>
+      <div id="agentChat" style="max-height:180px; overflow-y:auto"></div>
+      <div class="row owner-only">
+        <input id="newChat" placeholder="Message the running agent..." style="flex:1" onkeydown="if(event.key==='Enter') sendChat()">
+        <button class="small" onclick="sendChat()">Send</button>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -658,9 +670,66 @@ function openTicketModal(id) {
   document.getElementById("killBtn").style.display = editingTicket && editingTicket.status === "doing" ? "" : "none";
   document.getElementById("commentsWrap").style.display = editingTicket ? "" : "none";
   if (editingTicket) renderComments(editingTicket);
+  document.getElementById("logWrap").style.display = editingTicket ? "" : "none";
+  document.getElementById("chatWrap").style.display = editingTicket ? "" : "none";
   document.getElementById("ticketOverlay").classList.add("show");
+  if (editingTicket) startLivePoll(); else stopLivePoll();
 }
-function closeTicketModal() { document.getElementById("ticketOverlay").classList.remove("show"); }
+function closeTicketModal() {
+  document.getElementById("ticketOverlay").classList.remove("show");
+  stopLivePoll();
+}
+
+// ---------- live agent output + chat (polls independently of the board's
+// outer refresh, which is what makes this "live" while the modal is open) ----------
+let liveInterval = null;
+let liveSeq = 0;
+
+function startLivePoll() {
+  stopLivePoll();
+  liveSeq = 0;
+  document.getElementById("agentLog").innerHTML = "";
+  pollLive();
+  liveInterval = setInterval(pollLive, 2000);
+}
+function stopLivePoll() {
+  if (liveInterval) { clearInterval(liveInterval); liveInterval = null; }
+}
+async function pollLive() {
+  if (!editingTicket) return;
+  const id = editingTicket.id;
+  try {
+    const log = await api("GET", `./api/tickets/${id}/log?since_seq=${liveSeq}`);
+    if (log.lines.length) {
+      const box = document.getElementById("agentLog");
+      const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+      log.lines.forEach(l => {
+        liveSeq = Math.max(liveSeq, l.seq);
+        const row = document.createElement("div");
+        row.textContent = l.text;
+        box.appendChild(row);
+      });
+      if (nearBottom) box.scrollTop = box.scrollHeight;
+    }
+  } catch {}
+  try {
+    renderAgentChat(await api("GET", `./api/tickets/${id}/chat`));
+  } catch {}
+}
+function renderAgentChat(rows) {
+  document.getElementById("agentChat").innerHTML = rows.map(c => `
+    <div class="comment"><span class="who">${esc(c.sender)}</span>
+    <span class="muted">${c.created_at.slice(0, 16).replace("T", " ")}</span>
+    ${c.delivered ? "" : `<span class="badge">queued</span>`}<br>${esc(c.message)}</div>`).join("")
+    || `<p class="muted">No messages yet.</p>`;
+}
+async function sendChat() {
+  const msg = document.getElementById("newChat").value.trim();
+  if (!msg || !editingTicket) return;
+  await api("POST", `./api/tickets/${editingTicket.id}/chat`, {message: msg});
+  document.getElementById("newChat").value = "";
+  pollLive();
+}
 
 function renderComments(t) {
   document.getElementById("comments").innerHTML = t.comments.map(c => `

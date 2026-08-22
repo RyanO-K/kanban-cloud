@@ -176,7 +176,7 @@ class StubExecutor:
 
     def run(self, ticket, board=None, directory=None, session_id=None,
             progress_cb=None, should_kill=None,
-            chat_source=None, chat_delivered=None):
+            chat_source=None, chat_delivered=None, log_cb=None):
         print(f"  [stub] pretending to work on ticket #{ticket['id']}: {ticket['title']}")
         time.sleep(2)
         return True, (
@@ -223,6 +223,31 @@ def _stream_json_text(raw_line: str):
 def _render_stream_lines(raw_lines) -> str:
     rendered = [t for t in (_stream_json_text(l) for l in raw_lines) if t]
     return "\n".join(rendered).strip()
+
+
+# How much of one rendered turn's text is kept in a `ticket_log` row. A tool
+# result can be arbitrarily large (a big file read/grep dump); this bounds it
+# the same way the local `.kanban` tool bounds a tool-result preview, so one
+# chatty turn cannot blow up the live-log table.
+_LOG_LINE_MAX_CHARS = 20000
+
+
+def _stream_json_turn(raw_line: str):
+    """(role, text) for one raw stream-json line, for the live `ticket_log`
+    stream — role is the CLI's own event `type` (assistant/result), or "raw"
+    for a line that didn't parse as JSON at all. Returns (None, None) for a
+    line with nothing worth logging (same lines `_stream_json_text` drops)."""
+    text = _stream_json_text(raw_line)
+    if text is None:
+        return None, None
+    raw_line = raw_line.strip()
+    try:
+        role = json.loads(raw_line).get("type") or "raw"
+    except (json.JSONDecodeError, TypeError):
+        role = "raw"
+    if len(text) > _LOG_LINE_MAX_CHARS:
+        text = text[:_LOG_LINE_MAX_CHARS] + "\n…(truncated)"
+    return role, text
 
 
 # ---------- agent chat: pump queued messages onto the CLI's live stdin ----------
@@ -325,7 +350,7 @@ class ClaudeExecutor:
 
     def run(self, ticket, board=None, directory=None, session_id=None,
             progress_cb=None, should_kill=None,
-            chat_source=None, chat_delivered=None):
+            chat_source=None, chat_delivered=None, log_cb=None):
         board = board or {}
         name = board.get("name", "?")
         should_kill = should_kill or (lambda: False)
@@ -379,6 +404,28 @@ class ClaudeExecutor:
         except FileNotFoundError:
             return False, "`claude` CLI not found on this PC's PATH."
 
+        # Best-effort local copy of the raw stream, mirroring the local
+        # `.kanban` tool's per-run log file. Never fatal to the run: a full
+        # disk or unwritable folder just means this PC has no local copy —
+        # the durable, browser-visible transcript is `ticket_log` (log_cb
+        # below), not this file.
+        log_file = None
+        try:
+            logs_dir = app_data_logs_dir()
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            log_file = open(logs_dir / f"{ticket['id']}-{ts}.log", "w", encoding="utf-8")
+        except OSError as exc:
+            print(f"  [claude] could not open local run log: {exc!r}")
+
+        def write_log(raw_line):
+            if log_file is not None:
+                try:
+                    log_file.write(raw_line)
+                    log_file.flush()
+                except OSError:
+                    pass
+
         stop_pump = threading.Event()
         pump_thread = None
         if chat_source is not None:
@@ -402,9 +449,15 @@ class ClaudeExecutor:
             try:
                 for raw_line in proc.stdout:
                     seen_lines.append(raw_line)
-                    text = _stream_json_text(raw_line)
+                    write_log(raw_line)
+                    role, text = _stream_json_turn(raw_line)
                     if text:
                         pending.append(text)
+                        if log_cb:
+                            try:
+                                log_cb(role, text)
+                            except Exception as exc:
+                                print(f"  [claude] log callback failed: {exc!r}")
                         if len(pending) >= self.progress_batch:
                             emit("\n".join(pending))
                             pending.clear()
@@ -426,6 +479,11 @@ class ClaudeExecutor:
                 proc.stdout.close()
             except Exception:
                 pass
+            if log_file is not None:
+                try:
+                    log_file.close()
+                except OSError:
+                    pass
 
         deadline = time.monotonic() + AGENT_TIMEOUT_SECONDS
         while reader.is_alive():
@@ -612,6 +670,18 @@ def app_data_boards_dir() -> Path:
     base = os.environ.get("LOCALAPPDATA")
     root = Path(base) if base else app_dir()
     return root / "kanban-worker" / "boards"
+
+
+def app_data_logs_dir() -> Path:
+    """Where each run's raw stream-json output is written on this PC — the
+    local, best-effort copy of the live transcript (the durable, browser-
+    visible copy lives in the `ticket_log` table; see add_log_line). Same
+    LOCALAPPDATA convention as app_data_boards_dir, and independent of it —
+    a board's checkout may be an operator's own hand-tended folder that
+    should never gain stray log files."""
+    base = os.environ.get("LOCALAPPDATA")
+    root = Path(base) if base else app_dir()
+    return root / "kanban-worker" / "logs"
 
 
 # A repo_url can carry embedded credentials (https://user:token@host/...).
@@ -951,6 +1021,19 @@ def add_progress(conn, worker_id: int, worker_name: str, ticket_id: int, message
         )
 
 
+def add_log_line(conn, ticket_id: int, work_queue_id: int | None, seq: int,
+                 role: str, text: str) -> None:
+    """One row of the live transcript (see models.TicketLog). Called once per
+    parsed stream-json turn, so a browser tailing `?since_seq=` sees output
+    as it is generated rather than in the batches `add_progress` posts."""
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            f"INSERT INTO ticket_log (ticket_id, work_queue_id, seq, role, text, created_at) "
+            f"VALUES (%s, %s, %s, %s, %s, {UTC_NOW})",
+            (ticket_id, work_queue_id, seq, role, text),
+        )
+
+
 def kill_requested(conn, item_id: int) -> bool:
     """Live read of one in-flight claim's kill flag, via the slot's own
     connection (same thread, sequential with everything else the slot does —
@@ -1141,6 +1224,37 @@ def reap_stale_claims(conn, cluster_id: int,
     return reaped
 
 
+# ---------- ticket_log retention ----------
+#
+# Kept in the DB (not a local file) is what makes the live transcript durable
+# and visible from any browser, but that means it can grow indefinitely if
+# nothing ever trims it. Every worker opportunistically prunes its own
+# cluster's finished tickets once per poll cycle, same "no elected leader, no
+# dedicated infrastructure" reasoning as reap_stale_claims above — a redundant
+# DELETE from a second worker in the same tick just matches zero rows.
+
+TICKET_LOG_RETENTION_DAYS = 30
+
+
+def prune_ticket_log(conn, cluster_id: int,
+                     retention_days: float = TICKET_LOG_RETENTION_DAYS,
+                     now: "datetime.datetime | None" = None) -> int:
+    """Delete ticket_log rows for tickets in this cluster that reached a
+    terminal status more than `retention_days` ago. Returns the number of
+    rows deleted."""
+    now = now or datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+    cutoff = now - datetime.timedelta(days=retention_days)
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM ticket_log WHERE ticket_id IN ("
+            "SELECT t.id FROM tickets t JOIN boards b ON b.id = t.board_id "
+            "WHERE b.cluster_id = %s AND t.status IN ('done', 'failed', 'killed') "
+            "AND t.updated_at < %s)",
+            (cluster_id, cutoff),
+        )
+        return cur.rowcount
+
+
 def _reap_one(conn, item_id: int, stale_after_seconds: float):
     """Atomically resolve one stale claim, or no-op if it was already
     resolved (by another reaper, or by the worker's own finish_work landing
@@ -1267,6 +1381,19 @@ def run_slot(cfg, args, executor, stop_event, slot_no: int) -> None:
                     except Exception as exc:
                         print(f"[slot {slot_no}] progress post failed: {exc!r}")
 
+                # Reader-thread-only (see ClaudeExecutor.run), same as
+                # progress_cb above, so sharing `conn` is safe: the main
+                # thread never touches it while executor.run() is in flight.
+                log_seq = {"n": 0}
+
+                def log_cb(role, message, _conn=conn, _ticket_id=ticket["id"],
+                          _wq_id=work["assignment_id"]):
+                    log_seq["n"] += 1
+                    try:
+                        add_log_line(_conn, _ticket_id, _wq_id, log_seq["n"], role, message)
+                    except Exception as exc:
+                        print(f"[slot {slot_no}] log line post failed: {exc!r}")
+
                 hb_stop = threading.Event()
                 hb_thread = threading.Thread(
                     target=_claim_heartbeat_loop,
@@ -1308,7 +1435,8 @@ def run_slot(cfg, args, executor, stop_event, slot_no: int) -> None:
                             directory=paths.get(str(ticket["board_id"])),
                             session_id=work.get("session_id"),
                             progress_cb=progress_cb, should_kill=should_kill,
-                            chat_source=chat_source, chat_delivered=chat_delivered)
+                            chat_source=chat_source, chat_delivered=chat_delivered,
+                            log_cb=log_cb)
                     else:
                         directory, resolve_error = resolve_directory(
                             work.get("board") or {}, cfg)
@@ -1320,7 +1448,8 @@ def run_slot(cfg, args, executor, stop_event, slot_no: int) -> None:
                                 directory=directory,
                                 session_id=work.get("session_id"),
                                 progress_cb=progress_cb, should_kill=should_kill,
-                                chat_source=chat_source, chat_delivered=chat_delivered)
+                                chat_source=chat_source, chat_delivered=chat_delivered,
+                                log_cb=log_cb)
                             # A question isn't a finished attempt — nothing to
                             # push yet, and (in tests especially) `directory`
                             # may not even be a real git checkout.
@@ -1529,6 +1658,7 @@ def main() -> int:
                 set_slot_counts(hb_conn, cfg["worker_id"], concurrency,
                                 running_count())
                 reap_stale_claims(hb_conn, cfg["cluster_id"])
+                prune_ticket_log(hb_conn, cfg["cluster_id"])
             except psycopg.OperationalError:
                 hb_conn = None
             except Exception:
