@@ -24,16 +24,25 @@ Note: while this worker runs, its polling keeps Neon compute awake
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 
 import psycopg
 
+from app.prompt import build_agent_prompt
+
 DEFAULT_SERVER = "https://kanban-cloud.onrender.com"
+
+# The local .kanban tool's `default` profile list. Without an explicit grant a
+# headless `claude -p` cannot get permission to edit a file, so an agent with
+# no tools looks like it ran and silently changed nothing.
+DEFAULT_ALLOWED_TOOLS = "Read,Edit,Write,Bash,Grep,Glob"
 
 
 def app_dir() -> Path:
@@ -72,14 +81,14 @@ RETURNING id, ticket_id
 """
 
 
-# ---------- executors (unchanged from v1) ----------
+# ---------- executors ----------
 
 class StubExecutor:
     """Fake executor: waits a moment and produces a canned result."""
 
     name = "stub"
 
-    def run(self, ticket: dict, api_key: str | None) -> tuple[bool, str]:
+    def run(self, ticket, api_key, board=None, directory=None, session_id=None):
         print(f"  [stub] pretending to work on ticket #{ticket['id']}: {ticket['title']}")
         time.sleep(2)
         return True, (
@@ -90,31 +99,49 @@ class StubExecutor:
 
 
 class ClaudeExecutor:
-    """Real executor: shells out to the Claude CLI with the cluster's API key."""
+    """Real executor: runs the Claude CLI inside the board's checkout."""
 
     name = "claude"
 
-    def run(self, ticket: dict, api_key: str | None) -> tuple[bool, str]:
+    def __init__(self, allowed_tools: str = DEFAULT_ALLOWED_TOOLS):
+        self.allowed_tools = allowed_tools
+
+    def run(self, ticket, api_key, board=None, directory=None, session_id=None):
+        board = board or {}
+        name = board.get("name", "?")
         if not api_key:
-            return False, "No Claude API key configured for this cluster (set it in Settings)."
-        prompt = (
-            f"You are working a kanban ticket.\n"
-            f"Title: {ticket['title']}\n\n"
-            f"Details:\n{ticket.get('body') or '(no details)'}\n\n"
-            f"Do the work described, then reply with a concise summary of what you did."
-        )
+            return False, ("No Claude API key configured for this cluster "
+                           "(set it in Settings).")
+        if not directory:
+            return False, (
+                f"This PC has no folder configured for board '{name}'. Set one "
+                f"with: kanban-worker --set-path \"{name}=<path to the repo>\""
+            )
+        if not Path(directory).is_dir():
+            return False, (
+                f"The configured folder for board '{name}' no longer exists: "
+                f"{directory}. Fix it with --set-path."
+            )
+
+        # Resolve the CLI ourselves rather than passing shell=True. On Windows
+        # shell=True re-parses the argument list through cmd.exe, which cuts the
+        # multi-line prompt off at its first newline — the agent then saw the
+        # title and none of the ticket body. shutil.which finds the .CMD/.EXE
+        # shim that shell=True was there for.
+        exe = shutil.which("claude")
+        if not exe:
+            return False, "`claude` CLI not found on this PC's PATH."
+
+        prompt = build_agent_prompt(ticket, board, directory)
         env = dict(os.environ)
         env["ANTHROPIC_API_KEY"] = api_key
-        print(f"  [claude] running `claude -p ...` for ticket #{ticket['id']}")
+        cmd = [exe, "-p", prompt, "--allowedTools", self.allowed_tools]
+        if session_id:
+            cmd += ["--session-id", session_id]
+        print(f"  [claude] running in {directory} for ticket #{ticket['id']}")
         try:
-            proc = subprocess.run(
-                ["claude", "-p", prompt],
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=1800,
-                shell=(os.name == "nt"),  # find claude.cmd shim on Windows
-            )
+            proc = subprocess.run(cmd, cwd=directory, env=env,
+                                  capture_output=True, text=True, timeout=1800)
         except FileNotFoundError:
             return False, "`claude` CLI not found on this PC's PATH."
         except subprocess.TimeoutExpired:
@@ -347,10 +374,21 @@ def claim_next(conn, worker_id: int, cluster_id: int, board_ids=None) -> dict | 
             (worker_id, ticket_id),
         )
         board_id, title, body, attempts = cur.fetchone()
+        # Minted here so the id is recorded even if the worker dies mid-run:
+        # `claude --resume <id>` in the board folder then replays the session.
+        session_id = str(uuid.uuid4())
+        cur.execute("UPDATE tickets SET session_id=%s WHERE id=%s",
+                    (session_id, ticket_id))
         cur.execute(
             f"UPDATE workers SET status='working', last_seen={UTC_NOW} WHERE id=%s",
             (worker_id,),
         )
+        cur.execute(
+            "SELECT name, description, out_of_scope, commit_requirements, "
+            "use_worktrees FROM boards WHERE id=%s",
+            (board_id,),
+        )
+        b = cur.fetchone()
         cur.execute(
             "SELECT claude_api_key FROM cluster_settings WHERE cluster_id=%s",
             (cluster_id,),
@@ -359,6 +397,12 @@ def claim_next(conn, worker_id: int, cluster_id: int, board_ids=None) -> dict | 
         return {
             "assignment_id": item_id,
             "claude_api_key": key_row[0] if key_row else None,
+            "session_id": session_id,
+            "board": {
+                "id": board_id, "name": b[0], "description": b[1],
+                "out_of_scope": b[2], "commit_requirements": b[3],
+                "use_worktrees": bool(b[4]),
+            } if b else None,
             "ticket": {
                 "id": ticket_id, "board_id": board_id, "title": title,
                 "body": body, "status": "doing", "attempts": attempts,
@@ -461,11 +505,16 @@ def build_parser() -> argparse.ArgumentParser:
                              "repeatable")
     parser.add_argument("--list-boards", action="store_true",
                         help="list this cluster's boards and their configured paths")
+    parser.add_argument("--allowed-tools", default=DEFAULT_ALLOWED_TOOLS,
+                        help=f"comma-separated tools the agent may use "
+                             f"(default: {DEFAULT_ALLOWED_TOOLS})")
     return parser
 
 
 def pick_executor(args):
-    return StubExecutor() if args.stub else ClaudeExecutor()
+    if args.stub:
+        return StubExecutor()
+    return ClaudeExecutor(allowed_tools=args.allowed_tools)
 
 
 # ---------- main loop ----------
@@ -544,7 +593,11 @@ def main() -> int:
                 print(f"Claimed ticket #{ticket['id']} '{ticket['title']}' "
                       f"(assignment {item_id})")
                 try:
-                    ok, comment = executor.run(ticket, work.get("claude_api_key"))
+                    ok, comment = executor.run(
+                        ticket, work.get("claude_api_key"),
+                        board=work.get("board"),
+                        directory=board_paths(cfg).get(str(ticket["board_id"])),
+                        session_id=work.get("session_id"))
                 except Exception as exc:
                     ok, comment = False, f"Executor error: {exc!r}"
                 status = finish_work(conn, cfg["worker_id"], cfg["name"],
