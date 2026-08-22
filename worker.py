@@ -645,11 +645,21 @@ def run_slot(cfg, args, executor, stop_event, slot_no: int) -> None:
                     _RUNNING["n"] += 1
                 print(f"[slot {slot_no}] claimed #{ticket['id']} '{ticket['title']}'")
                 try:
-                    ok, comment = executor.run(
-                        ticket,
-                        board=work.get("board"),
-                        directory=paths.get(str(ticket["board_id"])),
-                        session_id=work.get("session_id"))
+                    if isinstance(executor, StubExecutor):
+                        ok, comment = executor.run(
+                            ticket, board=work.get("board"),
+                            directory=paths.get(str(ticket["board_id"])),
+                            session_id=work.get("session_id"))
+                    else:
+                        directory, resolve_error = resolve_directory(
+                            work.get("board") or {}, cfg)
+                        if resolve_error:
+                            ok, comment = False, resolve_error
+                        else:
+                            ok, comment = executor.run(
+                                ticket, board=work.get("board"),
+                                directory=directory,
+                                session_id=work.get("session_id"))
                 except Exception as exc:
                     ok, comment = False, f"Executor error: {exc!r}"
                 finally:
