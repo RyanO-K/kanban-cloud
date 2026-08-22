@@ -150,6 +150,15 @@ def test_spectator_can_read_board_live(pclient):
     assert pclient.get(f"/api/clusters/{cid}/queue", headers=SPECTATOR).status_code == 200
 
 
+def test_spectator_can_open_a_direct_board_link(pclient):
+    """A shared /b/{id} link must clear the spectator gate like '/' does."""
+    seed = owner_seed(pclient)
+    bid = seed["board"]["id"]
+    r = pclient.get(f"/b/{bid}", headers=SPECTATOR)
+    assert r.status_code == 200
+    assert r.text == pclient.get("/", headers=SPECTATOR).text
+
+
 def test_spectator_sensitive_gets_403(pclient):
     owner_seed(pclient)
     # Cluster list leaks join codes; /api/me is not needed.
