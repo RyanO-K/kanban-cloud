@@ -278,6 +278,87 @@ def test_stub_executor_still_takes_the_new_kwargs():
     assert ok and "StubExecutor" in out
 
 
+def test_stub_executor_accepts_a_profile_kwarg():
+    ok, out = worker.StubExecutor().run(TICKET, board=None,
+                                        directory=None, session_id=None,
+                                        profile={"allowed_tools": "Read"})
+    assert ok and "StubExecutor" in out
+
+
+# ---------- agent profiles: the resolved profile drives the CLI invocation ----------
+
+def test_profile_overrides_the_default_allowed_tools(monkeypatch, tmp_path):
+    captured = {}
+    proc = FakeProc([result_line("done")])
+    monkeypatch.setattr(subprocess, "Popen", fake_popen(proc, captured))
+    worker.ClaudeExecutor().run(
+        TICKET, board=BOARD, directory=str(tmp_path), session_id="s",
+        profile={"allowed_tools": "Read,Grep", "model": None, "system_prompt": None})
+    cmd = captured["cmd"]
+    assert cmd[cmd.index("--allowedTools") + 1] == "Read,Grep"
+
+
+def test_profile_adds_the_model_flag(monkeypatch, tmp_path):
+    captured = {}
+    proc = FakeProc([result_line("done")])
+    monkeypatch.setattr(subprocess, "Popen", fake_popen(proc, captured))
+    worker.ClaudeExecutor().run(
+        TICKET, board=BOARD, directory=str(tmp_path), session_id="s",
+        profile={"allowed_tools": "Read", "model": "claude-opus-5", "system_prompt": None})
+    cmd = captured["cmd"]
+    assert "--model" in cmd
+    assert cmd[cmd.index("--model") + 1] == "claude-opus-5"
+
+
+def test_profile_appends_the_system_prompt(monkeypatch, tmp_path):
+    captured = {}
+    proc = FakeProc([result_line("done")])
+    monkeypatch.setattr(subprocess, "Popen", fake_popen(proc, captured))
+    worker.ClaudeExecutor().run(
+        TICKET, board=BOARD, directory=str(tmp_path), session_id="s",
+        profile={"allowed_tools": "Read", "model": None, "system_prompt": "Be terse."})
+    cmd = captured["cmd"]
+    assert "--append-system-prompt" in cmd
+    assert cmd[cmd.index("--append-system-prompt") + 1] == "Be terse."
+
+
+def test_no_model_or_system_prompt_flags_when_profile_omits_them(monkeypatch, tmp_path):
+    captured = {}
+    proc = FakeProc([result_line("done")])
+    monkeypatch.setattr(subprocess, "Popen", fake_popen(proc, captured))
+    worker.ClaudeExecutor().run(
+        TICKET, board=BOARD, directory=str(tmp_path), session_id="s",
+        profile={"allowed_tools": "Read", "model": None, "system_prompt": None})
+    cmd = captured["cmd"]
+    assert "--model" not in cmd
+    assert "--append-system-prompt" not in cmd
+
+
+def test_no_profile_falls_back_to_the_worker_default_allowed_tools(monkeypatch, tmp_path):
+    """The unresolved-profile case (worker.resolve_profile returned None):
+    the CLI must still get a non-empty tool grant, never launch with none."""
+    captured = {}
+    proc = FakeProc([result_line("done")])
+    monkeypatch.setattr(subprocess, "Popen", fake_popen(proc, captured))
+    worker.ClaudeExecutor().run(TICKET, board=BOARD, directory=str(tmp_path),
+                                session_id="s", profile=None)
+    cmd = captured["cmd"]
+    assert cmd[cmd.index("--allowedTools") + 1] == worker.DEFAULT_ALLOWED_TOOLS
+
+
+def test_profile_with_empty_allowed_tools_falls_back_to_worker_default(monkeypatch, tmp_path):
+    """Defensive: even a resolved profile whose allowed_tools is somehow
+    empty must not launch the agent with no tool grant."""
+    captured = {}
+    proc = FakeProc([result_line("done")])
+    monkeypatch.setattr(subprocess, "Popen", fake_popen(proc, captured))
+    worker.ClaudeExecutor(allowed_tools="Read,Grep").run(
+        TICKET, board=BOARD, directory=str(tmp_path), session_id="s",
+        profile={"allowed_tools": "", "model": None, "system_prompt": None})
+    cmd = captured["cmd"]
+    assert cmd[cmd.index("--allowedTools") + 1] == "Read,Grep"
+
+
 def test_partial_output_streamed_before_process_exits(monkeypatch, tmp_path):
     """The whole point of switching from subprocess.run(capture_output=True)
     to Popen with incremental reads: progress must reach the caller as each

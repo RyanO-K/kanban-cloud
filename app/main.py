@@ -33,6 +33,7 @@ from .models import (
     ClusterMember,
     ClusterSettings,
     Comment,
+    Profile,
     Ticket,
     TicketChat,
     TicketDep,
@@ -103,6 +104,24 @@ class BoardPatch(BaseModel):
     commit_requirements: str | None = None
     use_worktrees: bool | None = None
     repo_url: str | None = None
+    default_profile_id: int | None = None
+    clear_default_profile: bool = False
+
+
+class ProfileBody(BaseModel):
+    name: str
+    allowed_tools: str
+    model: str | None = None
+    system_prompt: str | None = None
+
+
+class ProfilePatch(BaseModel):
+    """Partial by design, same convention as BoardPatch: an absent field
+    keeps its stored value, an explicit empty string clears model/system_prompt."""
+    name: str | None = None
+    allowed_tools: str | None = None
+    model: str | None = None
+    system_prompt: str | None = None
 
 
 class ClusterSettingsBody(BaseModel):
@@ -129,6 +148,7 @@ class TicketBody(BaseModel):
     body: str = ""
     status: str = "todo"
     target_worker: int | None = None
+    profile_id: int | None = None
 
 
 class TicketPatch(BaseModel):
@@ -137,6 +157,10 @@ class TicketPatch(BaseModel):
     status: str | None = None
     target_worker: int | None = None
     clear_target: bool = False
+    # Per-ticket agent profile override; beats the board's default_profile_id
+    # (see worker.resolve_profile). Same clear-flag convention as target_worker.
+    profile_id: int | None = None
+    clear_profile: bool = False
     # None = leave dependencies unchanged; [] = clear them; a list replaces
     # the full set (the ticket editor sends its whole picklist selection).
     depends_on: list[int] | None = None
@@ -381,6 +405,7 @@ def create_app(
             "commit_requirements": b.commit_requirements,
             "use_worktrees": bool(b.use_worktrees),
             "repo_url": b.repo_url,
+            "default_profile_id": b.default_profile_id,
         }
 
     def ensure_cluster_settings(db: Session, cluster_id: int) -> ClusterSettings:
@@ -406,6 +431,22 @@ def create_app(
             "stop_all_requested": bool(s.stop_all_requested),
             "in_flight": in_flight or 0,
         }
+
+    def profile_json(p: Profile) -> dict:
+        return {
+            "id": p.id,
+            "name": p.name,
+            "allowed_tools": p.allowed_tools,
+            "model": p.model,
+            "system_prompt": p.system_prompt,
+        }
+
+    def profile_for_user(db: Session, user: User, profile_id: int) -> Profile:
+        profile = db.get(Profile, profile_id)
+        if profile is None:
+            raise HTTPException(404, "Profile not found")
+        require_member(db, user, profile.cluster_id)
+        return profile
 
     def depends_on_ids(db: Session, ticket_id: int) -> list[int]:
         return list(
@@ -505,6 +546,7 @@ def create_app(
             "created_by": t.created_by,
             "assigned_worker": t.assigned_worker,
             "target_worker": t.target_worker,
+            "profile_id": t.profile_id,
             "attempts": t.attempts,
             "order": t.order,
             "created_at": t.created_at.isoformat(),
@@ -730,6 +772,92 @@ def create_app(
             })
         return out
 
+    # ----- agent profiles -----
+    #
+    # Named tool-allowlist/model/system-prompt presets a board can default to
+    # and a ticket can override (gap analysis phase 5). Deleting a profile
+    # does not touch boards/tickets that still name it — a dangling
+    # default_profile_id/profile_id is exactly the "unknown profile" case
+    # worker.resolve_profile is built to fall back from, not an error here.
+
+    @app.get("/api/clusters/{cluster_id}/profiles")
+    def list_profiles(
+        cluster_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)
+    ):
+        require_member(db, user, cluster_id)
+        profiles = db.scalars(
+            select(Profile).where(Profile.cluster_id == cluster_id).order_by(Profile.name)
+        ).all()
+        return [profile_json(p) for p in profiles]
+
+    @app.post("/api/clusters/{cluster_id}/profiles")
+    def create_profile(
+        cluster_id: int,
+        body: ProfileBody,
+        user: User = Depends(current_user),
+        db: Session = Depends(get_db),
+    ):
+        require_member(db, user, cluster_id)
+        name = body.name.strip()
+        if not name:
+            raise HTTPException(400, "name required")
+        allowed_tools = body.allowed_tools.strip()
+        if not allowed_tools:
+            raise HTTPException(400, "allowed_tools required")
+        if db.scalar(
+            select(Profile).where(Profile.cluster_id == cluster_id, Profile.name == name)
+        ):
+            raise HTTPException(409, "a profile with that name already exists")
+        profile = Profile(
+            cluster_id=cluster_id, name=name, allowed_tools=allowed_tools,
+            model=body.model, system_prompt=body.system_prompt,
+        )
+        db.add(profile)
+        db.commit()
+        return profile_json(profile)
+
+    @app.patch("/api/profiles/{profile_id}")
+    def patch_profile(
+        profile_id: int,
+        body: ProfilePatch,
+        user: User = Depends(current_user),
+        db: Session = Depends(get_db),
+    ):
+        profile = profile_for_user(db, user, profile_id)
+        if body.name is not None:
+            name = body.name.strip()
+            if not name:
+                raise HTTPException(400, "name required")
+            clash = db.scalar(
+                select(Profile).where(
+                    Profile.cluster_id == profile.cluster_id,
+                    Profile.name == name, Profile.id != profile.id,
+                )
+            )
+            if clash:
+                raise HTTPException(409, "a profile with that name already exists")
+            profile.name = name
+        if body.allowed_tools is not None:
+            allowed_tools = body.allowed_tools.strip()
+            if not allowed_tools:
+                raise HTTPException(400, "allowed_tools required")
+            profile.allowed_tools = allowed_tools
+        if body.model is not None:
+            profile.model = body.model
+        if body.system_prompt is not None:
+            profile.system_prompt = body.system_prompt
+        db.commit()
+        return profile_json(profile)
+
+    @app.delete("/api/profiles/{profile_id}")
+    def delete_profile(
+        profile_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)
+    ):
+        profile = profile_for_user(db, user, profile_id)
+        db.delete(profile)
+        db.commit()
+        return {"ok": True}
+
     # ----- boards & tickets -----
 
     @app.get("/api/clusters/{cluster_id}/boards")
@@ -773,6 +901,13 @@ def create_app(
             value = getattr(body, field)
             if value is not None:
                 setattr(board, field, value)
+        if body.clear_default_profile:
+            board.default_profile_id = None
+        elif body.default_profile_id is not None:
+            profile = db.get(Profile, body.default_profile_id)
+            if profile is None or profile.cluster_id != board.cluster_id:
+                raise HTTPException(400, "default_profile_id must be a profile in this cluster")
+            board.default_profile_id = body.default_profile_id
         db.commit()
         return board_json(board)
 
@@ -888,6 +1023,10 @@ def create_app(
             worker = db.get(Worker, body.target_worker)
             if worker is None or worker.cluster_id != board.cluster_id:
                 raise HTTPException(400, "target_worker must be a worker in this cluster")
+        if body.profile_id is not None:
+            profile = db.get(Profile, body.profile_id)
+            if profile is None or profile.cluster_id != board.cluster_id:
+                raise HTTPException(400, "profile_id must be a profile in this cluster")
         ticket = Ticket(
             board_id=board.id,
             title=body.title.strip(),
@@ -895,6 +1034,7 @@ def create_app(
             status=body.status,  # validated above; "ready" also enqueues below
             created_by=user.id,
             target_worker=body.target_worker,
+            profile_id=body.profile_id,
         )
         if not ticket.title:
             raise HTTPException(400, "title required")
@@ -946,6 +1086,14 @@ def create_app(
             if worker is None or worker.cluster_id != board.cluster_id:
                 raise HTTPException(400, "target_worker must be a worker in this cluster")
             ticket.target_worker = body.target_worker
+        if body.clear_profile:
+            ticket.profile_id = None
+        elif body.profile_id is not None:
+            profile = db.get(Profile, body.profile_id)
+            board = db.get(Board, ticket.board_id)
+            if profile is None or profile.cluster_id != board.cluster_id:
+                raise HTTPException(400, "profile_id must be a profile in this cluster")
+            ticket.profile_id = body.profile_id
         if body.status is not None:
             if body.status not in TICKET_STATUSES:
                 raise HTTPException(400, f"status must be one of {TICKET_STATUSES}")

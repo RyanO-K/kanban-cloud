@@ -202,3 +202,21 @@ def test_live_poll_starts_and_stops_with_the_modal(markup):
     close_fn = markup[markup.index("function closeTicketModal"):]
     close_fn = close_fn[:close_fn.index("\n}")]
     assert "stopLivePoll()" in close_fn
+
+
+# ---------- agent profiles ----------
+
+def test_profiles_modal_markup_present(markup):
+    for token in ("profilesOverlay", "profilesList", "pName", "pAllowedTools",
+                  "pModel", "pSystemPrompt", "openProfilesModal", "saveProfile"):
+        assert token in markup, token
+
+
+def test_board_settings_has_a_default_profile_picker(markup):
+    assert 'id="bDefaultProfile"' in markup
+    assert "default_profile_id" in markup
+
+
+def test_ticket_modal_has_a_profile_picker(markup):
+    assert 'id="tProfile"' in markup
+    assert "payload.profile_id" in markup
