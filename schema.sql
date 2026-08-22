@@ -32,6 +32,20 @@ CREATE TABLE IF NOT EXISTS cluster_members (
     UNIQUE (cluster_id, user_id)
 );
 
+-- Cluster-wide dispatch controls (one row per cluster, created alongside it
+-- and backfilled for older clusters by app/db.run_migrations). enabled
+-- toggles concurrency_cap without losing the configured number; a NULL cap
+-- with enabled=TRUE is treated as "no cap" the same as enabled=FALSE.
+-- stop_all_requested blocks every claim outright. Enforced inside the claim
+-- transaction itself (worker.cluster_claim_gate), not by a central
+-- dispatcher, so it holds across N independent worker PCs.
+CREATE TABLE IF NOT EXISTS cluster_settings (
+    cluster_id         INTEGER PRIMARY KEY REFERENCES clusters(id),
+    enabled            BOOLEAN NOT NULL DEFAULT FALSE,
+    concurrency_cap    INTEGER,
+    stop_all_requested BOOLEAN NOT NULL DEFAULT FALSE
+);
+
 -- description/out_of_scope/commit_requirements/use_worktrees are the project
 -- context injected into every agent prompt built for this board. repo_url is
 -- the git clone URL a worker with no --set-path entry auto-clones under its

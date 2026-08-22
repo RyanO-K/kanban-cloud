@@ -16,7 +16,7 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from . import delegation, enrollment, importer
@@ -31,6 +31,7 @@ from .models import (
     Board,
     Cluster,
     ClusterMember,
+    ClusterSettings,
     Comment,
     Ticket,
     TicketDep,
@@ -99,6 +100,15 @@ class BoardPatch(BaseModel):
     commit_requirements: str | None = None
     use_worktrees: bool | None = None
     repo_url: str | None = None
+
+
+class ClusterSettingsBody(BaseModel):
+    """The cluster-wide dispatch controls, always saved as a whole (the
+    Settings panel form has just these three fields, unlike BoardPatch's
+    partial-patch fields)."""
+    enabled: bool
+    concurrency_cap: int | None = None
+    stop_all_requested: bool
 
 
 class ImportBody(BaseModel):
@@ -253,6 +263,7 @@ def create_app(
             db.add(cluster)
             db.flush()
             db.add(Board(cluster_id=cluster.id, name=DEFAULT_CLUSTER_NAME))
+            db.add(ClusterSettings(cluster_id=cluster.id))
         if cluster is not None:
             member = db.scalar(
                 select(ClusterMember).where(
@@ -327,6 +338,30 @@ def create_app(
             "commit_requirements": b.commit_requirements,
             "use_worktrees": bool(b.use_worktrees),
             "repo_url": b.repo_url,
+        }
+
+    def ensure_cluster_settings(db: Session, cluster_id: int) -> ClusterSettings:
+        """Lazily creates the row for a cluster that predates this table and
+        has not yet been through run_migrations' backfill — read paths must
+        never 404 just because that hasn't happened yet."""
+        settings = db.get(ClusterSettings, cluster_id)
+        if settings is None:
+            settings = ClusterSettings(cluster_id=cluster_id)
+            db.add(settings)
+            db.commit()
+        return settings
+
+    def cluster_settings_json(db: Session, s: ClusterSettings) -> dict:
+        in_flight = db.scalar(
+            select(func.count()).select_from(WorkItem).where(
+                WorkItem.cluster_id == s.cluster_id, WorkItem.status == "claimed"
+            )
+        )
+        return {
+            "enabled": bool(s.enabled),
+            "concurrency_cap": s.concurrency_cap,
+            "stop_all_requested": bool(s.stop_all_requested),
+            "in_flight": in_flight or 0,
         }
 
     def depends_on_ids(db: Session, ticket_id: int) -> list[int]:
@@ -526,6 +561,7 @@ def create_app(
         db.flush()
         db.add(ClusterMember(cluster_id=cluster.id, user_id=user.id))
         db.add(Board(cluster_id=cluster.id, name="Main"))
+        db.add(ClusterSettings(cluster_id=cluster.id))
         db.commit()
         return {"id": cluster.id, "name": cluster.name, "join_code": cluster.join_code}
 
@@ -607,6 +643,35 @@ def create_app(
             }
             for i in items
         ]
+
+    @app.get("/api/clusters/{cluster_id}/settings")
+    def get_cluster_settings(
+        cluster_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)
+    ):
+        require_member(db, user, cluster_id)
+        settings = ensure_cluster_settings(db, cluster_id)
+        return cluster_settings_json(db, settings)
+
+    @app.put("/api/clusters/{cluster_id}/settings")
+    def put_cluster_settings(
+        cluster_id: int,
+        body: ClusterSettingsBody,
+        user: User = Depends(current_user),
+        db: Session = Depends(get_db),
+    ):
+        """Cluster-wide concurrency cap and stop-all switch (gap analysis
+        phase 2, item 5). Enforced inside the claim transaction itself
+        (worker.cluster_claim_gate), not here — this endpoint only edits the
+        settings a worker's claim reads."""
+        require_member(db, user, cluster_id)
+        if body.concurrency_cap is not None and body.concurrency_cap < 1:
+            raise HTTPException(400, "concurrency_cap must be a positive integer")
+        settings = ensure_cluster_settings(db, cluster_id)
+        settings.enabled = body.enabled
+        settings.concurrency_cap = body.concurrency_cap
+        settings.stop_all_requested = body.stop_all_requested
+        db.commit()
+        return cluster_settings_json(db, settings)
 
     @app.get("/api/clusters/{cluster_id}/blocked")
     def blocked_tickets(

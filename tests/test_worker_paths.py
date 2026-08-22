@@ -173,17 +173,26 @@ def test_claim_sql_also_admits_boards_with_a_repo_url():
     assert "EXISTS" in worker.CLAIM_SQL.upper()
 
 
+def _boards_param(cursor):
+    """The `boards` param passed to CLAIM_SQL, wherever it lands among this
+    cursor's calls — claim_next now issues the cluster cap gate's queries
+    first (see cluster_claim_gate), so CLAIM_SQL is no longer necessarily the
+    first execute() call. FakeCursor.fetchone() always returns None, so the
+    gate sees "no settings row" and falls through to CLAIM_SQL unconditionally."""
+    return next(params["boards"] for _, params in cursor.calls if params and "boards" in params)
+
+
 def test_claim_next_passes_configured_boards():
     conn = FakeConn()
     worker.claim_next(conn, 3, 1, [4, 7])
-    assert conn.cursors[0].calls[0][1]["boards"] == [4, 7]
+    assert _boards_param(conn.cursors[0]) == [4, 7]
 
 
 def test_claim_next_with_none_boards_disables_the_filter():
     """--stub needs no repo, so it must still be able to claim anything."""
     conn = FakeConn()
     worker.claim_next(conn, 3, 1, None)
-    assert conn.cursors[0].calls[0][1]["boards"] is None
+    assert _boards_param(conn.cursors[0]) is None
 
 
 # ---------- claim_next board row ----------
@@ -215,6 +224,7 @@ class FakeConnWithBoardRow(FakeConn):
 
 def test_claim_next_returns_repo_url_on_the_board_dict():
     conn = FakeConnWithBoardRow([
+        None,                                                 # cap gate: no settings row -> unlimited
         (5, 9),                                             # claim: item_id, ticket_id
         (2, "Fix the thing", "Details.", 1),                 # ticket flip: board_id, title, body, attempts
         ("site-page", "Desc", None, None, False, "https://github.com/org/repo.git"),  # board row

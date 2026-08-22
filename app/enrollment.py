@@ -26,12 +26,16 @@ PASSWORD_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 # ticket_chat is the chat pump's delivered_at ack (mark_chat_delivered); a
 # human's own chat messages are inserted through the server's own DB session,
 # same as ticket_questions answers, so the worker role never needs INSERT
-# there. No DELETE anywhere; users/auth_tokens untouched.
+# there. UPDATE on cluster_settings is never actually written by the worker
+# role — it's needed only so `SELECT ... FOR UPDATE` in
+# worker.cluster_claim_gate can lock the row (Postgres requires UPDATE, not
+# just SELECT, to take a row lock). No DELETE anywhere; users/auth_tokens
+# untouched.
 GROUP_GRANTS = [
-    f"GRANT SELECT ON tickets, boards, clusters, workers, "
+    f"GRANT SELECT ON tickets, boards, clusters, workers, cluster_settings, "
     f"work_queue, comments, ticket_deps, ticket_questions, ticket_chat TO {GROUP_ROLE}",
     f"GRANT INSERT ON comments, work_queue, ticket_questions TO {GROUP_ROLE}",
-    f"GRANT UPDATE ON work_queue, tickets, workers, ticket_chat TO {GROUP_ROLE}",
+    f"GRANT UPDATE ON work_queue, tickets, workers, ticket_chat, cluster_settings TO {GROUP_ROLE}",
     f"GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {GROUP_ROLE}",
 ]
 

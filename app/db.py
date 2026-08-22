@@ -99,12 +99,8 @@ def run_migrations(engine) -> None:
             "CREATE INDEX IF NOT EXISTS idx_work_queue_claim "
             "ON work_queue (cluster_id, status, queued_at)"
         ))
-        # Workers now authenticate the Claude CLI with their own local config
-        # instead of a cluster-stored key; drop the table (and, on Postgres,
-        # the kanban_worker group's SELECT grant on it) from DBs created
-        # before this change.
-        conn.execute(text("DROP TABLE IF EXISTS cluster_settings"))
     _add_missing_columns(engine)
+    _backfill_cluster_settings(engine)
 
 
 def _migrate_sqlite_workers(engine) -> None:
@@ -158,3 +154,24 @@ def _add_missing_columns(engine) -> None:
             if column in {c["name"] for c in insp.get_columns(table)}:
                 continue
             conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {ddl}"))
+
+
+def _backfill_cluster_settings(engine) -> None:
+    """Every cluster gets a cluster_settings row, so worker.cluster_claim_gate
+    always has one to lock — a cluster created before this table existed
+    would otherwise let concurrent claims race the cap check unlocked (see
+    cluster_claim_gate's docstring). Guarded on both tables existing so this
+    is a no-op the first time create_all() runs against a brand-new DB, which
+    handles the initial insert itself via app/main.py's cluster-creation
+    paths instead.
+    """
+    insp = inspect(engine)
+    tables = set(insp.get_table_names())
+    if "cluster_settings" not in tables or "clusters" not in tables:
+        return
+    with engine.begin() as conn:
+        conn.execute(text(
+            "INSERT INTO cluster_settings (cluster_id, enabled, concurrency_cap, stop_all_requested) "
+            "SELECT c.id, FALSE, NULL, FALSE FROM clusters c "
+            "WHERE NOT EXISTS (SELECT 1 FROM cluster_settings cs WHERE cs.cluster_id = c.id)"
+        ))
