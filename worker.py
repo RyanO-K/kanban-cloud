@@ -14,6 +14,9 @@ Dev / script setup (once per PC):
     pip install "psycopg[binary]"
     py worker.py --enroll --join-code ABC12345 --name ryans-pc
 
+    # against a local dev server (http://localhost:8900) instead of prod:
+    py worker.py --enroll --join-code ABC12345 --name ryans-pc --test
+
 Run:
     py worker.py            # real executor (Claude CLI)
     py worker.py --stub     # stub executor for testing
@@ -34,11 +37,19 @@ import urllib.request
 import uuid
 from pathlib import Path
 
-import psycopg
+try:
+    import psycopg
+except ImportError as exc:
+    sys.exit(
+        "Missing Postgres driver: no working psycopg backend is installed "
+        f"({exc}).\nFix: pip install \"psycopg[binary]\"\n"
+        'Then re-run: py worker.py --enroll --join-code ABC12345'
+    )
 
 from app.prompt import build_agent_prompt
 
 DEFAULT_SERVER = "https://kanban-cloud.onrender.com"
+TEST_SERVER = "http://localhost:8900"
 
 # The local .kanban tool's `default` profile list. Without an explicit grant a
 # headless `claude -p` cannot get permission to edit a file, so an agent with
@@ -312,7 +323,7 @@ def pause_if_frozen() -> None:
 def first_run_enroll(args) -> dict | None:
     """No saved config: prompt for a join code and enroll interactively.
     Returns the saved config, or None if enrollment failed/was cancelled."""
-    server = args.server or DEFAULT_SERVER
+    server = resolve_server(args)
     name = (args.name or os.environ.get("COMPUTERNAME")
             or os.environ.get("HOSTNAME") or "worker")
     print(f"No worker config found - enrolling this PC against {server}")
@@ -577,6 +588,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="enroll this PC (needs --join-code; --server optional)")
     parser.add_argument("--server",
                         help=f"server base URL (default {DEFAULT_SERVER})")
+    parser.add_argument("--test", action="store_true",
+                        help=f"enroll against a local dev server ({TEST_SERVER}) "
+                             "instead of production; overridden by --server")
     parser.add_argument("--join-code", help="cluster join code (enrollment only)")
     parser.add_argument("--name", help="worker name (defaults to computer name)")
     parser.add_argument("--stub", action="store_true",
@@ -607,6 +621,12 @@ def pick_executor(args):
     return ClaudeExecutor(allowed_tools=args.allowed_tools)
 
 
+def resolve_server(args) -> str:
+    """--server always wins; else --test targets the local dev server;
+    else production."""
+    return args.server or (TEST_SERVER if args.test else DEFAULT_SERVER)
+
+
 # ---------- main loop ----------
 
 def main() -> int:
@@ -624,7 +644,7 @@ def main() -> int:
             return 2
         name = (args.name or os.environ.get("COMPUTERNAME")
                 or os.environ.get("HOSTNAME") or "worker")
-        enroll(args.server or DEFAULT_SERVER, args.join_code, name)
+        enroll(resolve_server(args), args.join_code, name)
         return 0
 
     cfg = load_config()

@@ -234,7 +234,7 @@ function applyDarkMode(on) {
 }
 function initTheme() {
   const stored = localStorage.getItem("kc_theme");
-  const on = stored ? stored === "dark" : window.matchMedia("(prefers-color-scheme: dark)").matches;
+  const on = stored ? stored === "dark" : true;
   applyDarkMode(on);
 }
 function toggleDarkMode() {
