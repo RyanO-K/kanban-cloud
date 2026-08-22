@@ -94,6 +94,7 @@ class BoardPatch(BaseModel):
     out_of_scope: str | None = None
     commit_requirements: str | None = None
     use_worktrees: bool | None = None
+    repo_url: str | None = None
 
 
 class ImportBody(BaseModel):
@@ -304,6 +305,7 @@ def create_app(
             "out_of_scope": b.out_of_scope,
             "commit_requirements": b.commit_requirements,
             "use_worktrees": bool(b.use_worktrees),
+            "repo_url": b.repo_url,
         }
 
     def ticket_json(db: Session, t: Ticket) -> dict:
@@ -533,7 +535,7 @@ def create_app(
         """
         board = board_for_user(db, user, board_id)
         for field in ("description", "out_of_scope", "commit_requirements",
-                      "use_worktrees"):
+                      "use_worktrees", "repo_url"):
             value = getattr(body, field)
             if value is not None:
                 setattr(board, field, value)

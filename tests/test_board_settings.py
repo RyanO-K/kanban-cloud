@@ -85,3 +85,28 @@ def test_workers_api_reports_slot_counts(client, user, cluster):
                    headers=user["headers"]).json()[0]
     assert w["concurrency"] == 3
     assert w["running"] == 2
+
+
+def test_list_boards_includes_repo_url(client, user, cluster):
+    boards = client.get(f"/api/clusters/{cluster['id']}/boards",
+                        headers=user["headers"]).json()
+    assert boards[0]["repo_url"] is None
+
+
+def test_patch_board_sets_repo_url(client, user, cluster):
+    r = client.patch(f"/api/boards/{cluster['board_id']}", headers=user["headers"],
+                     json={"repo_url": "https://github.com/org/repo.git"})
+    assert r.status_code == 200, r.text
+    assert r.json()["repo_url"] == "https://github.com/org/repo.git"
+
+
+def test_patch_board_repo_url_is_partial_like_the_other_fields(client, user, cluster):
+    bid = cluster["board_id"]
+    client.patch(f"/api/boards/{bid}", headers=user["headers"],
+                 json={"repo_url": "https://github.com/org/repo.git"})
+    client.patch(f"/api/boards/{bid}", headers=user["headers"],
+                 json={"use_worktrees": True})
+    r = client.get(f"/api/clusters/{cluster['id']}/boards",
+                   headers=user["headers"]).json()[0]
+    assert r["repo_url"] == "https://github.com/org/repo.git"
+    assert r["use_worktrees"] is True
