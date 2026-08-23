@@ -215,6 +215,30 @@ def test_drops_and_reorders_address_a_column_not_a_status(markup):
     assert "status: col.key" in body
 
 
+# ---------- column width (ticket #21) ----------
+
+def test_columns_share_the_board_evenly(markup):
+    """Each column is ~1/5th of the window minus the sidebar, so .col has to
+    flex rather than carry the old fixed width."""
+    rule = markup[markup.index("\n  .col {"):]
+    rule = rule[:rule.index("}")]
+    assert "flex: 1 1 0" in rule
+    # The fixed width it replaced. Matched with its leading "; " so the
+    # min-width guard below — a substring of it — does not count as a hit.
+    assert "; width:" not in rule
+
+
+def test_a_narrow_board_still_scrolls_rather_than_squeezing_the_sidebar(markup):
+    """min-width on the column plus overflow-x on the board; .side is the
+    fixed-width one, so it must not shrink."""
+    col = markup[markup.index("\n  .col {"):]
+    assert "min-width: 210px" in col[:col.index("}")]
+    board = markup[markup.index("\n  .board {"):]
+    assert "overflow-x: auto" in board[:board.index("}")]
+    side = markup[markup.index("\n  .side {"):]
+    assert "flex-shrink: 0" in side[:side.index("}")]
+
+
 # ---------- live agent output + chat ----------
 
 def test_live_log_and_chat_panels_present(markup):

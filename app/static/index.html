@@ -27,7 +27,11 @@
   .muted { color: var(--muted); font-size: 12px; }
   .layout { display: flex; gap: 12px; padding: 12px 16px; align-items: flex-start; }
   .board { display: flex; gap: 10px; flex: 1; overflow-x: auto; }
-  .col { background: var(--col-bg); border-radius: 8px; min-width: 210px; width: 210px; padding: 8px; }
+  /* The five columns split .board evenly, so each is ~1/5th of the window once
+     the worker/delegations sidebar and the gaps are taken out. min-width keeps
+     a column readable on a narrow screen: below that .board scrolls (it is
+     overflow-x: auto) instead of the sidebar giving up space. */
+  .col { background: var(--col-bg); border-radius: 8px; flex: 1 1 0; min-width: 210px; padding: 8px; }
   .col h3 { margin: 2px 4px 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); display: flex; justify-content: space-between; }
   .card { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 8px; margin-bottom: 8px; cursor: pointer; font-size: 13px; }
   .card:hover { border-color: var(--accent); }
