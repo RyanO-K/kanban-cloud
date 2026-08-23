@@ -931,7 +931,7 @@ function openTicketModal(id) {
   document.getElementById("killBtn").style.display = editingTicket && editingTicket.status === "doing" ? "" : "none";
   document.getElementById("commentsWrap").style.display = editingTicket ? "" : "none";
   if (editingTicket) renderComments(editingTicket);
-  document.getElementById("logWrap").style.display = editingTicket ? "" : "none";
+  document.getElementById("logWrap").style.display = "none";  // pollLive reveals it once there is output
   document.getElementById("chatWrap").style.display = editingTicket ? "" : "none";
   document.getElementById("ticketOverlay").classList.add("show");
   if (editingTicket) startLivePoll(); else stopLivePoll();
@@ -965,6 +965,7 @@ async function pollLive() {
   try {
     const log = await api("GET", `./api/tickets/${id}/log?since_seq=${liveSeq}`);
     if (log.lines.length) {
+      document.getElementById("logWrap").style.display = "";
       const box = document.getElementById("agentLog");
       const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
       log.lines.forEach(l => {

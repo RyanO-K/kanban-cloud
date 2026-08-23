@@ -234,6 +234,17 @@ def test_send_chat_hits_the_chat_endpoint(markup):
     assert "/api/tickets/${editingTicket.id}/chat" in body
 
 
+def test_live_log_panel_hides_until_there_is_output(markup):
+    """An empty box under a "Live agent output" heading reads as "the agent
+    said nothing" — keep the panel hidden until a line actually arrives."""
+    open_fn = markup[markup.index("function openTicketModal"):]
+    open_fn = open_fn[:open_fn.index("\n}\n")]
+    assert 'getElementById("logWrap").style.display = "none"' in open_fn
+    poll = markup[markup.index("async function pollLive"):]
+    poll = poll[:poll.index("\n}\n")]
+    assert 'getElementById("logWrap").style.display = ""' in poll
+
+
 def test_live_poll_starts_and_stops_with_the_modal(markup):
     open_fn = markup[markup.index("function openTicketModal"):]
     open_fn = open_fn[:open_fn.index("\n}\n")]
