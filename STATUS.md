@@ -2,6 +2,69 @@
 
 Last updated: 2026-08-23
 
+## Five columns, and a ticket is done when it is pushed (ticket #20, 2026-08-23)
+
+The board now shows **TODO / Ready / In progress / Blocked / Done** over seven
+statuses. `review` is gone from `TICKET_STATUSES` entirely; `failed` and
+`killed` survive as statuses (the retry budget and the kill path read them —
+a kill must not burn an attempt) but no longer get columns of their own,
+because to a human they say exactly what `blocked` says: this one needs you.
+All three share the Blocked column, and a card whose status is not its
+column's key wears a badge naming it. The grouping is declared once per side —
+`models.BOARD_COLUMNS` on the server, `COLS` in `app/static/index.html` — and
+`tests/test_columns.py` pins each status to exactly one column, since a status
+in no column is a ticket nobody can see and a status in two renders twice.
+
+The substantive half is what `done` now means. `worker.finish_work` grew a
+`pushed` flag: a successful run lands `done` only when its branch actually
+reached origin, and otherwise lands `blocked` with the reason appended to the
+comment. Failure and kill handling are untouched. The flag comes from the new
+`worker.resolve_push`, split out of `run_slot` so the decision is testable on
+its own; it vetoes the push (with a note explaining itself, since that note is
+now the human's instructions) when the board has auto-push off or the commit
+gate did not report the board's requirements met, and otherwise runs
+`push_ticket_branch`, which now returns `(pushed, note)` rather than a bare
+note. `pushed` defaults to False everywhere: a caller that cannot say the work
+landed must not be able to claim it did by saying nothing.
+
+That is genuinely evidence-based on one side and not on the other, and the
+seam is worth knowing about. "Pushed" is a real `git push` exit code — the
+agent's self-report cannot fake it. "Committed" is not independently checked:
+`push_ticket_branch` verifies the ticket branch exists and pushes it, so a
+branch pointing at nothing new pushes successfully and reads as done. The
+commit gate remains the agent's own word about the board's requirements; it
+can only ever *withhold* a push, never manufacture one.
+
+Dependencies followed: `DEP_MET_STATUSES` and `worker.DEPS_MET_SQL` are now
+`done` alone (previously done-or-review). The point is no longer bookkeeping —
+a dependent ticket's agent can only fetch work that is actually on the remote,
+so anything short of pushed is not a met dependency.
+
+Two smaller consequences. `/api/boards/{id}/reorder` addresses a *column*
+rather than a status (`models.column_statuses` expands the key; an unknown key
+is read as a bare status, so a browser tab loaded before the deploy keeps
+working), because a human dragging inside Blocked is ordering what they see,
+not each status separately. And the notification bell now lists blocked
+tickets that carry no question at all — nothing to answer, still waiting on a
+human — instead of rendering them as a bare line.
+
+Migration: `app/db.py` gained `_REMOVED_TICKET_STATUSES = {"review": "done"}`
+and `_migrate_removed_statuses`, same guarded-statement shape as the phase
+column lists, idempotent on both backends. Every ticket that ever reached
+`review` had a completed run behind it, so they land in `done` rather than
+being demoted. A row left carrying a retired status would be worse than
+untidy: it would render in no column and could not be dragged out, since the
+API rejects the status it would be read back as. The importer maps a
+`review` ticket the same way, for boards exported before this shipped.
+
+Tests: 502 → 534 (14 `tests/test_columns.py`: the grouping, finish_work's
+done/blocked split and the reorder-by-column endpoint; 7 in
+`tests/test_worker_push.py` for the `(pushed, note)` contract and
+`resolve_push`'s vetoes; 5 frontend markup; 3 migration; 1 each for the
+question-less blocked ticket, the importer's retired-status mapping, and the
+claim predicate agreeing with `DEP_MET_STATUSES` — plus the dependency tests
+rewritten to walk every non-done status rather than assert the one old case).
+
 ## Fix: worker role was never granted SELECT on `profiles` (2026-08-23)
 
 Agent profiles (ticket #13) added a `profiles` table and a read of it inside

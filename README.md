@@ -77,8 +77,13 @@ live session immediately — access is cut at the database, not just flagged
 in a table. Re-enrolling the same PC (same `--enroll` command) recreates the
 role and restores access with a fresh password.
 
-Ticket statuses (vocabulary adapted from the local `.kanban` tool):
-`todo → ready → doing → review → done`, plus `failed`. Moving a ticket into
+The board has five columns — **TODO → Ready → In progress → Blocked → Done**
+— over seven statuses: `blocked`, `failed` and `killed` all share the Blocked
+column, since to a human they mean the same thing (this one needs you) and
+only the retry/kill machinery cares which is which. A card in that column
+wears a badge naming its status.
+
+`todo → ready → doing → done`, then. Moving a ticket into
 **ready** (drag, edit, or the "Run on agent now" button) enqueues it in
 `work_queue`. If `target_worker` is set, only that PC can claim it; otherwise
 any polling worker in the cluster wins. Each worker claims with
@@ -86,6 +91,16 @@ any polling worker in the cluster wins. Each worker claims with
 status='queued' ... FOR UPDATE SKIP LOCKED LIMIT 1)` run directly against
 Postgres, so two pollers can never double-claim and neither blocks the
 other. A failed run requeues once, then the ticket goes to `failed`.
+
+**A ticket is done when it is committed and pushed** — nothing else counts. A
+run that finishes but leaves its branch on the worker PC (auto-push off for
+the board, an unmet commit gate, a push that failed, or an agent that
+committed nothing) lands in Blocked with the reason in a comment, because
+somebody has to go and deal with it. `done` is written only after a real
+`git push` returned 0 (`worker.py`'s `resolve_push` / `finish_work`), never on
+the strength of the agent saying so. Dependencies follow the same line: a
+ticket is claimable only once everything it depends on is `done`, so its agent
+can actually fetch that work instead of racing a branch on another PC.
 
 ## Run the server
 
@@ -330,11 +345,16 @@ The two status vocabularies differ, so they are mapped (`app/importer.py`):
 | `todo`, `pending`, `blocked` | `todo` |
 | `ready` | `ready` |
 | `in_progress` | `doing` |
-| `completed` | `done` |
-| already-cloud names (`done`, `review`, `failed`, `doing`) | unchanged |
+| `completed`, `review` | `done` |
+| already-cloud names (`done`, `failed`, `doing`) | unchanged |
 | anything else | `todo` |
 
-`blocked` has no cloud equivalent. Nothing is silently lost: every imported
+A local `blocked` is blocked on something in the local tool that the import
+does not carry, so it lands in `todo` rather than in the cloud's Blocked
+column (which means an agent or worker needs a human). `review` is not a local
+status at all — it was a cloud one until the five-column rework removed it, so
+only a board exported before then can carry it, and it maps to `done` exactly
+as that migration rewrote the rows that had it. Nothing is silently lost: every imported
 ticket gets an appendix in its body recording the source board, the local
 ticket number and its original local status, followed by whichever of
 `dependsOn` / `blocks` / `steps` / `files` / `outputs` it had. Those arrive as
