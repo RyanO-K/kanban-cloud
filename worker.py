@@ -1103,6 +1103,38 @@ def touch_claim_heartbeat(conn, item_id: int) -> None:
         )
 
 
+def record_session_dir(conn, ticket_id: int, directory) -> None:
+    """Report the directory this ticket's Claude session actually ran in.
+
+    The board turns it into a human-takeover command,
+    `cd '<session_dir>'; claude --resume <session_id>`. Both halves are
+    needed: the CLI scopes sessions by working directory, so the id on its
+    own resolves to nothing. Session ids are minted in claim_next, but the
+    directory is only known once resolve_directory has run, hence the
+    separate write here rather than one UPDATE at claim time.
+
+    A falsy `directory` (a stub run, or a resolve that failed) writes
+    nothing at all — blanking the column would throw away a good path an
+    earlier run had already reported.
+
+    Best-effort by contract: this column only feeds a convenience command for
+    a human, so a failed write is reported and swallowed rather than taking
+    down the agent run it precedes. run_slot calls this just before handing
+    off to the executor, where a raised exception would otherwise be caught
+    by its blanket handler and reported as a failed ticket.
+    """
+    if not directory:
+        return
+    try:
+        with conn.transaction(), conn.cursor() as cur:
+            cur.execute(
+                "UPDATE tickets SET session_dir=%s WHERE id=%s",
+                (str(directory), ticket_id),
+            )
+    except Exception as exc:
+        print(f"  [session] could not record the run directory: {exc!r}")
+
+
 def _claim_heartbeat_loop(dsn: str, item_id: int, stop_event: threading.Event,
                           interval: float = HEARTBEAT_INTERVAL_SECONDS) -> None:
     """Runs on its own thread and connection for the lifetime of one executor
@@ -1876,6 +1908,11 @@ def run_slot(cfg, args, executor, stop_event, slot_no: int) -> None:
                         if resolve_error:
                             ok, comment = False, resolve_error
                         else:
+                            # Before the run, not after: an agent that hangs
+                            # or dies is exactly when a human wants the
+                            # takeover command, and a write that only
+                            # happened on clean exit would be missing then.
+                            record_session_dir(conn, ticket["id"], directory)
                             ok, comment = executor.run(
                                 ticket, board=work.get("board"),
                                 directory=directory,

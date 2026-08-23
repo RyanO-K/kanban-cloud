@@ -1,4 +1,8 @@
+import datetime
+
 import pytest
+from sqlalchemy import text
+
 from conftest import make_ticket
 
 
@@ -125,5 +129,96 @@ def test_commit_gate_round_trips_an_unmet_verdict(client, user, cluster):
     fresh = [x for x in listed if x["id"] == t["id"]][0]
     assert fresh["commit_gate"] == {"requirements_met": False,
                                     "summary": "Two tests still fail."}
+
+
+# ---------- resume command: the session fields the board UI copies ----------
+#
+# A human takeover is `cd '<session_dir>'; claude --resume <session_id>`, run
+# on the PC that owns the session. All three halves have to reach the client,
+# so ticket_json carries them; the command string itself is built in the UI.
+
+def _record_session(client, ticket_id, worker_name="ryan-pc",
+                    session_id="sess-abc", session_dir=r"C:\repos\board-1"):
+    """Simulate what a worker does over a run: enroll, then report back the
+    session it minted and the directory it actually ran in."""
+    engine = client.app.state.engine
+    with engine.begin() as conn:
+        wid = conn.execute(text(
+            "INSERT INTO workers (cluster_id, name, revoked, status, concurrency,"
+            " running, last_seen, created_at) "
+            "VALUES (1, :n, 0, 'idle', 1, 0, :now, :now) RETURNING id"
+        ), {"n": worker_name, "now": datetime.datetime.utcnow()}).scalar_one()
+        conn.execute(text(
+            "UPDATE tickets SET session_id=:s, session_dir=:d, assigned_worker=:w "
+            "WHERE id=:t"
+        ), {"s": session_id, "d": session_dir, "w": wid, "t": ticket_id})
+    return wid
+
+
+def _reread(client, user, ticket_id):
+    return client.patch(f"/api/tickets/{ticket_id}", json={},
+                        headers=user["headers"]).json()
+
+
+def test_ticket_json_exposes_the_session_id_and_dir(client, user, cluster):
+    t = make_ticket(client, user, cluster["board_id"])
+    _record_session(client, t["id"])
+    fresh = _reread(client, user, t["id"])
+    assert fresh["session_id"] == "sess-abc"
+    assert fresh["session_dir"] == r"C:\repos\board-1"
+
+
+def test_ticket_json_names_the_worker_that_owns_the_session(client, user, cluster):
+    """The transcript only exists on the PC that ran it, so the UI has to say
+    which one — a session id the human can't act on is not enough."""
+    t = make_ticket(client, user, cluster["board_id"])
+    _record_session(client, t["id"], worker_name="studio-pc")
+    assert _reread(client, user, t["id"])["session_worker"] == "studio-pc"
+
+
+def test_a_ticket_that_never_ran_reports_no_session(client, user, cluster):
+    """Nothing to resume: the UI renders no copy button for these."""
+    t = make_ticket(client, user, cluster["board_id"])
+    assert t["session_id"] is None
+    assert t["session_dir"] is None
+    assert t["session_worker"] is None
+    assert t["resume_command"] is None
+
+
+# ---------- the command string itself ----------
+#
+# Built here rather than in the browser so its fallbacks are actually tested:
+# there is no JS runner in this repo (see tests/test_frontend_markup.py), so
+# anything assembled in index.html is only ever checked by eye.
+
+def test_resume_command_pairs_the_directory_with_the_session():
+    """`cd` first: the CLI resolves a session id against the working
+    directory, so the id alone finds nothing from anywhere else."""
+    from app.main import build_resume_command
+
+    assert (build_resume_command("sess-abc", r"C:\repos\board-1")
+            == r"cd 'C:\repos\board-1'; claude --resume sess-abc")
+
+
+def test_resume_command_without_a_directory_is_still_offered():
+    """A ticket whose last run predates session_dir still has a session id
+    worth handing over — the human supplies the folder."""
+    from app.main import build_resume_command
+
+    assert build_resume_command("sess-abc", None) == "claude --resume sess-abc"
+
+
+def test_resume_command_is_none_without_a_session():
+    from app.main import build_resume_command
+
+    assert build_resume_command(None, r"C:\repos\board-1") is None
+    assert build_resume_command(None, None) is None
+
+
+def test_ticket_json_carries_the_assembled_resume_command(client, user, cluster):
+    t = make_ticket(client, user, cluster["board_id"])
+    _record_session(client, t["id"])
+    fresh = _reread(client, user, t["id"])
+    assert fresh["resume_command"] == r"cd 'C:\repos\board-1'; claude --resume sess-abc"
 
 

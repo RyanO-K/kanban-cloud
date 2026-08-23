@@ -273,3 +273,29 @@ def test_ticket_modal_shows_the_commit_gate(markup):
     assert 'id="tCommitGate"' in markup
     assert "editingTicket.commit_gate" in markup
     assert "requirements_met" in markup
+
+
+# ---------- resume command (human takeover of the agent's session) ----------
+
+def test_ticket_modal_has_a_copy_resume_command_button(markup):
+    assert 'id="tSessionRow"' in markup
+    assert 'id="copyResumeBtn"' in markup
+
+
+def test_the_copy_button_copies_the_server_built_command(markup):
+    """The string is assembled in app.main.build_resume_command, where its
+    fallbacks are unit-tested; the page must not re-derive it."""
+    assert "resume_command" in markup
+    assert "clipboard.writeText" in markup
+
+
+def test_the_session_row_is_owner_only(markup):
+    """It exposes an absolute path on the owner's own PC — not a spectator's
+    business, and the takeover it offers is not theirs to run."""
+    assert 'owner-only" id="tSessionRow"' in markup
+
+
+def test_the_session_row_names_the_worker_to_run_it_on(markup):
+    """The transcript lives on one PC's disk; the command is useless without
+    knowing which."""
+    assert "session_worker" in markup

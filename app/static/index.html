@@ -168,6 +168,15 @@
     <select id="tDeps" multiple size="4"></select>
     <div id="tBlockedNote" class="badge blocked" style="display:none; margin-top:4px">Blocked — waiting on dependencies</div>
     <div id="tCommitGate" style="display:none; margin-top:4px; font-size:12px"></div>
+    <!-- Human takeover of the agent's own Claude session. The transcript only
+         exists on the PC that ran it, so the row names that worker; the
+         command itself comes assembled from the server (resume_command). -->
+    <div class="row owner-only" id="tSessionRow" style="display:none; margin-top:6px; font-size:12px; align-items:center">
+      <span class="muted">Claude session</span>
+      <code id="tSessionId" style="user-select:all"></code>
+      <button class="small ghost" id="copyResumeBtn" onclick="copyResumeCommand()">Copy resume cmd</button>
+      <span class="muted" id="tSessionWorker"></span>
+    </div>
     <div class="row owner-only">
       <button onclick="saveTicket()">Save</button>
       <button class="ghost" id="runBtn" onclick="runTicket()">Run on agent now</button>
@@ -926,6 +935,16 @@ function openTicketModal(id) {
       `commit gate: ${gate.requirements_met ? "met" : "not met"}</span>` +
       (gate.summary ? ` ${esc(gate.summary)}` : "");
   }
+  // No session yet (the ticket has never been claimed) means nothing to take
+  // over, so the whole row goes rather than offering a dead button.
+  const resumeCmd = editingTicket && editingTicket.resume_command;
+  document.getElementById("tSessionRow").style.display = resumeCmd ? "" : "none";
+  if (resumeCmd) {
+    document.getElementById("tSessionId").textContent = editingTicket.session_id;
+    const owner = editingTicket.session_worker;
+    document.getElementById("tSessionWorker").textContent =
+      owner ? `run it on ${owner}` : "";
+  }
   document.getElementById("delBtn").style.display = editingTicket ? "" : "none";
   document.getElementById("runBtn").style.display = editingTicket ? "" : "none";
   document.getElementById("killBtn").style.display = editingTicket && editingTicket.status === "doing" ? "" : "none";
@@ -1031,6 +1050,21 @@ async function deleteTicket() {
   if (!editingTicket || !confirm("Delete ticket #" + editingTicket.id + "?")) return;
   await api("DELETE", `./api/tickets/${editingTicket.id}`);
   closeTicketModal(); loadBoard();
+}
+async function copyResumeCommand() {
+  // The string is built server-side (app.main.build_resume_command) so its
+  // fallbacks stay unit-tested; this only moves it to the clipboard.
+  const cmd = editingTicket && editingTicket.resume_command;
+  if (!cmd) return;
+  try {
+    await navigator.clipboard.writeText(cmd);
+    toast("Copied resume command");
+  } catch (e) {
+    // Denied permission, or a non-secure context: show it so it can still be
+    // copied by hand rather than leaving the click looking like a no-op.
+    document.getElementById("tSessionId").textContent = cmd;
+    toast("Copy failed — select the command and copy it");
+  }
 }
 async function killTicket(id) {
   if (!confirm("Kill this ticket's running agent?")) return;
