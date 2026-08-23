@@ -76,7 +76,11 @@ def test_ticket_with_unmet_dependency_is_never_claimable():
     assert _deps_met_row(conn, 1) == []
 
 
-def test_ticket_becomes_claimable_the_moment_its_dependency_reaches_review_or_done():
+def test_ticket_becomes_claimable_only_when_its_dependency_is_done():
+    """Nothing short of done releases the dependent ticket: done means
+    committed and pushed, so a dependency that merely finished (and is parked
+    blocked waiting for a human to land it) has nothing the next agent could
+    fetch. Walks every non-done status this predicate could see."""
     conn = sqlite3.connect(":memory:")
     conn.executescript(
         """
@@ -86,13 +90,22 @@ def test_ticket_becomes_claimable_the_moment_its_dependency_reaches_review_or_do
         INSERT INTO ticket_deps VALUES (1, 2);
         """
     )
-    assert _deps_met_row(conn, 1) == []  # still todo: not yet claimable
-
-    conn.execute("UPDATE tickets SET status='review' WHERE id=2")
-    assert _deps_met_row(conn, 1) == [(1,)]
+    for status in ("todo", "ready", "doing", "blocked", "failed", "killed"):
+        conn.execute("UPDATE tickets SET status=? WHERE id=2", (status,))
+        assert _deps_met_row(conn, 1) == [], status
 
     conn.execute("UPDATE tickets SET status='done' WHERE id=2")
     assert _deps_met_row(conn, 1) == [(1,)]
+
+
+def test_deps_met_sql_and_the_server_agree_on_what_counts_as_met():
+    """Two copies of one rule — the claim predicate here and
+    models.DEP_MET_STATUSES on the server — so pin them to each other rather
+    than letting a future status change land in only one of them."""
+    from app.models import DEP_MET_STATUSES
+
+    assert DEP_MET_STATUSES == ("done",)
+    assert "dep.status <> 'done'" in worker.DEPS_MET_SQL
 
 
 def test_ticket_with_no_dependencies_is_unaffected():

@@ -78,13 +78,16 @@ def main() -> int:
             worker_mod.add_progress(conn, wids[0], "smoke-pc-a", t["id"], "smoke progress 50%")
         print("progress comment inserted")
 
-        # -- finish -> review --
+        # -- finish -> done (pushed) --
+        # `pushed=True` is what a real slot passes only after `git push`
+        # returned 0; a smoke run has no repo, so it says so explicitly rather
+        # than leaning on the default (which would park the ticket blocked).
         with psycopg.connect(dsns[0], connect_timeout=15) as conn:
             status = worker_mod.finish_work(conn, wids[0], "smoke-pc-a",
                                             work["assignment_id"], t["id"],
-                                            True, "smoke result")
-        assert status == "review", status
-        print("result recorded; ticket -> review")
+                                            True, "smoke result", pushed=True)
+        assert status == "done", status
+        print("result recorded; ticket -> done")
 
         # -- worker role must NOT see auth tables --
         with psycopg.connect(dsns[0]) as conn, conn.cursor() as cur:

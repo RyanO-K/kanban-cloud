@@ -2,8 +2,8 @@
 
 The local tool stores one JSON file per ticket in a board folder. Its status
 vocabulary is todo/ready/in_progress/blocked/pending/completed; ours is
-todo/ready/doing/review/done/failed. Local tickets also carry plan and audit
-fields we have no column for.
+todo/ready/doing/blocked/done/failed/killed. Local tickets also carry plan and
+audit fields we have no column for.
 
 Everything here is pure: no database, no request, no filesystem. The browser
 does the file reading (the server cannot see the operator's disk) and posts a
@@ -20,8 +20,15 @@ MAX_IMPORT_TICKETS = 500
 # Local vocabulary -> cloud vocabulary. Statuses already in TICKET_STATUSES pass
 # through untouched, so only the genuinely local names need an entry.
 #
-# 'blocked' has no cloud equivalent and lands in todo; render_body() always
-# states the original local status, so the demotion is visible rather than lost.
+# A local 'blocked' is blocked on something in the *local* tool that came along
+# with none of its context, so it lands in todo rather than in our blocked
+# column, which means "a cloud agent or worker needs a human here".
+# 'review' is not a local status but was a cloud one until ticket #20 removed
+# it, so a board exported before then can still carry it: it maps to done, the
+# same way app/db.py's migration rewrote the rows that already had it. Without
+# this entry the pass-through below would drop it to todo, silently reopening
+# finished work. render_body() always states the original local status, so
+# either translation is visible on the imported ticket rather than lost.
 STATUS_MAP = {
     "todo": "todo",
     "pending": "todo",
@@ -29,6 +36,7 @@ STATUS_MAP = {
     "ready": "ready",
     "in_progress": "doing",
     "completed": "done",
+    "review": "done",
 }
 
 DEFAULT_BOARD_NAME = "Imported board"

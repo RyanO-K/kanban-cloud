@@ -196,7 +196,7 @@ def test_run_slot_raises_a_question_instead_of_finishing(monkeypatch, tmp_path):
     monkeypatch.setattr(worker, "raise_question",
                         lambda *a, **k: calls["blocked"].append(a) or "blocked")
     monkeypatch.setattr(worker, "finish_work",
-                        lambda *a, **k: calls["finished"].append(a) or "review")
+                        lambda *a, **k: calls["finished"].append(a) or "done")
     monkeypatch.setattr(worker, "resolve_directory", lambda board, cfg: ("/tmp/x", None))
     monkeypatch.setattr(worker.psycopg, "connect", _fake_connect())
     monkeypatch.setattr(worker, "claim_next", fake_claim)
@@ -231,7 +231,7 @@ def test_run_slot_treats_a_normal_completion_as_before(monkeypatch, tmp_path):
     monkeypatch.setattr(worker, "raise_question",
                         lambda *a, **k: calls["blocked"].append(a) or "blocked")
     monkeypatch.setattr(worker, "finish_work",
-                        lambda *a, **k: calls["finished"].append(a) or "review")
+                        lambda *a, **k: calls["finished"].append(a) or "done")
     monkeypatch.setattr(worker, "resolve_directory", lambda board, cfg: ("/tmp/x", None))
     monkeypatch.setattr(worker.psycopg, "connect", _fake_connect())
     monkeypatch.setattr(worker, "claim_next", fake_claim)
@@ -274,7 +274,7 @@ def test_slot_claims_again_after_a_question_is_raised(monkeypatch, tmp_path):
     monkeypatch.setattr(worker, "raise_question",
                         lambda *a, **k: blocked_calls.append(a[4]) or "blocked")
     monkeypatch.setattr(worker, "finish_work",
-                        lambda *a, **k: finished_calls.append(a[4]) or "review")
+                        lambda *a, **k: finished_calls.append(a[4]) or "done")
     monkeypatch.setattr(worker, "resolve_directory", lambda board, cfg: ("/tmp/x", None))
     monkeypatch.setattr(worker.psycopg, "connect", _fake_connect())
     monkeypatch.setattr(worker, "claim_next", fake_claim)

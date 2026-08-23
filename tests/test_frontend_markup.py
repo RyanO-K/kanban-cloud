@@ -171,9 +171,48 @@ def test_kill_button_only_shown_for_in_progress_tickets(markup):
     assert 'killTicket(' in markup
 
 
-def test_killed_is_a_board_column_and_ticket_status_option(markup):
-    assert '"killed"' in markup
+def test_killed_is_still_a_ticket_status_option(markup):
+    """It lost its own column in the five-column rework (it shows in Blocked)
+    but a human must still be able to set it by hand."""
     assert '<option value="killed">killed</option>' in markup
+
+
+# ---------- five columns (ticket #20) ----------
+
+def test_board_renders_the_five_columns_in_order(markup):
+    cols = markup[markup.index("const COLS = ["):]
+    cols = cols[:cols.index("];")]
+    for key, label in (("todo", "TODO"), ("ready", "Ready"), ("doing", "In progress"),
+                       ("blocked", "Blocked"), ("done", "Done")):
+        assert f'key: "{key}", label: "{label}"' in cols, key
+    assert cols.index('"todo"') < cols.index('"done"')
+
+
+def test_blocked_column_carries_failed_and_killed(markup):
+    """The browser's copy of models.BOARD_COLUMNS — the two have to agree or
+    a card lands in a column the server will not reorder."""
+    cols = markup[markup.index("const COLS = ["):]
+    cols = cols[:cols.index("];")]
+    assert 'statuses: ["blocked", "failed", "killed"]' in cols
+
+
+def test_review_is_gone_from_the_ui(markup):
+    assert '<option value="review">' not in markup
+    assert "review/done" not in markup  # the old dependency-picker hint
+
+
+def test_a_card_whose_status_is_not_its_column_says_which(markup):
+    """failed/killed share the Blocked column, so the card has to name the
+    status or the two become indistinguishable."""
+    assert "t.status !== col.key" in markup
+
+
+def test_drops_and_reorders_address_a_column_not_a_status(markup):
+    assert "dropTicket(event,'${col.key}')" in markup
+    body = markup[markup.index("async function dropOnCard"):]
+    body = body[:body.index("\n}\n")]
+    assert "colOf(target.status)" in body
+    assert "status: col.key" in body
 
 
 # ---------- live agent output + chat ----------

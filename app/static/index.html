@@ -155,9 +155,8 @@
       <option value="todo">todo</option>
       <option value="ready">ready (queue for agent)</option>
       <option value="doing">doing</option>
-      <option value="blocked">blocked (waiting on a human answer)</option>
-      <option value="review">review</option>
-      <option value="done">done</option>
+      <option value="blocked">blocked (needs a human)</option>
+      <option value="done">done (committed and pushed)</option>
       <option value="failed">failed</option>
       <option value="killed">killed</option>
     </select>
@@ -165,7 +164,7 @@
     <select id="tTarget"><option value="">any worker</option></select>
     <label>Agent profile <span class="muted" style="font-weight:normal">(overrides the board's default)</span></label>
     <select id="tProfile"><option value="">board default</option></select>
-    <label>Depends on <span class="muted" style="font-weight:normal">(ctrl/cmd-click to select several; must all reach review/done before this ticket is claimed)</span></label>
+    <label>Depends on <span class="muted" style="font-weight:normal">(ctrl/cmd-click to select several; must all reach done before this ticket is claimed)</span></label>
     <select id="tDeps" multiple size="4"></select>
     <div id="tBlockedNote" class="badge blocked" style="display:none; margin-top:4px">Blocked — waiting on dependencies</div>
     <div id="tCommitGate" style="display:none; margin-top:4px; font-size:12px"></div>
@@ -310,7 +309,7 @@
   </div>
 </div>
 
-<!-- notification bell: blocked tickets awaiting a human answer -->
+<!-- notification bell: blocked tickets, whether or not they carry a question -->
 <div class="overlay" id="blockedOverlay" onclick="if(event.target===this) this.classList.remove('show')">
   <div class="modal">
     <h2>Needs your attention</h2>
@@ -325,7 +324,25 @@
 <div id="toast"></div>
 
 <script>
-const COLS = ["todo", "ready", "doing", "blocked", "review", "done", "failed", "killed"];
+// The five board columns and the statuses each one shows — the browser's copy
+// of models.BOARD_COLUMNS. A column is a display grouping, not a status:
+// failed and killed remain distinct statuses (the retry/kill machinery needs
+// them) but read to a human exactly as blocked does — this one needs you — so
+// they share the Blocked column and the card carries a badge saying which.
+// `key` is what a drop sets the status to, and what the reorder endpoint
+// expands back into the column's statuses.
+const COLS = [
+  {key: "todo", label: "TODO", statuses: ["todo"]},
+  {key: "ready", label: "Ready", statuses: ["ready"]},
+  {key: "doing", label: "In progress", statuses: ["doing"]},
+  {key: "blocked", label: "Blocked", statuses: ["blocked", "failed", "killed"]},
+  {key: "done", label: "Done", statuses: ["done"]},
+];
+// The column a status belongs to. Falls back to Blocked for anything
+// unrecognised so a ticket can never become invisible on the board.
+function colOf(status) {
+  return COLS.find(c => c.statuses.includes(status)) || COLS[3];
+}
 let token = localStorage.getItem("kc_token") || null;
 let clusters = [], boards = [], tickets = [], workers = [], profiles = [];
 let editingProfile = null;
@@ -814,32 +831,37 @@ async function loadBoard() {
   tickets = await api("GET", `./api/boards/${currentBoard.id}/tickets`);
   const el = document.getElementById("board");
   el.innerHTML = COLS.map(col => {
-    const cards = tickets.filter(t => t.status === col).map(t => `
+    const inCol = tickets.filter(t => col.statuses.includes(t.status));
+    const cards = inCol.map(t => `
       <div class="card" onclick="openTicketModal(${t.id})" draggable="${sessionMode !== "spectator"}"
            ondragstart="event.dataTransfer.setData('text/plain','${t.id}')"
            ondragover="event.preventDefault(); event.stopPropagation()"
            ondrop="dropOnCard(event,${t.id})">
         <div class="tid">#${t.id}${t.target_worker ? " → " + esc(workerName(t.target_worker)) : ""}</div>
         <div>${esc(t.title)}</div>
-        ${t.blocked ? `<span class="badge blocked">blocked</span>` : ""}
+        ${t.status !== col.key ? `<span class="badge blocked">${t.status}</span>` : ""}
+        ${t.blocked ? `<span class="badge blocked">waiting on deps</span>` : ""}
         ${t.assigned_worker && (t.status === "doing") ? `<span class="badge">on ${esc(workerName(t.assigned_worker))}</span>` : ""}
         ${t.comments.length ? `<span class="badge">${t.comments.length} 💬</span>` : ""}
         ${t.status === "doing" ? `<div><button class="small ghost owner-only" style="color:var(--bad); border-color:var(--bad); margin-top:4px" onclick="event.stopPropagation(); killTicket(${t.id})">Kill</button></div>` : ""}
       </div>`).join("");
-    return `<div class="col" ondragover="event.preventDefault()" ondrop="dropTicket(event,'${col}')">
-      <h3><span>${col}</span><span>${tickets.filter(t => t.status === col).length}</span></h3>${cards}</div>`;
+    return `<div class="col" ondragover="event.preventDefault()" ondrop="dropTicket(event,'${col.key}')">
+      <h3><span>${col.label}</span><span>${inCol.length}</span></h3>${cards}</div>`;
   }).join("");
   syncRoute();
 }
 
-async function dropTicket(ev, col) {
+// `colKey` is a column, so a drop into Blocked sets the plain `blocked`
+// status: dragging a failed or killed card there by hand is a human saying
+// "this is now just something I need to deal with", not a retry.
+async function dropTicket(ev, colKey) {
   // A dropped folder bubbles to the dropZone handler, which imports it.
   if (isFileDrag(ev)) return;
   ev.preventDefault();
   if (sessionMode === "spectator") return;
   const id = ev.dataTransfer.getData("text/plain");
-  await api("PATCH", `./api/tickets/${id}`, {status: col});
-  if (col === "ready") toast("Queued for agent");
+  await api("PATCH", `./api/tickets/${id}`, {status: colKey});
+  if (colKey === "ready") toast("Queued for agent");
   loadBoard(); loadQueue();
 }
 
@@ -854,14 +876,18 @@ async function dropOnCard(ev, targetId) {
   const target = tickets.find(t => t.id === targetId);
   const dragged = tickets.find(t => t.id === id);
   if (!target || !dragged || id === targetId) return;
-  const col = target.status;
-  if (dragged.status !== col) {
-    await api("PATCH", `./api/tickets/${id}`, {status: col});
+  // Order is per column, not per status: dropping onto a `failed` card inside
+  // Blocked ranks the dragged card within everything that column shows, and
+  // the reorder endpoint expands the key back into those statuses.
+  const col = colOf(target.status);
+  const moved = !col.statuses.includes(dragged.status);
+  if (moved) {
+    await api("PATCH", `./api/tickets/${id}`, {status: col.key});
   }
-  const ids = tickets.filter(t => t.status === col && t.id !== id).map(t => t.id);
+  const ids = tickets.filter(t => col.statuses.includes(t.status) && t.id !== id).map(t => t.id);
   ids.splice(ids.indexOf(targetId), 0, id);
-  await api("PATCH", `./api/boards/${currentBoard.id}/reorder`, {status: col, ticket_ids: ids});
-  if (col === "ready" && dragged.status !== col) toast("Queued for agent");
+  await api("PATCH", `./api/boards/${currentBoard.id}/reorder`, {status: col.key, ticket_ids: ids});
+  if (col.key === "ready" && moved) toast("Queued for agent");
   loadBoard(); loadQueue();
 }
 
@@ -1082,7 +1108,7 @@ async function loadQueue() {
     : "No delegations yet.";
 }
 
-// ---------- notification bell: blocked tickets awaiting a human answer ----------
+// ---------- notification bell: blocked tickets waiting on a human ----------
 let blockedTickets = [];
 async function loadBlocked() {
   if (!currentCluster || sessionMode === "spectator") return;
@@ -1101,7 +1127,11 @@ function openBlockedModal() {
 function renderBlockedList() {
   document.getElementById("blockedList").innerHTML = blockedTickets.length ? blockedTickets.map(b => {
     const q = b.question;
-    if (!q) return `<div class="comment"><b>#${b.ticket_id}</b> ${esc(b.title)}</div>`;
+    // No question: the agent finished without landing its work on the remote
+    // (or a human parked it here). Nothing to answer — say so rather than
+    // showing a bare line that looks like a rendering bug.
+    if (!q) return `<div class="comment"><b>#${b.ticket_id}</b> ${esc(b.title)}
+      <span class="muted">— needs a human; open the ticket</span></div>`;
     const field = (q.type === "choice" && q.options && q.options.length)
       ? `<select id="ans_${q.id}" ${q.multi ? "multiple" : ""}>${q.options.map(o => `<option value="${esc(o)}">${esc(o)}</option>`).join("")}</select>`
       : `<input id="ans_${q.id}" placeholder="Answer">`;

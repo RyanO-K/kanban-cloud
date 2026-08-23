@@ -50,13 +50,17 @@ DEMO_TICKETS: list[tuple[str, str, str, str | None, str | None]] = [
         "claude-sonnet",
         "Transforms only touch the GPU; slides land at 180ms. Suite green.",
     ),
+    # The Blocked column's showcase card: a run that finished but never landed
+    # its branch, which is what stops a ticket short of done.
     (
-        "review",
+        "blocked",
         "Performance tab CPU rollup",
         "Rolled each Claude session's subprocess-tree CPU/memory into a live "
         "5-minute graph on the Performance tab, with a whole-tree kill button.",
         "claude-haiku",
-        "Rolled up subprocess CPU over a 5-min window. psutil path ok.",
+        "Rolled up subprocess CPU over a 5-min window. psutil path ok.\n\n"
+        "(Not pushed: auto-push is off for this board, so the branch is only "
+        "on the worker PC. Push it by hand to close the ticket.)",
     ),
     (
         "doing",

@@ -144,6 +144,20 @@ def test_blocked_endpoint_omits_resolved_tickets(client, user, cluster):
     assert r.json() == []
 
 
+def test_blocked_endpoint_lists_a_ticket_with_no_question(client, user, cluster):
+    """Since the five-column rework a ticket also lands blocked when its run
+    finished without pushing — no question to answer, but still a ticket
+    waiting on a human, so the bell has to count it."""
+    t = make_ticket(client, user, cluster["board_id"])
+    client.patch(f"/api/tickets/{t['id']}", json={"status": "blocked"},
+                 headers=user["headers"])
+
+    rows = client.get(f"/api/clusters/{cluster['id']}/blocked",
+                      headers=user["headers"]).json()
+    assert [row["ticket_id"] for row in rows] == [t["id"]]
+    assert rows[0]["question"] is None
+
+
 def test_an_ordinary_ready_delegation_is_not_flagged_resume(client, user, cluster):
     """Only an unblock-requeue sets resume=True; a plain move-to-ready must
     start the agent fresh, same as before this feature existed."""

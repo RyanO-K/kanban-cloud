@@ -47,8 +47,8 @@ def test_cluster_scoping_blocks_outsiders(client, user, cluster):
 
 
 def test_create_ticket_honors_requested_status(client, user, cluster):
-    t = make_ticket(client, user, cluster["board_id"], title="Started elsewhere", status="review")
-    assert t["status"] == "review"
+    t = make_ticket(client, user, cluster["board_id"], title="Started elsewhere", status="doing")
+    assert t["status"] == "doing"
 
     t2 = make_ticket(client, user, cluster["board_id"], title="Queue me", status="ready")
     assert t2["status"] == "ready"

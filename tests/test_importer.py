@@ -21,8 +21,17 @@ def test_map_status_local_vocabulary():
 
 def test_map_status_passes_through_cloud_vocabulary():
     """The live trump-market-impact board already has tickets in 'done'."""
-    for status in ("todo", "ready", "doing", "review", "done", "failed"):
+    for status in ("todo", "ready", "doing", "done", "failed", "killed"):
         assert importer.map_status(status) == status
+
+
+def test_map_status_folds_the_retired_review_status_into_done():
+    """`review` was a cloud status until the five-column rework; a board
+    exported before then can still carry it. It must land where app/db.py's
+    migration put the rows that already had it, not fall through the
+    unknown-status default and silently reopen finished work."""
+    assert "review" not in importer.TICKET_STATUSES
+    assert importer.map_status("review") == "done"
 
 
 def test_map_status_defaults_unknown_to_todo():

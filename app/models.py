@@ -4,12 +4,18 @@ Status vocabulary (borrowed/adapted from the local .kanban tool):
   todo    - backlog
   ready   - queued for an agent (all prerequisites met; enqueued in work_queue)
   doing   - claimed / in progress (worker or human)
-  blocked - agent raised a question and is parked awaiting a human answer
-  review  - agent finished, awaiting human review
-  done    - completed
+  blocked - needs a human: the agent raised a question, or it finished without
+            landing its work on the remote (see worker.finish_work)
+  done    - committed and pushed. Nothing else counts: work sitting on one
+            worker PC's disk is not done, it is waiting on somebody.
   failed  - agent gave up after max attempts
   killed  - owner terminated a running attempt; distinct from failed, so it
             does not consume a retry attempt
+
+There is no `review` status: it used to mean "the agent finished, now look at
+it", which is precisely what blocked-without-a-push means today, so it was
+folded into blocked (ticket #20; see app/db.py's _REMOVED_TICKET_STATUSES for
+what happened to the rows that had it).
 """
 import datetime
 import secrets
@@ -27,9 +33,32 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-TICKET_STATUSES = ["todo", "ready", "doing", "blocked", "review", "done", "failed", "killed"]
+TICKET_STATUSES = ["todo", "ready", "doing", "blocked", "done", "failed", "killed"]
 # Moving a ticket into this status queues it for an agent.
 AGENT_READY_STATUS = "ready"
+
+# The board's five columns, in display order, and the statuses each one holds.
+# A column is a grouping, not a status: `failed` and `killed` stay distinct
+# statuses because the retry and kill machinery reads them (a kill must not
+# burn a retry attempt), but to a human all three mean the same thing — this
+# one needs you — so they share the Blocked column and the card says which.
+# The UI renders from its own copy of this (COLS in app/static/index.html);
+# the server needs it because a drag reorder is per column, not per status.
+BOARD_COLUMNS = [
+    ("todo", "TODO", ("todo",)),
+    ("ready", "Ready", ("ready",)),
+    ("doing", "In progress", ("doing",)),
+    ("blocked", "Blocked", ("blocked", "failed", "killed")),
+    ("done", "Done", ("done",)),
+]
+COLUMN_STATUSES = {key: statuses for key, _label, statuses in BOARD_COLUMNS}
+
+
+def column_statuses(column: str) -> tuple[str, ...]:
+    """The statuses a column holds. An unknown key is treated as a bare status
+    so a caller that still speaks in statuses (an older browser tab mid-deploy,
+    a script) keeps working instead of silently addressing an empty column."""
+    return COLUMN_STATUSES.get(column, (column,))
 MAX_ATTEMPTS = 2  # keep in sync with worker.py MAX_ATTEMPTS
 WORKER_ONLINE_SECONDS = 30
 
@@ -243,10 +272,12 @@ class TicketDep(Base):
     depends_on_id: Mapped[int] = mapped_column(ForeignKey("tickets.id"), nullable=False)
 
 
-# A dependency is satisfied once the prerequisite ticket reaches either of
-# these statuses. Keep in sync with worker.py's CLAIM_SQL, which encodes the
-# same rule directly in the claim predicate (see DEPS_MET_SQL there).
-DEP_MET_STATUSES = ("done", "review")
+# A dependency is satisfied only once the prerequisite ticket is done — which
+# now means committed and pushed, so a dependent ticket's agent can actually
+# fetch the work it was waiting for rather than racing a branch that only
+# exists on some other PC's disk. Keep in sync with worker.py's CLAIM_SQL,
+# which encodes the same rule directly in the claim predicate (DEPS_MET_SQL).
+DEP_MET_STATUSES = ("done",)
 
 
 class Comment(Base):

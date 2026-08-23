@@ -151,7 +151,7 @@ def test_slots_run_concurrently_and_never_exceed_the_limit(monkeypatch, tmp_path
 
     monkeypatch.setattr(worker.psycopg, "connect", _fake_connect())
     monkeypatch.setattr(worker, "claim_next", fake_claim)
-    monkeypatch.setattr(worker, "finish_work", lambda *a, **k: "review")
+    monkeypatch.setattr(worker, "finish_work", lambda *a, **k: "done")
     monkeypatch.setattr(worker, "set_slot_counts", lambda *a, **k: None)
     monkeypatch.setattr(worker, "heartbeat", lambda *a, **k: None)
 
@@ -194,7 +194,7 @@ def test_running_count_returns_to_zero(monkeypatch, tmp_path):
 
     monkeypatch.setattr(worker.psycopg, "connect", _fake_connect())
     monkeypatch.setattr(worker, "claim_next", fake_claim)
-    monkeypatch.setattr(worker, "finish_work", lambda *a, **k: "review")
+    monkeypatch.setattr(worker, "finish_work", lambda *a, **k: "done")
     cfg = {"dsn": "x", "worker_id": 1, "cluster_id": 1, "name": "pc",
            "boards": {"1": str(tmp_path)}}
     args = worker.build_parser().parse_args(["--poll", "0.01", "--once"])
@@ -290,7 +290,7 @@ def test_real_slots_auto_clone_when_no_set_path_is_configured(monkeypatch, tmp_p
 
     monkeypatch.setattr(worker.psycopg, "connect", _fake_connect())
     monkeypatch.setattr(worker, "claim_next", fake_claim)
-    monkeypatch.setattr(worker, "finish_work", lambda *a, **k: "review")
+    monkeypatch.setattr(worker, "finish_work", lambda *a, **k: "done")
     monkeypatch.setattr(worker, "resolve_directory",
                         lambda board, cfg: (str(tmp_path / "cloned"), None))
 
@@ -319,8 +319,9 @@ def test_resolve_error_skips_the_executor_entirely(monkeypatch, tmp_path):
             raise AssertionError("executor.run must not be called")
 
     def fake_finish(conn, wname, wid, item_id, ticket_id, ok, comment, killed=False,
-                    commit_gate=None):
+                    commit_gate=None, pushed=False):
         finished["ok"], finished["comment"], finished["killed"] = ok, comment, killed
+        finished["pushed"] = pushed
         return "failed"
 
     monkeypatch.setattr(worker.psycopg, "connect", _fake_connect())
@@ -355,8 +356,9 @@ def test_run_slot_reports_a_kill_as_the_distinct_status(monkeypatch, tmp_path):
             raise worker.KilledByRequest("Killed by request.")
 
     def fake_finish(conn, wid, wname, item_id, ticket_id, ok, comment, killed=False,
-                    commit_gate=None):
+                    commit_gate=None, pushed=False):
         finished["ok"], finished["comment"], finished["killed"] = ok, comment, killed
+        finished["pushed"] = pushed
         return "killed"
 
     monkeypatch.setattr(worker.psycopg, "connect", _fake_connect())
@@ -398,7 +400,7 @@ def test_run_slot_passes_a_live_kill_check_into_the_executor(monkeypatch, tmp_pa
 
     monkeypatch.setattr(worker.psycopg, "connect", _fake_connect())
     monkeypatch.setattr(worker, "claim_next", fake_claim)
-    monkeypatch.setattr(worker, "finish_work", lambda *a, **k: "review")
+    monkeypatch.setattr(worker, "finish_work", lambda *a, **k: "done")
     monkeypatch.setattr(worker, "resolve_directory",
                         lambda board, cfg: (str(tmp_path), None))
     monkeypatch.setattr(worker, "kill_requested",
@@ -426,7 +428,7 @@ def test_stub_slots_never_call_resolve_directory(monkeypatch, tmp_path):
 
     monkeypatch.setattr(worker.psycopg, "connect", _fake_connect())
     monkeypatch.setattr(worker, "claim_next", fake_claim)
-    monkeypatch.setattr(worker, "finish_work", lambda *a, **k: "review")
+    monkeypatch.setattr(worker, "finish_work", lambda *a, **k: "done")
     monkeypatch.setattr(worker, "resolve_directory", boom)
 
     cfg = {"dsn": "x", "worker_id": 1, "cluster_id": 1, "name": "pc"}

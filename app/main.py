@@ -42,6 +42,7 @@ from .models import (
     User,
     WorkItem,
     Worker,
+    column_statuses,
     new_token,
     utcnow,
 )
@@ -169,7 +170,16 @@ class TicketPatch(BaseModel):
 
 
 class ReorderBody(BaseModel):
-    """New drag order for every ticket in one status column of one board."""
+    """New drag order for every ticket in one column of one board.
+
+    `status` is a column key (models.BOARD_COLUMNS), which for four of the five
+    columns is also a status — but the Blocked column holds blocked/failed/
+    killed together, and a human dragging cards around inside it is ordering
+    the column they see, not each status separately. Kept as `status` rather
+    than renamed: the field is part of the wire format an already-loaded
+    browser tab is still using, and column_statuses() reads a bare status as
+    itself anyway.
+    """
     status: str
     ticket_ids: list[int]
 
@@ -761,8 +771,14 @@ def create_app(
     def blocked_tickets(
         cluster_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)
     ):
-        """Every blocked ticket in the cluster with its open question,
-        across all boards — what the notification bell polls."""
+        """Every blocked ticket in the cluster with its open question, across
+        all boards — what the notification bell polls.
+
+        `question` is None for a ticket parked blocked by something other than
+        an escalation (an agent that finished without landing its work on the
+        remote — see worker.finish_work): still a ticket waiting on a human,
+        still worth the bell, just with nothing to answer.
+        """
         require_member(db, user, cluster_id)
         board_ids = db.scalars(
             select(Board.id).where(Board.cluster_id == cluster_id)
@@ -1075,11 +1091,14 @@ def create_app(
         db: Session = Depends(get_db),
     ):
         """Persist a drag reorder: `ticket_ids` is the full new top-to-bottom
-        order of one status column. Reindexed as 0..n-1 so ties among
-        never-dragged tickets elsewhere on the board are unaffected."""
+        order of one column. Reindexed as 0..n-1 so ties among never-dragged
+        tickets elsewhere on the board are unaffected."""
         board = board_for_user(db, user, board_id)
         column = db.scalars(
-            select(Ticket).where(Ticket.board_id == board.id, Ticket.status == body.status)
+            select(Ticket).where(
+                Ticket.board_id == board.id,
+                Ticket.status.in_(column_statuses(body.status)),
+            )
         ).all()
         by_id = {t.id: t for t in column}
         if set(body.ticket_ids) != set(by_id):

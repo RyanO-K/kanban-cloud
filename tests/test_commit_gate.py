@@ -111,7 +111,7 @@ def _run_slot_once(monkeypatch, tmp_path, board, comment, push_calls, finished):
 
     def fake_push(directory, branch):
         push_calls.append((directory, branch))
-        return "\n\n(Pushed branch `5-my-ticket` to origin.)"
+        return True, "\n\n(Pushed branch `5-my-ticket` to origin.)"
 
     monkeypatch.setattr(worker, "push_ticket_branch", fake_push)
 
@@ -124,10 +124,11 @@ def _run_slot_once(monkeypatch, tmp_path, board, comment, push_calls, finished):
         return {"assignment_id": 1, "session_id": "sid", "board": board, "ticket": ticket}
 
     def fake_finish_work(conn, worker_id, worker_name, item_id, ticket_id, ok, comment,
-                         killed=False, commit_gate=None):
+                         killed=False, commit_gate=None, pushed=False):
         finished["comment"] = comment
         finished["commit_gate"] = commit_gate
-        return "review"
+        finished["pushed"] = pushed
+        return "done" if pushed else "blocked"
 
     class FakeConn:
         closed = False
@@ -156,6 +157,8 @@ def test_gate_reporting_unmet_requirements_does_not_push(monkeypatch, tmp_path):
     assert finished["commit_gate"] == {"requirements_met": False,
                                        "summary": "Two tests still fail."}
     assert "Not pushed" in finished["comment"]
+    # Nothing landed, so the ticket is not done - it goes to a human.
+    assert finished["pushed"] is False
 
 
 def test_gate_reporting_met_requirements_pushes(monkeypatch, tmp_path):
@@ -166,6 +169,7 @@ def test_gate_reporting_met_requirements_pushes(monkeypatch, tmp_path):
     assert push_calls == [("/repo", "5-my-ticket")]
     assert finished["commit_gate"] == {"requirements_met": True, "summary": "Ran the suite."}
     assert "Pushed branch" in finished["comment"]
+    assert finished["pushed"] is True
 
 
 def test_missing_gate_is_treated_as_unmet_when_requirements_exist(monkeypatch, tmp_path):
@@ -179,7 +183,9 @@ def test_missing_gate_is_treated_as_unmet_when_requirements_exist(monkeypatch, t
 
 
 def test_auto_push_off_never_pushes_even_with_a_met_gate(monkeypatch, tmp_path):
-    """auto_push is opt-in per board — a met gate alone is not enough."""
+    """auto_push is opt-in per board — a met gate alone is not enough. The
+    gate verdict is still recorded, and the run still ends up short of done:
+    a board that does not auto-push needs a human to land every ticket."""
     board = {**BOARD_WITH_GATE, "auto_push": False}
     comment = (f'All green.\n\n{COMMIT_GATE_MARKER} '
               '{"requirements_met": true, "summary": "Ran the suite."}')
@@ -187,6 +193,7 @@ def test_auto_push_off_never_pushes_even_with_a_met_gate(monkeypatch, tmp_path):
     _run_slot_once(monkeypatch, tmp_path, board, comment, push_calls, finished)
     assert push_calls == []
     assert finished["commit_gate"] == {"requirements_met": True, "summary": "Ran the suite."}
+    assert finished["pushed"] is False
 
 
 def test_no_commit_requirements_pushes_without_needing_a_gate(monkeypatch, tmp_path):

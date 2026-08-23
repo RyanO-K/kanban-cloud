@@ -91,6 +91,16 @@ _PHASE7_COLUMNS = [
     ("work_queue", "resume BOOLEAN NOT NULL DEFAULT FALSE"),
 ]
 
+# Statuses dropped from models.TICKET_STATUSES, and what an existing row that
+# still carries one becomes (ticket #20's five-column rework). `review` meant
+# "the agent finished, a human should look at it" — every ticket that reached
+# it had, by the old flow's own definition, a completed run behind it, so they
+# land in `done` rather than being demoted into a column they were never in.
+# A row left with a status no longer in TICKET_STATUSES is not merely untidy:
+# it would render in no column at all and could not be dragged out of that
+# state, since the API rejects the status it would have to be read back as.
+_REMOVED_TICKET_STATUSES = {"review": "done"}
+
 
 def resolve_db_url(db_url: str | None = None) -> str:
     url = db_url or os.environ.get("DATABASE_URL") or DEFAULT_SQLITE_URL
@@ -148,6 +158,7 @@ def run_migrations(engine) -> None:
         ))
     _add_missing_columns(engine)
     _backfill_cluster_settings(engine)
+    _migrate_removed_statuses(engine)
 
 
 def _migrate_sqlite_workers(engine) -> None:
@@ -203,6 +214,25 @@ def _add_missing_columns(engine) -> None:
             if column in {c["name"] for c in insp.get_columns(table)}:
                 continue
             conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {ddl}"))
+
+
+def _migrate_removed_statuses(engine) -> None:
+    """Rewrite tickets still carrying a status the app no longer knows.
+
+    Same shape as _add_missing_columns: one guarded statement per entry, no
+    alembic, plain ANSI SQL so Neon and a developer's SQLite file take the
+    identical path. Idempotent because the UPDATE is keyed on the old status —
+    a second run matches nothing.
+    """
+    insp = inspect(engine)
+    if "tickets" not in set(insp.get_table_names()):
+        return
+    with engine.begin() as conn:
+        for old, new in _REMOVED_TICKET_STATUSES.items():
+            conn.execute(
+                text("UPDATE tickets SET status=:new WHERE status=:old"),
+                {"new": new, "old": old},
+            )
 
 
 def _backfill_cluster_settings(engine) -> None:

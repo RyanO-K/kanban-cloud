@@ -92,16 +92,19 @@ STALE_CLAIM_SECONDS = 300
 
 UTC_NOW = "(now() at time zone 'utc')"
 
-# A queued ticket is eligible only once every dependency it has is done or in
-# review — matching the local .kanban tool's `_dep_met_fn`. Plain ANSI SQL
-# (no Postgres-only syntax), unlike the rest of CLAIM_SQL, so it also runs
+# A queued ticket is eligible only once every dependency it has is done —
+# which since the five-column rework means committed and pushed, so the agent
+# claiming this ticket can actually fetch what it depends on instead of racing
+# a branch that exists only on some other PC's disk. Keep in sync with
+# models.DEP_MET_STATUSES, which the server uses for the same rule. Plain ANSI
+# SQL (no Postgres-only syntax), unlike the rest of CLAIM_SQL, so it also runs
 # unmodified against SQLite in tests (see tests/test_worker.py) — the two
 # places this predicate can drift apart from CLAIM_SQL are guarded by that
 # test importing this exact constant rather than re-typing it.
 DEPS_MET_SQL = """NOT EXISTS (
          SELECT 1 FROM ticket_deps td
          JOIN tickets dep ON dep.id = td.depends_on_id
-         WHERE td.ticket_id = t.id AND dep.status NOT IN ('done', 'review'))"""
+         WHERE td.ticket_id = t.id AND dep.status <> 'done')"""
 
 # Atomic, race-safe claim: SKIP LOCKED means concurrent workers never block
 # or double-claim; the subquery orders by ticket rank ahead of queue age and
@@ -859,11 +862,20 @@ def resolve_directory(board: dict, cfg: dict) -> tuple:
 # git auth and should never be something the agent's prompt has to reason
 # about. This is the "separately": after a successful run, push whatever
 # branch the agent committed so the work doesn't strand itself on this PC.
+#
+# Since the five-column rework this is also the thing that decides whether the
+# ticket is done. Everything here therefore reports back a plain boolean about
+# what git actually did, and never about what the agent claimed it did.
 
-def push_ticket_branch(directory: str, branch: str) -> str | None:
-    """Best-effort push of `branch` to origin. Returns a note to append to
-    the ticket comment, or None when there is nothing to report (no such
-    branch — the agent made no commits, e.g. a no-op ticket).
+def push_ticket_branch(directory: str, branch: str) -> tuple[bool, str | None]:
+    """Best-effort push of `branch` to origin.
+
+    Returns (pushed, note): whether the branch actually reached the remote,
+    and a line to append to the ticket comment explaining what happened. The
+    boolean is the only thing that decides whether the ticket lands in Done
+    (see finish_work), so it is deliberately narrow — it is true only when a
+    real `git push` returned 0, never on the strength of what the agent said
+    it did.
 
     Never fails the ticket: a push failure (no network, no credentials, a
     protected branch) is surfaced in the comment instead so a human can push
@@ -871,12 +883,47 @@ def push_ticket_branch(directory: str, branch: str) -> str | None:
     """
     proc = _run_git(["rev-parse", "--verify", "--quiet", branch], cwd=directory)
     if proc.returncode != 0:
-        return None
+        # No such branch: the agent committed nothing under the name both
+        # sides agreed on, so there is nothing to land.
+        return False, (
+            f"\n\n(Nothing pushed: this checkout has no branch `{branch}` — "
+            "the agent committed nothing under it.)"
+        )
     proc = _run_git(["push", "origin", branch], cwd=directory)
     if proc.returncode != 0:
         stderr = _redact_text((proc.stderr or proc.stdout).strip()[:1000])
-        return f"\n\n(Could not push branch `{branch}` to origin: {stderr})"
-    return f"\n\n(Pushed branch `{branch}` to origin.)"
+        return False, f"\n\n(Could not push branch `{branch}` to origin: {stderr})"
+    return True, f"\n\n(Pushed branch `{branch}` to origin.)"
+
+
+def resolve_push(board: dict, ticket: dict, directory: str,
+                 commit_gate: dict | None) -> tuple[bool, str | None]:
+    """Decide whether a finished run's work goes to origin, and try it.
+
+    Returns (pushed, note) exactly as push_ticket_branch does. Split out of
+    run_slot so the decision — which is now what separates a Done ticket from
+    a Blocked one — is testable on its own, without a slot, a queue and a
+    fake database around it.
+
+    Two things can veto the push before git is ever run, and both leave a note
+    saying so, because "not pushed" is no longer a quiet detail: it is why the
+    ticket is about to sit in the Blocked column waiting for a human.
+    """
+    if not board.get("auto_push"):
+        return False, (
+            "\n\n(Not pushed: auto-push is off for this board, so the branch "
+            "is only on the worker PC. Push it by hand to close the ticket.)"
+        )
+    # A board with commit_requirements refuses to push unless the agent's own
+    # gate says they were met — an unreported gate (marker missing/malformed)
+    # is treated the same as an explicit False, not as "nothing to check".
+    if board.get("commit_requirements") and not (
+            commit_gate and commit_gate["requirements_met"]):
+        return False, (
+            "\n\n(Not pushed: the commit gate did not report the board's "
+            "commit requirements were met.)"
+        )
+    return push_ticket_branch(directory, ticket_branch_name(ticket))
 
 
 def enroll(server: str, join_code: str, name: str) -> dict:
@@ -1270,21 +1317,35 @@ def mark_chat_delivered(conn, chat_ids: list) -> None:
 
 def finish_work(conn, worker_id: int, worker_name: str, item_id: int,
                 ticket_id: int, ok: bool, comment: str | None,
-                killed: bool = False, commit_gate: dict | None = None) -> str:
-    """Record the result. Mirrors v1 delegation.finish_work: success ->
-    review; failure -> requeue until MAX_ATTEMPTS then failed. A kill (owner
-    request, not a genuine failure) -> killed, with the claim-time attempt
-    charge refunded so it does not burn the ticket's retry budget, and no
-    auto-requeue (unlike a failure, restarting it is the owner's call). The
+                killed: bool = False, commit_gate: dict | None = None,
+                pushed: bool = False) -> str:
+    """Record the result.
+
+    A successful run lands the ticket in `done` only when `pushed` says its
+    branch reached origin; a run that finished but left the work on this PC
+    goes to `blocked` instead, because a human now has to do something about
+    it (push it, or find out why the agent committed nothing). That is the
+    whole of "a ticket is done when it is committed and pushed" — see
+    resolve_push for who decides `pushed`, and note the default is False: a
+    caller that cannot say the work landed must not be able to mark it done
+    by omission.
+
+    Failure -> requeue until MAX_ATTEMPTS then failed, unchanged. A kill
+    (owner request, not a genuine failure) -> killed, with the claim-time
+    attempt charge refunded so it does not burn the ticket's retry budget, and
+    no auto-requeue (unlike a failure, restarting it is the owner's call). The
     rowcount guard on the first UPDATE preserves v1's 409-on-superseded
     semantics: if the claim was superseded while we worked — including a kill
     request that lands after this ticket already finished — nothing else is
     written, so a late kill can never masquerade as a fresh failure.
 
+    The work_queue row's own status is unaffected by `pushed`: the *run* did
+    complete, and that row is the attempt log. Only the ticket moves.
+
     `commit_gate`, when given, is the agent's self-reported verdict on the
     board's commit_requirements (see app/prompt.parse_commit_gate) and is
-    recorded on tickets.commit_gate regardless of ok/killed, so a human can
-    see why a run did not push even when the run itself succeeded.
+    recorded on tickets.commit_gate regardless of ok/killed, so a human
+    opening a ticket parked in Blocked can see why it did not push.
     """
     wq_status = "done" if ok else ("killed" if killed else "failed")
     with conn.transaction(), conn.cursor() as cur:
@@ -1311,10 +1372,10 @@ def finish_work(conn, worker_id: int, worker_name: str, item_id: int,
                 (json.dumps(commit_gate), ticket_id),
             )
         if ok:
-            ticket_status = "review"
+            ticket_status = "done" if pushed else "blocked"
             cur.execute(
-                f"UPDATE tickets SET status='review', updated_at={UTC_NOW} WHERE id=%s",
-                (ticket_id,),
+                f"UPDATE tickets SET status=%s, updated_at={UTC_NOW} WHERE id=%s",
+                (ticket_status, ticket_id),
             )
         elif killed:
             ticket_status = "killed"
@@ -1723,6 +1784,11 @@ def run_slot(cfg, args, executor, stop_event, slot_no: int) -> None:
                 should_kill = lambda: kill_requested(conn, work["assignment_id"])  # noqa: E731
                 killed = False
                 commit_gate = None
+                # Nothing has reached origin until resolve_push says otherwise
+                # — a stub run, a run that never got as far as git, or an
+                # executor that raised all leave this False, which parks the
+                # ticket in Blocked rather than calling it done.
+                pushed = False
 
                 # The chat pump runs on its own thread inside executor.run()
                 # for the run's whole duration, so it gets a connection of
@@ -1776,30 +1842,12 @@ def run_slot(cfg, args, executor, stop_event, slot_no: int) -> None:
                             # push yet, and (in tests especially) `directory`
                             # may not even be a real git checkout.
                             if ok and not parse_question(comment):
-                                board = work.get("board") or {}
                                 commit_gate = parse_commit_gate(comment)
-                                # A board with commit_requirements refuses to
-                                # push unless the agent's own gate says they
-                                # were met — an unreported gate (marker
-                                # missing/malformed) is treated the same as an
-                                # explicit False, not as "nothing to check".
-                                gate_unmet = (
-                                    bool(board.get("commit_requirements"))
-                                    and not (commit_gate and commit_gate["requirements_met"])
-                                )
-                                if not board.get("auto_push"):
-                                    pass  # opt-in: this board never auto-pushes
-                                elif gate_unmet:
-                                    comment = (comment or "") + (
-                                        "\n\n(Not pushed: the commit gate did not "
-                                        "report the board's commit requirements "
-                                        "were met.)"
-                                    )
-                                else:
-                                    push_note = push_ticket_branch(
-                                        directory, ticket_branch_name(ticket))
-                                    if push_note:
-                                        comment = (comment or "") + push_note
+                                pushed, push_note = resolve_push(
+                                    work.get("board") or {}, ticket, directory,
+                                    commit_gate)
+                                if push_note:
+                                    comment = (comment or "") + push_note
                 except KilledByRequest as exc:
                     ok, comment, killed = False, str(exc), True
                 except Exception as exc:
@@ -1812,11 +1860,12 @@ def run_slot(cfg, args, executor, stop_event, slot_no: int) -> None:
                     if chat_conn is not None and not chat_conn.closed:
                         chat_conn.close()
                 # A clean (ok) run whose entire reply is the escalation marker
-                # is a question, not a completion — park it blocked instead of
-                # landing it in review. A non-zero exit is never treated as a
-                # question even if its error text happens to contain the
-                # marker (e.g. echoed back from a crashed prior attempt), and
-                # neither is a kill: the run was cut short, not concluded.
+                # is a question, not a completion — park it blocked with the
+                # question attached rather than treating it as finished work.
+                # A non-zero exit is never treated as a question even if its
+                # error text happens to contain the marker (e.g. echoed back
+                # from a crashed prior attempt), and neither is a kill: the
+                # run was cut short, not concluded.
                 question = parse_question(comment) if ok and not killed else None
                 if question:
                     status = raise_question(conn, cfg["worker_id"], cfg["name"],
@@ -1825,7 +1874,8 @@ def run_slot(cfg, args, executor, stop_event, slot_no: int) -> None:
                 else:
                     status = finish_work(conn, cfg["worker_id"], cfg["name"],
                                          work["assignment_id"], ticket["id"], ok, comment,
-                                         killed=killed, commit_gate=commit_gate)
+                                         killed=killed, commit_gate=commit_gate,
+                                         pushed=pushed)
                 print(f"[slot {slot_no}] #{ticket['id']} -> {status}")
         except psycopg.OperationalError as e:
             msg = str(e)

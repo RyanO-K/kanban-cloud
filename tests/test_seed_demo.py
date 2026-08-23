@@ -50,7 +50,8 @@ def test_seed_creates_the_demo_board(dsn):
         assert board is not None
         tickets = db.scalars(select(Ticket).where(Ticket.board_id == board.id)).all()
         assert len(tickets) == len(seed_demo.DEMO_TICKETS)
-        assert {t.status for t in tickets} == {"todo", "ready", "doing", "review", "done"}
+        # One card per column, so the demo board shows the whole board shape.
+        assert {t.status for t in tickets} == {"todo", "ready", "doing", "blocked", "done"}
         assert db.scalar(select(func.count()).select_from(Comment)) == sum(
             1 for row in seed_demo.DEMO_TICKETS if row[3]
         )

@@ -28,14 +28,22 @@ def test_unmet_dependency_reports_blocked_and_the_reverse_edge(client, user, clu
     assert by_id(rows, b["id"])["blocks"] == [a["id"]]
 
 
-def test_dependency_reaching_review_unblocks(client, user, cluster):
+def test_only_done_unblocks_a_dependency(client, user, cluster):
+    """Done means committed and pushed, and that is the whole point of the
+    gate: until B's work is on the remote, A's agent has nothing to fetch.
+    A finished-but-unlanded B sits in blocked and must not release A."""
     a = make_ticket(client, user, cluster["board_id"], title="A")
     b = make_ticket(client, user, cluster["board_id"], title="B")
     client.patch(f"/api/tickets/{a['id']}", json={"depends_on": [b["id"]]},
                  headers=user["headers"])
 
-    client.patch(f"/api/tickets/{b['id']}", json={"status": "review"}, headers=user["headers"])
+    for status in ("doing", "blocked", "failed", "killed"):
+        client.patch(f"/api/tickets/{b['id']}", json={"status": status},
+                     headers=user["headers"])
+        rows = board_tickets(client, user, cluster["board_id"])
+        assert by_id(rows, a["id"])["blocked"] is True, status
 
+    client.patch(f"/api/tickets/{b['id']}", json={"status": "done"}, headers=user["headers"])
     rows = board_tickets(client, user, cluster["board_id"])
     assert by_id(rows, a["id"])["blocked"] is False
 

@@ -340,7 +340,7 @@ def test_run_slot_starts_a_heartbeat_thread_that_stops_after(monkeypatch, tmp_pa
 
     monkeypatch.setattr(worker.psycopg, "connect", lambda dsn, **kw: FakeConn())
     monkeypatch.setattr(worker, "claim_next", fake_claim)
-    monkeypatch.setattr(worker, "finish_work", lambda *a, **k: "review")
+    monkeypatch.setattr(worker, "finish_work", lambda *a, **k: "done")
 
     cfg = {"dsn": "x", "worker_id": 1, "cluster_id": 1, "name": "pc",
           "boards": {"1": str(tmp_path)}}

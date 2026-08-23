@@ -382,3 +382,71 @@ def test_work_item_model_has_resume_column():
     from app.models import WorkItem
 
     assert "resume" in {c.name for c in WorkItem.__table__.columns}
+
+
+# ---------- retired statuses (ticket #20: the five-column rework) ----------
+
+def _seed_ticket(engine, ticket_id, status):
+    """One ticket row written straight through SQL, so a status the app no
+    longer accepts can exist in the first place."""
+    from app.models import Board, Cluster, User
+
+    with Session(engine) as db:
+        if db.get(User, 1) is None:
+            db.add(User(id=1, email="a@b.co", password_hash="x"))
+            db.add(Cluster(id=1, name="T", join_code="J", created_by=1))
+            db.add(Board(id=1, cluster_id=1, name="B"))
+            db.commit()
+    with engine.begin() as conn:
+        conn.execute(sa.text(
+            "INSERT INTO tickets (id, board_id, title, body, status, created_by,"
+            " attempts, \"order\", created_at, updated_at) VALUES"
+            " (:i, 1, 'T', '', :s, 1, 0, 0, '2020-01-01', '2020-01-01')"
+        ), {"i": ticket_id, "s": status})
+
+
+def _statuses(engine):
+    with engine.begin() as conn:
+        return dict(conn.execute(sa.text("SELECT id, status FROM tickets")).fetchall())
+
+
+def test_migration_rewrites_review_tickets_as_done(tmp_path):
+    """`review` left the vocabulary; a row still carrying it would render in
+    no column at all and could not be dragged out, since the API rejects the
+    status it would be read back as."""
+    from app.db import _REMOVED_TICKET_STATUSES
+
+    assert _REMOVED_TICKET_STATUSES == {"review": "done"}
+    engine = make_engine(f"sqlite:///{tmp_path / 'review.db'}")
+    Base.metadata.create_all(engine)
+    _seed_ticket(engine, 1, "review")
+    _seed_ticket(engine, 2, "todo")
+
+    run_migrations(engine)
+    assert _statuses(engine) == {1: "done", 2: "todo"}
+
+
+def test_removed_status_migration_is_idempotent_and_leaves_others_alone(tmp_path):
+    """Runs on every server start, so a second pass must be a no-op — and
+    must not touch a ticket a human has since moved somewhere else."""
+    engine = make_engine(f"sqlite:///{tmp_path / 'review2.db'}")
+    Base.metadata.create_all(engine)
+    _seed_ticket(engine, 1, "review")
+
+    run_migrations(engine)
+    with engine.begin() as conn:
+        conn.execute(sa.text("UPDATE tickets SET status='todo' WHERE id=1"))
+    run_migrations(engine)
+
+    assert _statuses(engine) == {1: "todo"}
+
+
+def test_every_removed_status_maps_onto_a_live_one():
+    """A mapping onto a status the app does not accept would just move the
+    problem, so pin the two lists to each other."""
+    from app.db import _REMOVED_TICKET_STATUSES
+    from app.models import TICKET_STATUSES
+
+    for old, new in _REMOVED_TICKET_STATUSES.items():
+        assert old not in TICKET_STATUSES, old
+        assert new in TICKET_STATUSES, new

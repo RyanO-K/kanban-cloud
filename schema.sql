@@ -106,9 +106,14 @@ CREATE TABLE IF NOT EXISTS workers (
     UNIQUE (cluster_id, name)
 );
 
--- status: todo | ready | doing | blocked | review | done | failed | killed
+-- status: todo | ready | doing | blocked | done | failed | killed
+-- The board shows five columns; blocked, failed and killed share the last one
+-- (see models.BOARD_COLUMNS) because all three mean "a human has to act".
 -- blocked = the agent raised a question (see ticket_questions) and released
--- its work_queue slot; answering the question auto-requeues it.
+-- its work_queue slot, and answering it auto-requeues the ticket; or the run
+-- finished without its branch reaching origin, which needs a human too.
+-- done = committed and pushed. A worker only writes it after a `git push`
+-- returned 0 (worker.py's finish_work/resolve_push).
 -- target_worker NULL = any worker in the cluster may claim.
 CREATE TABLE IF NOT EXISTS tickets (
     id              SERIAL PRIMARY KEY,
@@ -145,7 +150,8 @@ CREATE TABLE IF NOT EXISTS tickets (
 );
 
 -- Dependency edges: ticket_id is not claimable (see the CLAIM_SQL predicate
--- in worker.py) until depends_on_id reaches 'done' or 'review'. No cluster_id
+-- in worker.py) until depends_on_id reaches 'done' — i.e. until the work it
+-- depends on is actually pushed somewhere it can be fetched. No cluster_id
 -- of its own — both tickets carry one via their board, checked by the app.
 -- `blocks` (the reverse edge) is derived by querying this table by
 -- depends_on_id rather than stored.
