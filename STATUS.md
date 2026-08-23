@@ -2,6 +2,55 @@
 
 Last updated: 2026-08-23
 
+## Board UI rebuilt from the design canvas (2026-08-23)
+
+`app/static/index.html` was rewritten against the `Kanban Board.dc.html`
+design. No server change: every number on screen comes from a route that
+already existed, and `git diff` touches the one static file plus its tests.
+
+**The viewport fix, which is the point.** The shell is `height: 100vh` with
+`overflow: hidden`, so the page itself never scrolls. Every scrollbar is
+now in a named child: `.colBody` vertically, `.boardScroll` horizontally,
+`.side` and `#settingsView` on their own. Columns are `flex: 1 1 0` with
+`min-width: 224px` — they share the width until they can't, and then the
+strip scrolls sideways instead of crushing the cards. Verified in Chromium
+at 1440×900, 900×800 and 700×800: `document.body` never scrolls in either
+axis, and the rail drops out below 820px.
+
+**Selecting versus opening.** A single click fills a 320px detail rail
+(status, worker, model, elapsed, live agent output, Open ticket / Kill run);
+double-click still opens the full editor modal. Live-log polling follows
+`editingTicket || selectedTicket` and paints one buffer into both boxes, so
+the rail tails a running agent without opening anything.
+
+**Settings became a scoped page.** The board-settings gear, the cluster-
+settings gear and the profiles modal are gone; an owner-only **Settings** tab
+holds two scopes — *This board* (Project, Repository, Agents, Import) and
+*Cluster* (Concurrency, Profiles). Deliberately, every row is backed by
+something the API actually persists: board columns, `cluster_settings`,
+profiles, the join code. Edits stage into a draft so typing never re-renders
+the field under the cursor, and a section with no save target hides the
+action row rather than showing an inert button.
+
+**The feed is derived, not new.** `buildFeed()` unrolls the `queued_at` /
+`claimed_at` / `finished_at` moments already on each `work_queue` row that
+the board loads anyway. Server timestamps are naive UTC (`models.utcnow`),
+so they are parsed with an explicit `Z` — without it every age reads hours
+out in a non-UTC browser.
+
+**Theming.** The design's palette is the dark theme, on `body.dark`; `:root`
+carries a derived light palette so the existing toggle and its `kc_theme`
+preference keep working instead of switching to a broken page. IBM Plex
+Sans/Mono throughout.
+
+Tests: 541 → 563. `tests/test_frontend_markup.py` grew from 39 to 61 —
+assertions whose markup moved were rewritten against the new structure
+(settings sections are now built by `SECTION_BODY`, so they are asserted
+inside that function rather than as static markup), and the new invariants
+got guards of their own: the 100vh shell, the column floor, the rail width,
+selection-driven polling, the derived feed, the UTC parse, the two scopes,
+and both palettes.
+
 ## Five columns, and a ticket is done when it is pushed (ticket #20, 2026-08-23)
 
 The board now shows **TODO / Ready / In progress / Blocked / Done** over seven

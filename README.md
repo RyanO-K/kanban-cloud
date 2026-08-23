@@ -187,11 +187,12 @@ single time and exit).
 Two things have to be configured before a PC can do real repo work, and they
 live in two different places on purpose.
 
-**On the board (server side):** open the board settings (the gear next to the
-board picker, owner only) and fill in what every agent working this board
-should know — a short project description, anything explicitly out of scope,
-what has to hold before a commit, and whether agents should isolate their work
-in a git worktree. This is project knowledge, so it is shared by every PC.
+**On the board (server side):** open the **Settings** tab (owner only) and fill
+in what every agent working this board should know — a short project
+description, anything explicitly out of scope, and what has to hold before a
+commit under **This board · Project**, and the repo URL plus whether agents
+should isolate their work in a git worktree under **This board · Repository**.
+This is project knowledge, so it is shared by every PC.
 
 **On each PC (worker side):** tell the worker which folder on *this* machine
 holds each board's code. The same board is worked by several PCs with
@@ -319,9 +320,9 @@ queue, so an enrolled worker cannot claim one even though two of them sit in
 
 ## Importing a local `.kanban` board
 
-The **Import** button in the header (owner-only) loads a board from the local
-file-based `.kanban` tool. Click it and pick a board folder, or drag the folder
-onto the board area. One board per import: pick a single board folder (e.g.
+**Settings → This board → Import** (owner-only) loads a board from the local
+file-based `.kanban` tool. Choose a board folder there, or drag the folder
+straight onto the board area. One board per import: pick a single board folder (e.g.
 `.kanban/ai-kanban`), not the `.kanban` root — dropping the root tells you which
 boards it found instead of importing all of them.
 
