@@ -999,8 +999,10 @@ async function refreshClusterBits() {
     `py worker.py --enroll --server ${enrollServer()} --join-code ${currentCluster.join_code || "<code>"}`;
   boards = await api("GET", `./api/clusters/${currentCluster.id}/boards`);
   renderBoardPicker();
+  // A board named in the URL wins, then the one the session handed us, then
+  // the board an owner marked default (Settings · Manage), then the oldest.
   currentBoard = boards.find(b => b.id === pendingBoardId) || boards.find(b => b.id === sessionBoardId)
-    || boards[0] || null;
+    || boards.find(b => b.is_default) || boards[0] || null;
   pendingBoardId = null;
   if (currentBoard) document.getElementById("boardSel").value = currentBoard.id;
   const jobs = [loadBoard(), loadWorkers(), loadQueue(), loadBlocked(), loadProfiles()];
@@ -1844,6 +1846,10 @@ const SETTINGS_SECTIONS = [
    blurb: "Which agent profile this board's tickets run under when they don't pick their own."},
   {key: "import", scope: "board", name: "Import",
    blurb: "Bring a local .kanban board folder into this cluster."},
+  // No `save`: both controls here act the moment you use them. A draft of
+  // "delete this board" waiting on a Save button helps nobody.
+  {key: "manage", scope: "board", name: "Manage",
+   blurb: "Which board the app opens on, and getting rid of one you're done with."},
   {key: "concurrency", scope: "cluster", name: "Concurrency", save: "cluster",
    blurb: "Limits every PC's claims combined — enforced inside the claim itself, so it holds with no central dispatcher."},
   {key: "profiles", scope: "cluster", name: "Profiles",
@@ -1980,6 +1986,18 @@ const SECTION_BODY = {
          onclick="document.getElementById('importInput').click()">Choose folder…</button>
        <input type="file" id="importInput" webkitdirectory directory multiple
               style="display:none" onchange="onImportPicked(event)">`),
+  manage: () => {
+    if (!currentBoard) return `<p class="muted">No board yet — create one from the board picker.</p>`;
+    const isDefault = !!currentBoard.is_default;
+    return fRow("Default board",
+        "The board this cluster opens on. Only one board can hold it, so marking this one releases whichever board had it before. With none marked, the app falls back to a board named Demo, then to the oldest one.",
+        `<button class="tgl owner-only${isDefault ? " on" : ""}" id="bIsDefault"
+           aria-pressed="${isDefault}" onclick="setDefaultBoard(${!isDefault})"><span class="knob"></span></button>`) +
+      fRow("Delete this board",
+        "Takes every ticket on it with them — comments, run transcripts and queued work included. There is no undo.",
+        `<button class="btn danger owner-only" id="deleteBoardBtn"
+           onclick="deleteBoard()">Delete board…</button>`);
+  },
   concurrency: () => {
     const d = clusterDraft || {};
     return fRow("Cluster-wide concurrency cap", "Applies to every PC's claims combined.",
@@ -2041,6 +2059,36 @@ async function saveBoardSettings() {
   boardDraft = {};
   await refreshClusterBits();
   toast("Project settings saved");
+}
+
+// ---------- board management: default / delete (ticket #23) ----------
+// Both act immediately rather than through the Save button. Each re-reads the
+// cluster's boards afterwards, so the picker, the toggle and the landing rule
+// all agree with the server rather than with a stale local copy.
+
+async function setDefaultBoard(on) {
+  if (!currentBoard) return;
+  await api("PATCH", `./api/boards/${currentBoard.id}`, {is_default: !!on});
+  // Marking one board releases the others, so the whole list is refetched —
+  // and pendingBoardId keeps the settings pane on the board just edited
+  // instead of dropping back to the first one.
+  pendingBoardId = currentBoard.id;
+  await refreshClusterBits();
+  toast(on ? "Default board set" : "Default board cleared");
+}
+
+async function deleteBoard() {
+  if (!currentBoard) return;
+  const n = tickets.length;
+  const carried = n ? ` and its ${n} ticket${n === 1 ? "" : "s"}` : "";
+  if (!confirm(`Delete board "${currentBoard.name}"${carried}? This cannot be undone.`)) return;
+  await api("DELETE", `./api/boards/${currentBoard.id}`);
+  // No pendingBoardId: the board it named is gone, so let the landing rule
+  // pick the next one (and cope with there being none left).
+  currentBoard = null;
+  clearSelection();
+  await refreshClusterBits();
+  toast("Board deleted");
 }
 
 async function saveClusterSettings() {

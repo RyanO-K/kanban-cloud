@@ -170,6 +170,11 @@ class Board(Base):
     `default_profile_id` is this board's fallback agent profile: used when a
     ticket names none of its own (see Ticket.profile_id and
     worker.resolve_profile).
+
+    `is_default` marks the board a visitor lands on (see main.default_board).
+    At most one per cluster: marking one clears the rest, enforced by the app
+    rather than an index, since "none marked" is legal and is where every
+    cluster starts.
     """
     __tablename__ = "boards"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -189,6 +194,9 @@ class Board(Base):
     # branch to origin when this is true, and even then only if the ticket's
     # commit_gate reports requirements_met — see worker.py's run_slot.
     auto_push: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False, server_default="0"
+    )
+    is_default: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False, server_default="0"
     )
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=utcnow)

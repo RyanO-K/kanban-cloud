@@ -72,7 +72,10 @@ CREATE TABLE IF NOT EXISTS profiles (
 -- a worker only pushes a finished ticket's branch to origin when this is
 -- true, and even then only if the ticket's commit_gate (see tickets below)
 -- reports requirements_met — push credentials are the worker PC's own
--- ambient git auth and never reach this server either way.
+-- ambient git auth and never reach this server either way. is_default marks
+-- the board a visitor lands on; at most one per cluster, enforced by the app
+-- (app/main.patch_board) and not by an index, because "none marked" is legal
+-- and is where every cluster starts.
 CREATE TABLE IF NOT EXISTS boards (
     id                  SERIAL PRIMARY KEY,
     cluster_id          INTEGER NOT NULL REFERENCES clusters(id),
@@ -84,6 +87,7 @@ CREATE TABLE IF NOT EXISTS boards (
     repo_url            TEXT,
     default_profile_id  INTEGER,
     auto_push           BOOLEAN NOT NULL DEFAULT FALSE,
+    is_default          BOOLEAN NOT NULL DEFAULT FALSE,
     created_at          TIMESTAMP NOT NULL DEFAULT now()
 );
 

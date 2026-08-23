@@ -477,3 +477,62 @@ def test_ticket_model_has_session_dir_column():
     from app.models import Ticket
 
     assert "session_dir" in {c.name for c in Ticket.__table__.columns}
+
+
+# ---------- board management: the marked default board (ticket #23) ----------
+
+def test_migration_adds_the_default_board_column_to_an_existing_db(tmp_path):
+    """A database created before boards could be marked default must reach the
+    new shape too — every /boards read selects the column."""
+    from app.db import _BOARD_DEFAULT_COLUMNS
+
+    engine = make_engine(f"sqlite:///{tmp_path / 'old_bd.db'}")
+    Base.metadata.create_all(engine)
+    with engine.begin() as conn:
+        for table, ddl in _BOARD_DEFAULT_COLUMNS:
+            conn.execute(sa.text(f"ALTER TABLE {table} DROP COLUMN {ddl.split()[0]}"))
+
+    run_migrations(engine)
+    run_migrations(engine)  # idempotent
+
+    insp = sa.inspect(engine)
+    for table, ddl in _BOARD_DEFAULT_COLUMNS:
+        assert ddl.split()[0] in {c["name"] for c in insp.get_columns(table)}, ddl
+
+
+def test_is_default_reads_false_for_pre_ticket_23_rows(tmp_path):
+    """A board row written before the column existed must read as 'not the
+    default', so default_board keeps falling back the way it always did."""
+    from app.models import Board, Cluster, User
+
+    engine = make_engine(f"sqlite:///{tmp_path / 'd23.db'}")
+    Base.metadata.create_all(engine)
+    run_migrations(engine)
+    with Session(engine) as db:
+        db.add(User(id=1, email="a@b.co", password_hash="x"))
+        db.add(Cluster(id=1, name="T", join_code="J", created_by=1))
+        db.commit()
+    with engine.begin() as conn:
+        conn.execute(sa.text(
+            "INSERT INTO boards (id, cluster_id, name, created_at) VALUES"
+            " (1, 1, 'old-board', '2020-01-01')"
+        ))
+    with Session(engine) as db:
+        assert db.get(Board, 1).is_default is False
+
+
+def test_board_default_boolean_default_is_postgres_legal():
+    """Same regression guard as the phase1/phase5 ones: SQLite would take
+    `DEFAULT 0`, Neon would refuse it at startup.
+
+    Split from the right, unlike its two elders: this column is *named*
+    is_default, so splitting on the first "DEFAULT" finds the name and reads
+    the whole type clause back as the default value.
+    """
+    from app.db import _BOARD_DEFAULT_COLUMNS
+
+    for table, ddl in _BOARD_DEFAULT_COLUMNS:
+        if "BOOLEAN" not in ddl.upper():
+            continue
+        default = ddl.upper().rsplit("DEFAULT", 1)[1].strip() if "DEFAULT" in ddl.upper() else ""
+        assert default in ("", "TRUE", "FALSE"), f"{table}.{ddl}: use TRUE/FALSE, not {default}"

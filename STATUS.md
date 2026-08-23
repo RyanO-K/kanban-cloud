@@ -2,6 +2,51 @@
 
 Last updated: 2026-08-23
 
+## Board management: mark a default, delete a board (ticket #23, 2026-08-23)
+
+**Settings → This board → Manage** is a fifth board-scoped panel holding the
+two things you could not previously do to a board as a whole: say which one
+the app opens on, and get rid of one. It is the first settings section with
+no `save` key, so the Save/Discard row stays hidden and both controls act on
+click. That is deliberate rather than an inconsistency: a draft of "delete
+this board" waiting on a Save button is a footgun, and the default-board
+toggle has exactly one field to write, so batching buys nothing.
+
+**Default is marked, not inferred.** `boards.is_default` (new column;
+`schema.sql`, `app/models.py`, `_BOARD_DEFAULT_COLUMNS` in `app/db.py`,
+defaults FALSE) is now the first thing `app.main.default_board` looks at,
+ahead of the "a board named Demo" convention and the oldest-board fallback.
+The marked board wins because it is the only one of the three chosen on
+purpose; the other two are what to do when nobody has said. An existing
+deployment reads as "nothing marked" and keeps behaving exactly as it did.
+
+At most one board per cluster holds the flag: marking one clears the rest, in
+`patch_board`, rather than through a partial unique index. "None marked" is
+legal and is where every cluster starts, which is awkward to express
+identically on SQLite and Postgres, and the rule is per cluster — a second
+cluster's default is untouched. The flag rides `PATCH /api/boards/{id}` and
+stays partial like every other field there, so the Project panel saving
+cannot silently unmark the default.
+
+The browser honours the flag too: `refreshClusterBits` lands on it after a
+URL-named board and the session's board, ahead of `boards[0]`.
+
+**Delete clears six child tables by hand.** No FK in this schema cascades, so
+`DELETE /api/boards/{id}` walks the board's ticket ids and clears comments,
+questions, chat, log, queue rows and deps before the tickets themselves.
+Order matters twice: `ticket_log` points at `work_queue` as well as at its
+ticket (so logs go first), and a ticket on *another* board may depend on one
+of these, so `ticket_deps` is cleared from both sides. On SQLite a leftover
+would sit there silently; on Neon it is a foreign-key violation.
+
+Deleting the last board is allowed. The picker always offers **+ new board**
+and `loadBoard`/`syncRoute` already tolerate no board at all, so an empty
+cluster is a recoverable state rather than one worth a guard.
+
+Ticket #23. Tests: `tests/test_board_management.py` (new, 16 covering the
+flag's scoping and the delete's reach), plus 3 migration guards, the
+spectator-landing rule, and 8 markup guards on the new panel.
+
 ## Resume command: taking a ticket's agent session over by hand (2026-08-23)
 
 The ticket modal now offers **Copy resume cmd**, which puts

@@ -16,7 +16,7 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from . import delegation, enrollment, importer
@@ -109,6 +109,9 @@ class BoardPatch(BaseModel):
     default_profile_id: int | None = None
     clear_default_profile: bool = False
     auto_push: bool | None = None
+    # Marks the board a visitor lands on. Partial like the rest: the Project
+    # panel saving without this key must not silently unmark the default.
+    is_default: bool | None = None
 
 
 class ProfileBody(BaseModel):
@@ -314,13 +317,21 @@ def create_app(
         return db.scalar(select(Cluster).order_by(Cluster.id).limit(1))
 
     def default_board(db: Session, cluster: Cluster | None) -> Board | None:
-        """The board a visitor should land on: the demo board when one exists,
-        otherwise the cluster's first board."""
+        """The board a visitor should land on: the one an owner marked default
+        if there is one, else the demo board, else the cluster's first board.
+
+        The marked board wins because it is the only one of the three that was
+        chosen on purpose — the other two are conventions to fall back on when
+        nobody has said which board is the front door.
+        """
         if cluster is None:
             return None
         boards = db.scalars(
             select(Board).where(Board.cluster_id == cluster.id).order_by(Board.id)
         ).all()
+        for board in boards:
+            if board.is_default:
+                return board
         for board in boards:
             if board.name.strip().lower() == "demo":
                 return board
@@ -443,6 +454,7 @@ def create_app(
             "repo_url": b.repo_url,
             "default_profile_id": b.default_profile_id,
             "auto_push": bool(b.auto_push),
+            "is_default": bool(b.is_default),
         }
 
     def ensure_cluster_settings(db: Session, cluster_id: int) -> ClusterSettings:
@@ -983,8 +995,52 @@ def create_app(
             if profile is None or profile.cluster_id != board.cluster_id:
                 raise HTTPException(400, "default_profile_id must be a profile in this cluster")
             board.default_profile_id = body.default_profile_id
+        if body.is_default is not None:
+            board.is_default = body.is_default
+            if body.is_default:
+                # At most one default per cluster, or "the" default board is
+                # ambiguous. Enforced here rather than by a partial unique
+                # index because "none marked" is a legal state (and the one
+                # every cluster starts in), which such an index can't express
+                # identically on both backends.
+                db.execute(
+                    update(Board)
+                    .where(Board.cluster_id == board.cluster_id, Board.id != board.id)
+                    .values(is_default=False)
+                )
         db.commit()
         return board_json(board)
+
+    @app.delete("/api/boards/{board_id}")
+    def delete_board(
+        board_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)
+    ):
+        """Delete a board and everything on it.
+
+        Tickets carry six kinds of child row, and no FK here cascades, so each
+        is cleared explicitly — a leftover would be an orphan Postgres' foreign
+        keys refuse outright. Order matters twice: ticket_log points at
+        work_queue as well as at its ticket, and a ticket on another board may
+        depend on one of these, so ticket_deps is cleared from both sides.
+
+        Deleting the last board is allowed: the board picker always offers
+        "+ new board", so an empty cluster is a recoverable state.
+        """
+        board = board_for_user(db, user, board_id)
+        ticket_ids = list(db.scalars(select(Ticket.id).where(Ticket.board_id == board.id)))
+        if ticket_ids:
+            for model in (Comment, TicketQuestion, TicketChat, TicketLog, WorkItem):
+                db.execute(delete(model).where(model.ticket_id.in_(ticket_ids)))
+            db.execute(
+                delete(TicketDep).where(
+                    TicketDep.ticket_id.in_(ticket_ids)
+                    | TicketDep.depends_on_id.in_(ticket_ids)
+                )
+            )
+            db.execute(delete(Ticket).where(Ticket.id.in_(ticket_ids)))
+        db.delete(board)
+        db.commit()
+        return {"ok": True}
 
     @app.post("/api/clusters/{cluster_id}/import")
     def import_board(

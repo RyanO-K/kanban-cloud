@@ -25,7 +25,7 @@ def section_body(markup, key):
     body = markup[markup.index("const SECTION_BODY = {"):]
     start = body.index(f"\n  {key}: ")
     nxt = [body.index(f"\n  {k}: ") for k in
-           ("project", "repo", "agents", "import", "concurrency", "profiles")
+           ("project", "repo", "agents", "import", "manage", "concurrency", "profiles")
            if body.index(f"\n  {k}: ") > start]
     return body[start:min(nxt)] if nxt else body[start:body.index("\n};")]
 
@@ -61,6 +61,64 @@ def test_import_input_is_a_directory_picker(markup):
 def test_board_area_is_a_drop_zone(markup):
     assert 'id="dropZone"' in markup
     assert "webkitGetAsEntry" in markup
+
+
+# ---------- board management: default / delete (ticket #23) ----------
+
+def test_settings_has_a_board_scoped_manage_section(markup):
+    sections = markup[markup.index("const SETTINGS_SECTIONS = ["):]
+    sections = sections[:sections.index("];")]
+    entry = sections[sections.index('{key: "manage"'):]
+    assert 'scope: "board"' in entry[:entry.index("},")]
+
+
+def test_manage_applies_immediately_instead_of_on_save(markup):
+    """No `save:` key, so the Save/Discard row stays hidden: a half-typed
+    draft of "delete this board" is not a thing anyone wants."""
+    sections = markup[markup.index("const SETTINGS_SECTIONS = ["):]
+    entry = sections[sections.index('{key: "manage"'):]
+    assert "save:" not in entry[:entry.index("},")]
+
+
+def test_manage_offers_a_default_board_toggle(markup):
+    body = section_body(markup, "manage")
+    assert 'id="bIsDefault"' in body
+    assert "setDefaultBoard" in body
+
+
+def test_manage_offers_a_delete_button(markup):
+    body = section_body(markup, "manage")
+    assert 'id="deleteBoardBtn"' in body
+    assert "deleteBoard()" in body
+
+
+def test_delete_and_default_are_owner_only(markup):
+    """Spectators are read-only; the endpoints 403 anyway, so don't show them."""
+    body = section_body(markup, "manage")
+    assert body.count("owner-only") >= 2
+
+
+def test_deleting_a_board_asks_first(markup):
+    """It takes every ticket on the board with it — no one-click version."""
+    fn = markup[markup.index("async function deleteBoard("):]
+    fn = fn[:fn.index("\n}")]
+    assert "confirm(" in fn
+    assert 'api("DELETE"' in fn
+
+
+def test_marking_a_board_default_patches_the_board(markup):
+    fn = markup[markup.index("async function setDefaultBoard("):]
+    fn = fn[:fn.index("\n}")]
+    assert 'api("PATCH"' in fn
+    assert "is_default" in fn
+
+
+def test_the_landing_board_honours_the_default_flag(markup):
+    """Opening the app with no board in the URL lands on the marked board
+    rather than whichever one has the lowest id."""
+    fn = markup[markup.index("async function refreshClusterBits("):]
+    fn = fn[:fn.index("\n}")]
+    assert "is_default" in fn
 
 
 def test_import_posts_only_whitelisted_keys(markup):

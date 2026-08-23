@@ -100,6 +100,14 @@ _SESSION_DIR_COLUMNS = [
     ("tickets", "session_dir VARCHAR(1024)"),
 ]
 
+# (table, column DDL) pair added by board management (ticket #23): the board a
+# visitor lands on, marked by hand instead of inferred from its name. Defaults
+# FALSE, so an existing cluster reads as "nothing marked" and
+# app/main.default_board keeps falling back exactly as it did before.
+_BOARD_DEFAULT_COLUMNS = [
+    ("boards", "is_default BOOLEAN NOT NULL DEFAULT FALSE"),
+]
+
 # Statuses dropped from models.TICKET_STATUSES, and what an existing row that
 # still carries one becomes (ticket #20's five-column rework). `review` meant
 # "the agent finished, a human should look at it" — every ticket that reached
@@ -217,7 +225,7 @@ def _add_missing_columns(engine) -> None:
         for table, ddl in (_PHASE1_COLUMNS + _PHASE2_COLUMNS + _PHASE3_COLUMNS
                            + _PHASE4_COLUMNS + _PHASE5_COLUMNS + _TRIAGE_COLUMNS
                            + _PHASE6_COLUMNS + _PHASE7_COLUMNS
-                           + _SESSION_DIR_COLUMNS):
+                           + _SESSION_DIR_COLUMNS + _BOARD_DEFAULT_COLUMNS):
             if table not in tables:
                 continue  # a brand-new DB: create_all() already built the shape
             column = ddl.split()[0].strip('"')

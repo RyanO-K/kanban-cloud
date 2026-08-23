@@ -236,6 +236,20 @@ def test_spectator_lands_on_the_demo_board(pclient):
     assert s["board"] == {"id": demo_id, "name": "Demo"}
 
 
+def test_spectator_lands_on_the_board_marked_default(pclient):
+    """A hand-picked default (ticket #23) beats the Demo-name convention:
+    naming is the fallback, the marked board is the explicit answer."""
+    seed = owner_seed(pclient)
+    cluster_id = seed["cluster"]["id"]
+    pclient.post(f"/api/clusters/{cluster_id}/boards", json={"name": "Demo"}, headers=OWNER)
+    picked = pclient.post(f"/api/clusters/{cluster_id}/boards",
+                          json={"name": "Roadmap"}, headers=OWNER).json()
+    pclient.patch(f"/api/boards/{picked['id']}", json={"is_default": True}, headers=OWNER)
+
+    s = pclient.get("/api/session", headers=SPECTATOR).json()
+    assert s["board"] == {"id": picked["id"], "name": "Roadmap"}
+
+
 def test_spectator_board_falls_back_to_first_board(pclient):
     seed = owner_seed(pclient)
     s = pclient.get("/api/session", headers=SPECTATOR).json()

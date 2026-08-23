@@ -308,15 +308,17 @@ headers before injecting its own):
 {"mode": "spectator", "cluster": {"id": 1, "name": "Main"}, "board": {"id": 2, "name": "Demo"}, "login_url": "/auth/github?return=/board/"}
 // spectator: cluster/board are null if none exist yet; login_url is null
 // unless PROXY_LOGIN_URL is set. `board` is the board to land on — the one
-// named "Demo" when it exists, else the cluster's first board.
+// marked default (Settings → This board → Manage) if any, else the one named
+// "Demo", else the cluster's first board.
 ```
 
 ### Demo board
 
 Anonymous visitors land on a board named `Demo` when one exists (that is what
 `board` on `GET /api/session` selects), so the public view shows example work
-instead of an empty column set. Populate it once, after signing in for the
-first time:
+instead of an empty column set. Marking a board default beats the naming
+convention — see [Board management](#board-management). Populate the demo
+board once, after signing in for the first time:
 
     py scripts/seed_demo.py "<neon-dsn>"
 
@@ -324,6 +326,26 @@ The script is idempotent — if the demo board already holds a ticket it writes
 nothing, so cards you delete stay deleted. Seeded tickets never enter the work
 queue, so an enrolled worker cannot claim one even though two of them sit in
 `ready`.
+
+## Board management
+
+**Settings → This board → Manage** (owner-only) holds the two whole-board
+actions. Both apply the moment you use them — there is no Save button on this
+panel.
+
+**Default board.** Marks the board the app opens on: it is what a spectator's
+`GET /api/session` hands back and what the board picker selects when no board
+is named in the URL. At most one board per cluster can hold it, so marking one
+releases whichever board had it before (enforced in `patch_board`, not by an
+index — "none marked" is legal, and is where every cluster starts). With none
+marked the old rule still applies: a board named `Demo`, else the oldest.
+
+**Delete board.** Removes the board and every ticket on it, along with each
+ticket's comments, dependencies, questions, chat, run transcript and queued
+work — none of those FKs cascade, so `DELETE /api/boards/{id}` clears them
+explicitly. There is no undo and no soft delete. Deleting the last board in a
+cluster is allowed; the picker always offers **+ new board**, so an empty
+cluster is a recoverable state.
 
 ## Importing a local `.kanban` board
 
