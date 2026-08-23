@@ -3,6 +3,7 @@
 The claim/finish SQL itself is Postgres-only (SKIP LOCKED) and is exercised
 by scripts/neon_smoke_v2.py against the real database.
 """
+import ast
 import io
 import json
 import sqlite3
@@ -222,3 +223,42 @@ def test_resolve_profile_unknown_everywhere_returns_none():
 
 def test_resolve_profile_board_default_used_when_ticket_id_is_none():
     assert worker.resolve_profile(PROFILES, None, 1) == RESTRICTED
+
+
+# ---------- comments are the human conversation, not the agent transcript ----------
+#
+# Mid-run agent output used to be posted as ticket comments alongside the
+# ticket_log stream, which buried the few comments a person actually wrote
+# under hundreds of rows of tool-call chatter ("-> Bash -> Edit"). The live
+# board ended up 255 agent comments to 1 human one. Only finish_work may write
+# a comment now: one end-of-run summary per attempt.
+
+
+def _comment_writing_functions():
+    """Every top-level function in worker.py whose body inserts a comment."""
+    source = Path(worker.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    writers = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        body = ast.get_source_segment(source, node) or ""
+        if "INSERT INTO comments" in body:
+            writers.add(node.name)
+    return writers
+
+
+def test_only_finish_work_writes_comments():
+    assert _comment_writing_functions() == {"finish_work"}
+
+
+def test_run_slot_does_not_wire_agent_output_to_comments():
+    """The executor still accepts progress_cb (tested in test_executor.py) --
+    run_slot just must not point it at the comments table any more."""
+    source = Path(worker.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    run_slot = next(n for n in ast.walk(tree)
+                    if isinstance(n, ast.FunctionDef) and n.name == "run_slot")
+    body = ast.get_source_segment(source, run_slot) or ""
+    assert "progress_cb=None" in body
+    assert "progress_cb=progress_cb" not in body

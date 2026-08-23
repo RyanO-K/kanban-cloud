@@ -73,10 +73,14 @@ def main() -> int:
         work = wins[0]
         print(f"claim race: 1/{RACE_N} winner (assignment {work['assignment_id']})")
 
-        # -- progress comment via direct SQL --
+        # -- mid-run progress via direct SQL --
+        # Goes to ticket_log, not comments: comments are the human
+        # conversation on a ticket, so the worker role's INSERT on ticket_log
+        # is what actually needs proving here.
         with psycopg.connect(dsns[0], connect_timeout=15) as conn:
-            worker_mod.add_progress(conn, wids[0], "smoke-pc-a", t["id"], "smoke progress 50%")
-        print("progress comment inserted")
+            worker_mod.add_log_line(conn, t["id"], work["assignment_id"], 1,
+                                    "assistant", "smoke progress 50%")
+        print("progress log line inserted")
 
         # -- finish -> done (pushed) --
         # `pushed=True` is what a real slot passes only after `git push`

@@ -1254,23 +1254,15 @@ def claim_next(conn, worker_id: int, cluster_id: int, board_ids=None) -> dict | 
         }
 
 
-def add_progress(conn, worker_id: int, worker_name: str, ticket_id: int, message: str) -> None:
-    with conn.transaction(), conn.cursor() as cur:
-        cur.execute(
-            f"INSERT INTO comments (ticket_id, writer, message, created_at) "
-            f"VALUES (%s, %s, %s, {UTC_NOW})",
-            (ticket_id, f"worker:{worker_name}", message),
-        )
-        cur.execute(
-            f"UPDATE workers SET last_seen={UTC_NOW} WHERE id=%s", (worker_id,)
-        )
-
-
 def add_log_line(conn, ticket_id: int, work_queue_id: int | None, seq: int,
                  role: str, text: str) -> None:
     """One row of the live transcript (see models.TicketLog). Called once per
-    parsed stream-json turn, so a browser tailing `?since_seq=` sees output
-    as it is generated rather than in the batches `add_progress` posts."""
+    parsed stream-json turn, so a browser tailing `?since_seq=` sees output as
+    it is generated.
+
+    This is the only home for mid-run agent output. It used to be posted as
+    ticket comments in parallel (`add_progress`, removed), which drowned the
+    human conversation on a ticket in tool-call chatter."""
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             f"INSERT INTO ticket_log (ticket_id, work_queue_id, seq, role, text, created_at) "
@@ -1752,18 +1744,19 @@ def run_slot(cfg, args, executor, stop_event, slot_no: int) -> None:
                     _RUNNING["n"] += 1
                 print(f"[slot {slot_no}] claimed #{ticket['id']} '{ticket['title']}'")
 
-                # Bound to this claim's connection/ticket by default args, so a
-                # progress flush mid-run always lands on the right row even if
-                # `conn`/`ticket` are reassigned by a later loop iteration.
-                def progress_cb(message, _conn=conn, _ticket_id=ticket["id"]):
-                    try:
-                        add_progress(_conn, cfg["worker_id"], cfg["name"], _ticket_id, message)
-                    except Exception as exc:
-                        print(f"[slot {slot_no}] progress post failed: {exc!r}")
-
-                # Reader-thread-only (see ClaudeExecutor.run), same as
-                # progress_cb above, so sharing `conn` is safe: the main
-                # thread never touches it while executor.run() is in flight.
+                # No progress_cb: mid-run agent output goes to ticket_log via
+                # log_cb below and nowhere else. It used to be posted as
+                # comments too, which buried the handful of human comments on
+                # a ticket under hundreds of rows of tool-call chatter
+                # ("-> Bash -> Edit"). Comments are now what a person writes,
+                # plus finish_work's one end-of-run summary.
+                #
+                # Reader-thread-only (see ClaudeExecutor.run): sharing `conn`
+                # is safe because the main thread never touches it while
+                # executor.run() is in flight. Bound to this claim's
+                # connection/ticket by default args so a flush always lands on
+                # the right row even if `conn`/`ticket` are reassigned by a
+                # later loop iteration.
                 log_seq = {"n": 0}
 
                 def log_cb(role, message, _conn=conn, _ticket_id=ticket["id"],
@@ -1820,7 +1813,7 @@ def run_slot(cfg, args, executor, stop_event, slot_no: int) -> None:
                             ticket, board=work.get("board"),
                             directory=paths.get(str(ticket["board_id"])),
                             session_id=work.get("session_id"),
-                            progress_cb=progress_cb, should_kill=should_kill,
+                            progress_cb=None, should_kill=should_kill,
                             chat_source=chat_source, chat_delivered=chat_delivered,
                             log_cb=log_cb, profile=work.get("profile"),
                             resume=work.get("resume"))
@@ -1834,7 +1827,7 @@ def run_slot(cfg, args, executor, stop_event, slot_no: int) -> None:
                                 ticket, board=work.get("board"),
                                 directory=directory,
                                 session_id=work.get("session_id"),
-                                progress_cb=progress_cb, should_kill=should_kill,
+                                progress_cb=None, should_kill=should_kill,
                                 chat_source=chat_source, chat_delivered=chat_delivered,
                                 log_cb=log_cb, profile=work.get("profile"),
                                 resume=work.get("resume"))
