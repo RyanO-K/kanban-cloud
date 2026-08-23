@@ -193,7 +193,7 @@ def test_executor_prompt_carries_project_context(monkeypatch, tmp_path):
     monkeypatch.setattr(subprocess, "Popen", fake_popen(proc, captured))
     worker.ClaudeExecutor().run(TICKET, board=BOARD,
                                 directory=str(tmp_path), session_id="s")
-    prompt = captured["cmd"][captured["cmd"].index("-p") + 1]
+    prompt = stdin_texts(proc)[0]
     assert "The site." in prompt
     assert str(tmp_path) in prompt
 
@@ -221,7 +221,7 @@ def test_resume_run_sends_the_short_resume_prompt_not_the_full_one(monkeypatch, 
     monkeypatch.setattr(subprocess, "Popen", fake_popen(proc, captured))
     worker.ClaudeExecutor().run(TICKET, board=BOARD, directory=str(tmp_path),
                                 session_id="prior-sid", resume=RESUME)
-    prompt = captured["cmd"][captured["cmd"].index("-p") + 1]
+    prompt = stdin_texts(proc)[0]
     assert "Which branch?" in prompt
     assert "main" in prompt
     assert "Details." not in prompt  # the full ticket body was not resent
@@ -240,17 +240,18 @@ def test_non_resume_run_still_uses_session_id(monkeypatch, tmp_path):
 
 def test_never_uses_shell_true(monkeypatch, tmp_path):
     """Regression: on Windows `shell=True` re-parses the argument list through
-    cmd.exe, which truncates the multi-line prompt at its first newline. The
-    agent then received the title and none of the ticket body. The executable
-    is resolved with shutil.which instead, which finds the .CMD shim without
-    needing a shell."""
+    cmd.exe, which truncates a multi-line argument at its first newline. The
+    agent then received the title and none of the ticket body. The prompt now
+    rides on stdin rather than argv, but shell=False still stands for every
+    other argument, and the executable is resolved with shutil.which instead,
+    which finds the .CMD shim without needing a shell."""
     captured = {}
     proc = FakeProc([result_line("done")])
     monkeypatch.setattr(subprocess, "Popen", fake_popen(proc, captured))
     worker.ClaudeExecutor().run(TICKET, board=BOARD,
                                 directory=str(tmp_path), session_id="s")
     assert captured["kwargs"].get("shell") in (None, False)
-    prompt = captured["cmd"][captured["cmd"].index("-p") + 1]
+    prompt = stdin_texts(proc)[0]
     assert "\n" in prompt, "the prompt is multi-line; that is the whole point"
 
 
@@ -586,9 +587,7 @@ def test_messages_queued_before_the_agent_starts_reach_stdin_in_order(monkeypatc
         chat_source=chat_source, chat_delivered=delivered.extend)
 
     assert ok
-    written = [json.loads(line)["message"]["content"][0]["text"]
-               for line in proc.stdin.getvalue().splitlines()]
-    assert written == ["first", "second"]
+    assert stdin_texts(proc)[1:] == ["first", "second"]
     assert delivered == [1, 2]
     assert proc.stdin.closed
 
@@ -619,9 +618,7 @@ def test_message_typed_mid_run_reaches_stdin_after_an_earlier_one(monkeypatch, t
         chat_source=chat_source, chat_delivered=delivered.extend)
 
     assert ok
-    written = [json.loads(line)["message"]["content"][0]["text"]
-               for line in proc.stdin.getvalue().splitlines()]
-    assert written == ["already queued", "typed while running"]
+    assert stdin_texts(proc)[1:] == ["already queued", "typed while running"]
     assert delivered == [1, 2]
 
 
@@ -655,3 +652,56 @@ def test_chat_source_error_does_not_abort_the_run(monkeypatch, tmp_path):
         TICKET, board=BOARD, directory=str(tmp_path), session_id="s",
         chat_source=flaky, chat_delivered=None)
     assert ok and out == "done"
+
+
+# ---------- regression: the first user turn must reach the CLI at all ----------
+#
+# Four tickets came back "Claude CLI timed out after 30 minutes" with a run log
+# holding nothing but the two SessionStart hook lines — no `init`, no assistant
+# turn. `--input-format stream-json` makes the CLI take its first user turn from
+# stdin and ignore a positional prompt after -p, so the session came up and then
+# sat idle against a pipe nobody wrote to until the deadline fired.
+
+def stdin_texts(proc):
+    """The user-turn texts written to the CLI's stdin, in order."""
+    return [json.loads(line)["message"]["content"][0]["text"]
+            for line in proc.stdin.getvalue().splitlines() if line.strip()]
+
+
+def test_the_prompt_is_written_to_stdin_not_argv(monkeypatch, tmp_path):
+    captured = {}
+    proc = FakeProc([result_line("done")])
+    monkeypatch.setattr(subprocess, "Popen", fake_popen(proc, captured))
+    worker.ClaudeExecutor().run(TICKET, board=BOARD,
+                                directory=str(tmp_path), session_id="s")
+    cmd = captured["cmd"]
+    # -p takes no positional prompt: the next argv item is another flag.
+    assert cmd[cmd.index("-p") + 1].startswith("--")
+    sent = stdin_texts(proc)
+    assert sent, "the CLI was never given a user turn to act on"
+    assert "The site." in sent[0]
+    assert str(tmp_path) in sent[0]
+
+
+def test_the_prompt_leads_any_chat_already_queued(monkeypatch, tmp_path):
+    """The ticket's own prompt is the run's first turn — a chat message typed
+    before the agent started follows it, never precedes it."""
+    captured = {}
+    gate = threading.Event()
+    proc = GatedFakeProc([result_line("done")], gate)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen(proc, captured))
+    calls = {"n": 0}
+
+    def chat_source():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            gate.set()
+            return [(1, "typed early")]
+        return []
+
+    worker.ClaudeExecutor(chat_poll_seconds=0).run(
+        TICKET, board=BOARD, directory=str(tmp_path), session_id="s",
+        chat_source=chat_source, chat_delivered=lambda ids: None)
+    sent = stdin_texts(proc)
+    assert "Do it" in sent[0]
+    assert sent[1] == "typed early"

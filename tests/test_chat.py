@@ -149,3 +149,62 @@ def test_pump_loop_stops_once_the_pipe_breaks():
     # One poll, one failed write, then the loop gives up rather than
     # retrying against a pipe that will never accept anything again.
     assert calls["n"] == 1
+
+
+# ---------- ending the run: stdin must close once the agent is done ----------
+#
+# With stdin held open the CLI waits for another user turn after it emits its
+# top-level result, so the process never exits, the reader never sees EOF, and
+# the run burns the full 30-minute deadline even after the work is finished.
+# Same rule as the local tool's chat_should_close: close once a result has
+# arrived since the last message we sent and nothing else is queued.
+
+def run_pump(stdin, chat_source, stop_pump, result_seen, delivered=None):
+    """Run the pump on a thread and return it, so a loop that never exits
+    shows up as a still-alive thread instead of hanging the test run."""
+    th = threading.Thread(
+        target=worker._chat_pump_loop,
+        args=(stdin, chat_source, delivered, stop_pump, 0, result_seen),
+        daemon=True)
+    th.start()
+    th.join(timeout=2)
+    return th
+
+
+def test_chat_should_close_only_after_a_result_with_nothing_queued():
+    assert worker.chat_should_close(True, True) is True
+    assert worker.chat_should_close(False, True) is False
+    assert worker.chat_should_close(True, False) is False
+
+
+def test_pump_loop_closes_stdin_once_the_agent_emits_its_result():
+    stdin = _CapturingStdin()
+    stop_pump = threading.Event()  # never set: only the result may end this
+    result_seen = threading.Event()
+    result_seen.set()
+    th = run_pump(stdin, lambda: [], stop_pump, result_seen)
+    assert not th.is_alive(), "pump kept the CLI's stdin open past its result"
+    assert stdin.closed
+
+
+def test_pump_loop_keeps_going_when_a_message_beats_the_result():
+    """A message queued before the result is sent instead, and the agent runs
+    another turn — the next result re-arms the close."""
+    stdin = _CapturingStdin()
+    stop_pump = threading.Event()
+    result_seen = threading.Event()
+    delivered = []
+    calls = {"n": 0}
+
+    def chat_source():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return [(1, "one more thing")]
+        result_seen.set()  # the agent answers, then reports done
+        return []
+
+    th = run_pump(stdin, chat_source, stop_pump, result_seen, delivered.extend)
+    assert not th.is_alive()
+    assert delivered == [1]
+    assert "one more thing" in stdin.getvalue()
+    assert stdin.closed

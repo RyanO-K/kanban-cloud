@@ -261,6 +261,15 @@ def _stream_json_turn(raw_line: str):
     return role, text
 
 
+def _is_result_line(raw_line) -> bool:
+    """True for the CLI's top-level `{"type": "result"}` line — the marker
+    that the agent has finished its turn (see chat_should_close)."""
+    try:
+        return json.loads(raw_line).get("type") == "result"
+    except (json.JSONDecodeError, TypeError, AttributeError):
+        return False
+
+
 # ---------- agent chat: pump queued messages onto the CLI's live stdin ----------
 #
 # `--input-format stream-json` keeps the CLI's stdin open for additional user
@@ -309,7 +318,20 @@ def chat_close(stdin) -> None:
         pass
 
 
-def _chat_pump_loop(stdin, chat_source, chat_delivered, stop_pump, poll_interval) -> None:
+def chat_should_close(result_seen_since_last_send, nothing_queued) -> bool:
+    """True when the pump should close the CLI's stdin, ending the run.
+
+    Close only when (a) the CLI has emitted a top-level result SINCE the last
+    user turn we wrote AND (b) nothing else is queued. Held open past its
+    result the CLI just waits for another turn: the process never exits, the
+    reader never sees EOF, and a finished run still burns the full
+    AGENT_TIMEOUT_SECONDS. Same rule as the local tool's chat_should_close.
+    """
+    return bool(result_seen_since_last_send) and bool(nothing_queued)
+
+
+def _chat_pump_loop(stdin, chat_source, chat_delivered, stop_pump, poll_interval,
+                    result_seen=None) -> None:
     """Runs on its own thread for the lifetime of one CLI process: polls
     `chat_source()` for newly queued messages and writes them to `stdin` in
     order via `chat_pump`, acknowledging each batch through `chat_delivered`.
@@ -317,6 +339,10 @@ def _chat_pump_loop(stdin, chat_source, chat_delivered, stop_pump, poll_interval
     queued when the process starts are not lost. Always closes `stdin` on
     the way out, however the loop ends, so the CLI sees a clean EOF instead
     of an abandoned pipe.
+
+    `result_seen` is the Event the read loop sets on each top-level result
+    line. Sending a message clears it, so the close decision re-arms on the
+    result of the turn that message triggered rather than an earlier one.
     """
     try:
         while not stop_pump.is_set():
@@ -334,6 +360,11 @@ def _chat_pump_loop(stdin, chat_source, chat_delivered, stop_pump, poll_interval
                         print(f"  [claude] chat delivery ack failed: {exc!r}")
                 if len(sent) < len(pending):
                     break  # stdin is gone; nothing left to do
+                if sent and result_seen is not None:
+                    result_seen.clear()  # this turn's own result decides
+            elif result_seen is not None and chat_should_close(
+                    result_seen.is_set(), True):
+                break
             stop_pump.wait(poll_interval)
     finally:
         chat_close(stdin)
@@ -404,7 +435,13 @@ class ClaudeExecutor:
             prompt = build_resume_prompt(resume)
         else:
             prompt = build_agent_prompt(ticket, board, directory)
-        cmd = [exe, "-p", prompt, "--allowedTools", allowed_tools,
+        # The prompt is NOT argv. `--input-format stream-json` makes the CLI
+        # read its first user turn from stdin and ignore a positional prompt
+        # after -p entirely: passed that way the session comes up, runs its
+        # SessionStart hooks, and then sits idle against a pipe nobody wrote
+        # to until AGENT_TIMEOUT_SECONDS fires. It is written to stdin below,
+        # exactly as the local orchestrator's chat dispatch does it.
+        cmd = [exe, "-p", "--allowedTools", allowed_tools,
                "--input-format", "stream-json",
                "--output-format", "stream-json", "--verbose"]
         if session_id:
@@ -438,6 +475,15 @@ class ClaudeExecutor:
         except FileNotFoundError:
             return False, "`claude` CLI not found on this PC's PATH."
 
+        # The run's first user turn: the ticket prompt itself, ahead of any
+        # chat the pump goes on to deliver. A write that fails here means the
+        # child died instantly; the normal read/exit path reports that.
+        try:
+            proc.stdin.write(chat_encode(prompt) + "\n")
+            proc.stdin.flush()
+        except (BrokenPipeError, ValueError, OSError) as exc:
+            print(f"  [claude] could not send the prompt: {exc!r}")
+
         # Best-effort local copy of the raw stream, mirroring the local
         # `.kanban` tool's per-run log file. Never fatal to the run: a full
         # disk or unwritable folder just means this PC has no local copy —
@@ -461,12 +507,17 @@ class ClaudeExecutor:
                     pass
 
         stop_pump = threading.Event()
+        # Set by the read loop on every top-level result line; the pump uses
+        # it to close stdin once the agent is done and nothing is queued,
+        # which is what lets the CLI exit instead of waiting for a turn that
+        # is never coming.
+        result_seen = threading.Event()
         pump_thread = None
         if chat_source is not None:
             pump_thread = threading.Thread(
                 target=_chat_pump_loop,
                 args=(proc.stdin, chat_source, chat_delivered, stop_pump,
-                      self.chat_poll_seconds),
+                      self.chat_poll_seconds, result_seen),
                 daemon=True,
             )
             pump_thread.start()
@@ -484,6 +535,8 @@ class ClaudeExecutor:
                 for raw_line in proc.stdout:
                     seen_lines.append(raw_line)
                     write_log(raw_line)
+                    if _is_result_line(raw_line):
+                        result_seen.set()
                     role, text = _stream_json_turn(raw_line)
                     if text:
                         pending.append(text)
