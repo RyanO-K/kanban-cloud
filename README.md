@@ -92,6 +92,13 @@ status='queued' ... FOR UPDATE SKIP LOCKED LIMIT 1)` run directly against
 Postgres, so two pollers can never double-claim and neither blocks the
 other. A failed run requeues once, then the ticket goes to `failed`.
 
+Any ticket that has been claimed carries the Claude session its agent ran in,
+and the modal offers a **Copy resume cmd** button for it:
+`cd '<dir>'; claude --resume <session-id>`. Run that on the PC the row names
+— the transcript lives on that machine's disk, nowhere else — and you pick up
+the agent's own conversation rather than starting over. Useful on a ticket
+sitting in Blocked, or on one whose worker died mid-run.
+
 **A ticket is done when it is committed and pushed** — nothing else counts. A
 run that finishes but leaves its branch on the worker PC (auto-push off for
 the board, an unmet commit gate, a push that failed, or an agent that
@@ -187,11 +194,12 @@ single time and exit).
 Two things have to be configured before a PC can do real repo work, and they
 live in two different places on purpose.
 
-**On the board (server side):** open the board settings (the gear next to the
-board picker, owner only) and fill in what every agent working this board
-should know — a short project description, anything explicitly out of scope,
-what has to hold before a commit, and whether agents should isolate their work
-in a git worktree. This is project knowledge, so it is shared by every PC.
+**On the board (server side):** open the **Settings** tab (owner only) and fill
+in what every agent working this board should know — a short project
+description, anything explicitly out of scope, and what has to hold before a
+commit under **This board · Project**, and the repo URL plus whether agents
+should isolate their work in a git worktree under **This board · Repository**.
+This is project knowledge, so it is shared by every PC.
 
 **On each PC (worker side):** tell the worker which folder on *this* machine
 holds each board's code. The same board is worked by several PCs with
@@ -319,9 +327,9 @@ queue, so an enrolled worker cannot claim one even though two of them sit in
 
 ## Importing a local `.kanban` board
 
-The **Import** button in the header (owner-only) loads a board from the local
-file-based `.kanban` tool. Click it and pick a board folder, or drag the folder
-onto the board area. One board per import: pick a single board folder (e.g.
+**Settings → This board → Import** (owner-only) loads a board from the local
+file-based `.kanban` tool. Choose a board folder there, or drag the folder
+straight onto the board area. One board per import: pick a single board folder (e.g.
 `.kanban/ai-kanban`), not the `.kanban` root — dropping the root tells you which
 boards it found instead of importing all of them.
 

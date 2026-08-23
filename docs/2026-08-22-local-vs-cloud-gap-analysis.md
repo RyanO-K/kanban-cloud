@@ -47,7 +47,7 @@ Local ticket fields (observed live on the `ai-kanban` board) vs the cloud `ticke
 | `steps[]`, `files[]`, `outputs[]` | agent plan / checklist arrays | Missing |
 | `history[]` | append-only `status_change` audit with `sessionId` | Missing — only `updated_at` |
 | `optional` | mark ticket non-blocking | Missing |
-| `claudeSessionId` / `claudeSessionDir` | `claude --resume <id>` handoff to a human | Missing |
+| `claudeSessionId` / `claudeSessionDir` | `claude --resume <id>` handoff to a human | Done — `tickets.session_id` + `tickets.session_dir`, offered as a Copy-resume-cmd button on the ticket |
 | `runLogFile` / `completedLog` | per-run transcript pointer + archived log | Missing (`work_queue.result`, 10k chars, terminal only) |
 | `commitGate {requirementsMet, summary}` | agent's self-report that the board's test gate passed | Missing |
 | `outputBranch` / `mergeBranch` | branch the work landed on / merge target | Missing |

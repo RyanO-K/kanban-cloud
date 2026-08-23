@@ -2,6 +2,99 @@
 
 Last updated: 2026-08-23
 
+## Resume command: taking a ticket's agent session over by hand (2026-08-23)
+
+The ticket modal now offers **Copy resume cmd**, which puts
+`cd '<dir>'; claude --resume <session-id>` on the clipboard so a human can
+pick up where the agent left off. This is the `claudeSessionId` /
+`claudeSessionDir` row the gap analysis had marked *Missing*
+(`docs/2026-08-22-local-vs-cloud-gap-analysis.md`), and it matches what the
+local `.kanban` board already does.
+
+**Why a directory had to be added.** `tickets.session_id` already existed
+(minted in `claim_next`), but the CLI scopes sessions by working directory —
+an id on its own resolves to nothing from anywhere else. That directory was
+known only to the worker: `resolve_directory` runs per-PC and its result
+never left the machine. So `tickets.session_dir` is new
+(`schema.sql`, `app/models.py`, `_SESSION_DIR_COLUMNS` in `app/db.py`), and
+`worker.py`'s `run_slot` reports it via the new `record_session_dir` just
+*before* handing off to the executor — an agent that hangs or dies is exactly
+when a human wants this command, so a write that only happened on a clean
+exit would be missing when it mattered. That write is best-effort by
+contract: a failure there is printed and swallowed, because a breadcrumb for
+a human must never fail the agent run it precedes.
+
+**Where the string is built.** `app.main.build_resume_command`, server-side,
+surfaced as `resume_command` on every ticket alongside `session_id`,
+`session_dir` and `session_worker` (the PC that owns the transcript — the
+command is useless without knowing which). Assembling it in Python rather
+than in `index.html` is what makes its fallbacks testable: this repo has no
+JS runner, so anything built in the browser is only ever checked by eye. A
+ticket whose last run predates `session_dir` still gets the bare
+`claude --resume <id>` rather than nothing. `cd '<dir>'; <cmd>` parses in
+both PowerShell and bash, so one string serves Windows and POSIX workers.
+
+The row is `owner-only`: it exposes an absolute path on the owner's own PC,
+and the takeover it offers is not a spectator's to run. It renders for any
+ticket that has a session, whatever its status; a ticket that never ran shows
+nothing at all rather than a dead button.
+
+Tests: 543 → 560 (3 `record_session_dir` + 1 best-effort-write, 2 `run_slot`
+wiring, 4 `build_resume_command`/`resume_command`, 3 session fields on
+`ticket_json`, 4 markup guards). Verified by hand against a live instance
+driven with Playwright: the row shows the id and `run it on ryan-desktop`,
+the button copies the exact command, and the row stays hidden both for a
+ticket that never ran and for spectators.
+
+## Board UI rebuilt from the design canvas (2026-08-23)
+
+`app/static/index.html` was rewritten against the `Kanban Board.dc.html`
+design. No server change: every number on screen comes from a route that
+already existed, and `git diff` touches the one static file plus its tests.
+
+**The viewport fix, which is the point.** The shell is `height: 100vh` with
+`overflow: hidden`, so the page itself never scrolls. Every scrollbar is
+now in a named child: `.colBody` vertically, `.boardScroll` horizontally,
+`.side` and `#settingsView` on their own. Columns are `flex: 1 1 0` with
+`min-width: 224px` — they share the width until they can't, and then the
+strip scrolls sideways instead of crushing the cards. Verified in Chromium
+at 1440×900, 900×800 and 700×800: `document.body` never scrolls in either
+axis, and the rail drops out below 820px.
+
+**Selecting versus opening.** A single click fills a 320px detail rail
+(status, worker, model, elapsed, live agent output, Open ticket / Kill run);
+double-click still opens the full editor modal. Live-log polling follows
+`editingTicket || selectedTicket` and paints one buffer into both boxes, so
+the rail tails a running agent without opening anything.
+
+**Settings became a scoped page.** The board-settings gear, the cluster-
+settings gear and the profiles modal are gone; an owner-only **Settings** tab
+holds two scopes — *This board* (Project, Repository, Agents, Import) and
+*Cluster* (Concurrency, Profiles). Deliberately, every row is backed by
+something the API actually persists: board columns, `cluster_settings`,
+profiles, the join code. Edits stage into a draft so typing never re-renders
+the field under the cursor, and a section with no save target hides the
+action row rather than showing an inert button.
+
+**The feed is derived, not new.** `buildFeed()` unrolls the `queued_at` /
+`claimed_at` / `finished_at` moments already on each `work_queue` row that
+the board loads anyway. Server timestamps are naive UTC (`models.utcnow`),
+so they are parsed with an explicit `Z` — without it every age reads hours
+out in a non-UTC browser.
+
+**Theming.** The design's palette is the dark theme, on `body.dark`; `:root`
+carries a derived light palette so the existing toggle and its `kc_theme`
+preference keep working instead of switching to a broken page. IBM Plex
+Sans/Mono throughout.
+
+Tests: 541 → 563. `tests/test_frontend_markup.py` grew from 39 to 61 —
+assertions whose markup moved were rewritten against the new structure
+(settings sections are now built by `SECTION_BODY`, so they are asserted
+inside that function rather than as static markup), and the new invariants
+got guards of their own: the 100vh shell, the column floor, the rail width,
+selection-driven polling, the derived feed, the UTC parse, the two scopes,
+and both palettes.
+
 ## Five columns, and a ticket is done when it is pushed (ticket #20, 2026-08-23)
 
 The board now shows **TODO / Ready / In progress / Blocked / Done** over seven

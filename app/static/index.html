@@ -4,147 +4,528 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>kanban-cloud</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
+  /* ---------- design tokens ----------
+     Dark is the product's own look (and the default); the light palette is a
+     derived counterpart so the theme switch in the account menu keeps working.
+     `body.dark` rather than a `light` class so initTheme/toggleDarkMode and
+     the stored kc_theme value carry over unchanged. */
   :root {
-    --bg: #f4f5f7; --panel: #ffffff; --ink: #1b1f24; --muted: #6b7280;
-    --accent: #2563eb; --border: #d8dce3; --ok: #16a34a; --bad: #dc2626;
-    --overlay: rgba(0,0,0,.35); --col-bg: #ebedf0; --badge-bg: #eef2ff;
+    --bg: #f4f5f7; --panel: #ffffff; --surface: #f0f2f5; --raised: #ffffff;
+    --card: #ffffff; --card-sel: #e9eefc;
+    --ink: #1b1f24; --ink-hi: #0d1117; --muted: #5f6672; --dim: #79808d; --faint: #98a0ad;
+    --border: #d9dde4; --border-soft: #e6e9ee; --border-hi: #c4cad4;
+    --hover: #eceff4;
+    --accent: #3f5fd8; --accent-br: #3f5fd8; --accent-hi: #3554cb;
+    --accent-ink: #2a3f9e; --accent-soft: #e7ecfd;
+    --ok: #1f9d63; --ok-ink: #157a4b; --ok-bg: #e7f6ee; --ok-br: #b8e2cc;
+    --warn: #b9791d; --warn-bg: #fbf1e0; --warn-br: #eed6ab;
+    --bad: #cf5b64; --bad-ink: #b8323d; --bad-bg: #fdedee; --bad-br: #f0c3c7;
+    --chip: #f1f3f7; --chip-br: #dfe3ea; --track: #e2e6ec; --code-bg: #f7f8fa;
+    --overlay: rgba(16,18,22,.34); --shadow: 0 12px 34px rgba(16,18,22,.16);
+    --scroll: #c8ced8; --scroll-hi: #aeb6c3;
   }
   body.dark {
-    --bg: #14161a; --panel: #1d2025; --ink: #e6e8eb; --muted: #9aa2ad;
-    --accent: #5b8def; --border: #33383f; --ok: #22c55e; --bad: #ef4444;
-    --overlay: rgba(0,0,0,.6); --col-bg: #23262c; --badge-bg: #232a3d;
+    --bg: #0e1013; --panel: #13161b; --surface: #14171c; --raised: #171b21;
+    --card: #181c22; --card-sel: #1e2431;
+    --ink: #e7e9ee; --ink-hi: #f2f4f8; --muted: #8b93a3; --dim: #6d7484; --faint: #565d6b;
+    --border: #22262e; --border-soft: #1e222a; --border-hi: #2b313a;
+    --hover: #1c2028;
+    --accent: #3f5fd8; --accent-br: #5170e8; --accent-hi: #4d6ce6;
+    --accent-ink: #c9d5ff; --accent-soft: #1b2131;
+    --ok: #4fbf87; --ok-ink: #6fcf9e; --ok-bg: #15221b; --ok-br: #23402f;
+    --warn: #e0a458; --warn-bg: #241d12; --warn-br: #3d3320;
+    --bad: #d4767d; --bad-ink: #e0787f; --bad-bg: #2c1a1d; --bad-br: #4a2a2e;
+    --chip: #1a1e25; --chip-br: #262b34; --track: #22272f; --code-bg: #0e1116;
+    --overlay: rgba(0,0,0,.62); --shadow: 0 16px 44px rgba(0,0,0,.5);
+    --scroll: #2a2f38; --scroll-hi: #39404b;
   }
+
   * { box-sizing: border-box; }
-  body { margin: 0; font-family: "Segoe UI", system-ui, sans-serif; background: var(--bg); color: var(--ink); }
-  header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--border); flex-wrap: wrap; }
-  header h1 { font-size: 16px; margin: 0 8px 0 0; }
-  select, input, textarea, button { font: inherit; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--ink); }
-  button { cursor: pointer; background: var(--accent); color: #fff; border: none; }
-  button.ghost { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
-  button.small { padding: 3px 8px; font-size: 12px; }
-  .spacer { flex: 1; }
+  html, body { margin: 0; padding: 0; height: 100%; }
+  body {
+    background: var(--bg); color: var(--ink); overflow: hidden;
+    font-family: "IBM Plex Sans", system-ui, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .mono { font-family: "IBM Plex Mono", ui-monospace, Consolas, monospace; }
+  .grow { flex: 1; }
   .muted { color: var(--muted); font-size: 12px; }
-  .layout { display: flex; gap: 12px; padding: 12px 16px; align-items: flex-start; }
-  .board { display: flex; gap: 10px; flex: 1; overflow-x: auto; }
-  .col { background: var(--col-bg); border-radius: 8px; min-width: 210px; width: 210px; padding: 8px; }
-  .col h3 { margin: 2px 4px 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); display: flex; justify-content: space-between; }
-  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 8px; margin-bottom: 8px; cursor: pointer; font-size: 13px; }
-  .card:hover { border-color: var(--accent); }
-  .card .tid { color: var(--muted); font-size: 11px; }
-  .badge { display: inline-block; font-size: 10px; padding: 1px 6px; border-radius: 8px; background: var(--badge-bg); color: var(--accent); margin-top: 4px; }
-  .badge.blocked { background: var(--bad); color: #fff; margin-right: 4px; }
-  .side { width: 260px; flex-shrink: 0; display: flex; flex-direction: column; gap: 12px; }
-  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
-  .panel h3 { margin: 0 0 8px; font-size: 14px; }
-  .worker-row { display: flex; align-items: center; gap: 6px; font-size: 13px; padding: 4px 0; flex-wrap: wrap; }
-  .worker-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .worker-actions { display: flex; gap: 6px; margin-left: auto; }
-  /* folder-drop import */
-  #dropZone { position: relative; }
-  .dropHint { display: none; }
-  #dropZone.dragging { outline: 2px dashed var(--accent); outline-offset: -6px; border-radius: 10px; }
-  #dropZone.dragging .dropHint { display: flex; position: absolute; inset: 0; align-items: center;
-    justify-content: center; background: var(--panel); opacity: .93; font-size: 15px; z-index: 5; pointer-events: none; }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: #9ca3af; }
-  .dot.on { background: var(--ok); }
-  /* modal */
-  .overlay { position: fixed; inset: 0; background: var(--overlay); display: none; align-items: center; justify-content: center; z-index: 10; }
-  .overlay.show { display: flex; }
-  .modal { background: var(--panel); border-radius: 10px; padding: 18px; width: min(560px, 92vw); max-height: 88vh; overflow-y: auto; }
-  .modal h2 { margin: 0 0 10px; font-size: 17px; }
-  .modal label { display: block; margin: 10px 0 4px; font-size: 12px; color: var(--muted); }
-  .modal input, .modal textarea, .modal select { width: 100%; }
-  .modal textarea { min-height: 90px; resize: vertical; }
-  .row { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
-  .comment { border-top: 1px solid var(--border); padding: 6px 0; font-size: 13px; }
-  .comment .who { font-weight: 600; font-size: 12px; }
-  #authView { max-width: 360px; margin: 60px auto; }
-  /* spectator (read-only) mode: hide every mutating control */
-  body.spectator .owner-only { display: none !important; }
-  #spectatorNote { display: none; font-size: 12px; color: var(--muted); }
+  .dim { color: var(--dim); }
+  a { color: var(--accent-br); text-decoration: none; }
+  ::-webkit-scrollbar { height: 10px; width: 10px; }
+  ::-webkit-scrollbar-thumb { background: var(--scroll); border-radius: 6px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--scroll-hi); }
+  ::-webkit-scrollbar-track { background: transparent; }
+  @keyframes pulseDot { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+  @keyframes riseIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+  /* ---------- shell ----------
+     The app owns exactly one viewport: nothing outside a column body, the
+     side rail or the settings pane is allowed to scroll, which is what keeps
+     the header pinned and the columns full-height at any window size. */
+  #appView { height: 100vh; height: 100dvh; display: none; flex-direction: column; overflow: hidden; }
+  #appView.on { display: flex; }
+
+  header {
+    flex: 0 0 auto; height: 50px; display: flex; align-items: center; gap: 12px;
+    padding: 0 16px; background: var(--panel); border-bottom: 1px solid var(--border);
+  }
+  .wordmark { font-size: 14px; font-weight: 600; letter-spacing: -.01em; color: var(--ink-hi); white-space: nowrap; }
+  .hsep { width: 1px; height: 18px; background: var(--chip-br); flex: 0 0 auto; }
+
+  .tabs { display: flex; align-items: center; gap: 1px; background: var(--chip);
+          border: 1px solid var(--chip-br); border-radius: 7px; padding: 2px; flex: 0 0 auto; }
+  .tabs button { height: 24px; padding: 0 12px; border: none; border-radius: 5px; cursor: pointer;
+                 font: 500 12px "IBM Plex Sans", sans-serif; background: transparent; color: var(--muted);
+                 transition: background .14s ease, color .14s ease; }
+  .tabs button:hover { color: var(--ink); }
+  .tabs button.on { background: var(--border-hi); color: var(--ink-hi); }
+
+  /* Native selects wearing the mock's pill: same control, no custom menu to
+     re-implement (keyboard, mobile and long board lists all keep working). */
+  .pick { position: relative; display: flex; align-items: center; gap: 7px; height: 28px;
+          padding: 0 26px 0 10px; background: transparent; border: 1px solid var(--chip-br);
+          border-radius: 7px; transition: background .14s ease, border-color .14s ease; }
+  .pick:hover { background: var(--hover); border-color: var(--border-hi); }
+  .pick::after { content: "▼"; position: absolute; right: 9px; font-size: 8px; color: var(--dim); pointer-events: none; }
+  .pick select { appearance: none; -webkit-appearance: none; background: transparent; border: none;
+                 color: var(--ink); font: 500 12px "IBM Plex Sans", sans-serif; padding: 0; margin: 0;
+                 cursor: pointer; max-width: 190px; text-overflow: ellipsis; outline: none; }
+  .pick select:disabled { cursor: default; color: var(--muted); }
+  .pick option { background: var(--panel); color: var(--ink); }
+  .pickDot { width: 6px; height: 6px; border-radius: 2px; background: var(--accent-br); flex: 0 0 auto; }
+
+  .runPill { display: flex; align-items: center; gap: 7px; height: 28px; padding: 0 11px;
+             border: 1px solid var(--ok-br); background: var(--ok-bg); border-radius: 7px;
+             font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 11px; color: var(--ok-ink);
+             white-space: nowrap; }
+  .runPill.idle { border-color: var(--chip-br); background: var(--chip); color: var(--muted); }
+  .pdot { width: 6px; height: 6px; border-radius: 50%; background: var(--dim); flex: 0 0 auto; }
+  .pdot.on { background: var(--ok); animation: pulseDot 2.4s ease-in-out infinite; }
+
+  /* ---------- buttons ---------- */
+  button { font: inherit; cursor: pointer; }
+  .btn { height: 28px; padding: 0 10px; display: inline-flex; align-items: center; gap: 7px;
+         background: transparent; border: 1px solid var(--chip-br); border-radius: 7px;
+         color: var(--ink); font: 500 12px "IBM Plex Sans", sans-serif;
+         white-space: nowrap; transition: background .14s ease, border-color .14s ease, color .14s ease; }
+  .btn:hover { background: var(--hover); border-color: var(--border-hi); }
+  .btn.primary { background: var(--accent); border-color: var(--accent-br); color: #fff; font-weight: 600; padding: 0 12px; }
+  .btn.primary:hover { background: var(--accent-hi); }
+  .btn.primary:active { transform: translateY(1px); }
+  .btn.solid { background: var(--chip); border-color: var(--border-hi); color: var(--ink); }
+  .btn.solid:hover { background: var(--hover); }
+  .btn.danger { border-color: var(--bad-br); color: var(--bad-ink); }
+  .btn.danger:hover { background: var(--bad-bg); }
+  .btn.wide { flex: 1; justify-content: center; }
+  .btn.sm { height: 26px; padding: 0 9px; font-size: 11px; }
+  .btn.icon { width: 28px; padding: 0; justify-content: center; border-color: transparent; color: var(--muted); position: relative; }
+  .btn.icon:hover { background: var(--hover); color: var(--ink); border-color: transparent; }
+
+  .badge { display: inline-flex; align-items: center; height: 18px; padding: 0 7px; border-radius: 5px;
+           background: var(--accent-soft); color: var(--accent-ink); border: 1px solid transparent;
+           font: 500 10px "IBM Plex Mono", ui-monospace, monospace; white-space: nowrap; }
+  .badge.blocked { background: var(--bad-bg); color: var(--bad-ink); border-color: var(--bad-br); }
+  .badge.warn { background: var(--warn-bg); color: var(--warn); border-color: var(--warn-br); }
+  .badge.ok { background: var(--ok-bg); color: var(--ok-ink); border-color: var(--ok-br); }
+
+  #bellBadge { position: absolute; top: -5px; right: -5px; height: 15px; min-width: 15px;
+               padding: 0 4px; justify-content: center; background: var(--bad); color: #fff;
+               border: 1px solid var(--panel); font-size: 9px; }
+  #spectatorNote { display: none; font-size: 11px; color: var(--muted); white-space: nowrap; }
   body.spectator #spectatorNote { display: inline; }
-  #toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: #1b1f24; color: #fff; padding: 8px 16px; border-radius: 8px; display: none; z-index: 20; }
-  /* account/profile dropdown */
-  .accountWrap { position: relative; }
-  #accountBtn { display: flex; align-items: center; gap: 6px; background: transparent; color: var(--ink); border: 1px solid var(--border); }
-  #accountMenu { display: none; position: absolute; top: calc(100% + 6px); right: 0; min-width: 190px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,.15); padding: 6px; z-index: 15; }
+  body.spectator .owner-only { display: none !important; }
+
+  /* ---------- account menu ---------- */
+  .accountWrap { position: relative; flex: 0 0 auto; }
+  #accountBtn { border-color: transparent; color: var(--muted); }
+  #accountBtn:hover { border-color: transparent; color: var(--ink); }
+  .avatar { width: 20px; height: 20px; border-radius: 50%; background: var(--border-hi);
+            display: flex; align-items: center; justify-content: center;
+            font: 600 10px "IBM Plex Sans", sans-serif; color: var(--ink); }
+  #accountMenu { display: none; position: absolute; top: calc(100% + 8px); right: 0; min-width: 210px;
+                 background: var(--panel); border: 1px solid var(--border); border-radius: 9px;
+                 box-shadow: var(--shadow); padding: 6px; z-index: 15; }
   #accountMenu.show { display: block; }
-  #accountMenu .menuEmail { padding: 6px 8px; font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--border); margin-bottom: 4px; }
-  #accountMenu button.menuItem { display: flex; align-items: center; justify-content: space-between; width: 100%; text-align: left; background: transparent; color: var(--ink); border: none; padding: 7px 8px; border-radius: 6px; font-size: 13px; }
-  #accountMenu button.menuItem:hover { background: var(--col-bg); }
+  #accountMenu .menuEmail { padding: 7px 9px; font-size: 11px; color: var(--muted);
+                            border-bottom: 1px solid var(--border-soft); margin-bottom: 4px;
+                            overflow: hidden; text-overflow: ellipsis; }
+  #accountMenu button.menuItem { display: flex; align-items: center; justify-content: space-between;
+                                 width: 100%; text-align: left; background: transparent; color: var(--ink);
+                                 border: none; padding: 7px 9px; border-radius: 6px; font-size: 13px; }
+  #accountMenu button.menuItem:hover { background: var(--hover); }
+
+  /* ---------- board view ---------- */
+  #boardView { flex: 1; display: flex; min-height: 0; align-items: stretch; overflow: hidden; }
+  .boardScroll { position: relative; flex: 1; min-width: 0; overflow-x: auto; overflow-y: hidden; padding: 14px; }
+  .boardCols { display: flex; gap: 12px; height: 100%; align-items: stretch; }
+
+  /* flex:1 1 0 with a floor: five columns split the width evenly and only
+     start scrolling sideways once each would drop under 224px. */
+  .col { flex: 1 1 0; min-width: 224px; display: flex; flex-direction: column; min-height: 0;
+         background: var(--surface); border: 1px solid var(--border); border-radius: 10px; }
+  .col.empty { border-color: var(--border-soft); }
+  .col.dragOver { border-color: var(--accent-br); }
+  .colHead { flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
+             padding: 11px 12px 9px; border-bottom: 1px solid var(--border-soft); }
+  .cdot { width: 6px; height: 6px; border-radius: 50%; flex: 0 0 auto; }
+  .cname { font: 600 11px "IBM Plex Sans", sans-serif; letter-spacing: .09em;
+           text-transform: uppercase; color: var(--muted); }
+  .ccount { min-width: 20px; height: 19px; padding: 0 6px; display: flex; align-items: center;
+            justify-content: center; background: var(--chip); border-radius: 5px;
+            font: 500 11px "IBM Plex Mono", ui-monospace, monospace; color: var(--muted); }
+  .colBody { flex: 1; min-height: 0; overflow-y: auto; padding: 8px;
+             display: flex; flex-direction: column; gap: 7px; }
+  .colEmpty { flex: 1; min-height: 88px; display: flex; align-items: center; justify-content: center;
+              border: 1px dashed var(--chip-br); border-radius: 8px;
+              font: 400 11px "IBM Plex Mono", ui-monospace, monospace; color: var(--faint); }
+
+  .card { display: flex; flex-direction: column; gap: 5px; padding: 9px 11px; background: var(--card);
+          border: 1px solid var(--border); border-radius: 8px; cursor: pointer; flex: 0 0 auto;
+          transition: border-color .14s ease, background .14s ease; }
+  .card:hover { border-color: var(--border-hi); background: var(--hover); }
+  .card.running { border-color: #2f3b58; }
+  body:not(.dark) .card.running { border-color: #b8c4ea; }
+  .card.sel { background: var(--card-sel); border-color: var(--accent); }
+  .cardTop { display: flex; align-items: baseline; gap: 8px; }
+  .cardId { font: 500 10px "IBM Plex Mono", ui-monospace, monospace; color: var(--dim); }
+  .runChip { display: flex; align-items: center; gap: 5px; min-width: 0;
+             font: 500 10px "IBM Plex Mono", ui-monospace, monospace; color: var(--ok-ink); }
+  .runChip span.txt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cardTitle { font: 400 13px/1.42 "IBM Plex Sans", sans-serif; color: var(--ink); text-wrap: pretty; }
+  .cardFoot { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding-top: 1px; }
+  .cmeta { display: flex; align-items: center; gap: 4px;
+           font: 400 10px "IBM Plex Mono", ui-monospace, monospace; color: var(--muted); }
+
+  .dropHint { display: none; }
+  .boardScroll.dragging { outline: 2px dashed var(--accent-br); outline-offset: -8px; border-radius: 10px; }
+  .boardScroll.dragging .dropHint { display: flex; position: absolute; inset: 0; align-items: center;
+    justify-content: center; background: var(--bg); opacity: .94; font-size: 15px; z-index: 5; pointer-events: none; }
+
+  /* ---------- side rail ---------- */
+  .side { flex: 0 0 320px; width: 320px; border-left: 1px solid var(--border); background: var(--panel);
+          overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+  .sideCard { flex: 0 0 auto; border: 1px solid var(--border); border-radius: 10px;
+              background: var(--raised); overflow: hidden; }
+  .sideCardHead { display: flex; align-items: center; gap: 8px; padding: 10px 12px;
+                  border-bottom: 1px solid var(--border-soft);
+                  font: 600 11px "IBM Plex Sans", sans-serif; letter-spacing: .09em;
+                  text-transform: uppercase; color: var(--muted); }
+  .sideCardHead .note { font: 400 10px "IBM Plex Mono", ui-monospace, monospace;
+                        letter-spacing: 0; text-transform: none; color: var(--dim); }
+  .livePill { display: flex; align-items: center; gap: 6px; height: 22px; padding: 0 9px;
+              background: var(--chip); border: 1px solid var(--border-hi); border-radius: 11px;
+              color: var(--muted); font: 500 10px "IBM Plex Mono", ui-monospace, monospace;
+              letter-spacing: 0; text-transform: none; transition: color .14s ease, border-color .14s ease; }
+  .livePill:hover { color: var(--ink); }
+
+  .workersBody { padding: 12px; display: flex; flex-direction: column; gap: 12px; }
+  .wBlock { display: flex; flex-direction: column; gap: 8px; }
+  .wBlock + .wBlock { padding-top: 12px; border-top: 1px solid var(--border-soft); }
+  .wRow { display: flex; align-items: center; gap: 8px; }
+  .wName { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+           font: 500 12px "IBM Plex Mono", ui-monospace, monospace; color: var(--ink); }
+  .wLoad { font: 400 11px "IBM Plex Mono", ui-monospace, monospace; color: var(--muted); flex: 0 0 auto; }
+  .wBar { height: 4px; border-radius: 3px; background: var(--track); overflow: hidden; }
+  .wFill { height: 100%; border-radius: 3px; transition: width .4s ease;
+           background: linear-gradient(90deg, #3f7f5f, #4fbf87); }
+  .wActions { display: flex; gap: 7px; }
+  .wActions .btn { flex: 1; justify-content: center; height: 27px; font-size: 11px; }
+
+  .joinBox { padding: 11px 12px; border-top: 1px solid var(--border-soft); background: var(--surface);
+             display: flex; flex-direction: column; gap: 7px; }
+  .kicker { font: 400 10px "IBM Plex Sans", sans-serif; letter-spacing: .06em;
+            text-transform: uppercase; color: var(--muted); }
+  #joinCode { font: 500 12px "IBM Plex Mono", ui-monospace, monospace; color: var(--ink); letter-spacing: .06em; }
+  #copyCodeBtn { height: 22px; padding: 0 8px; background: var(--chip); border: 1px solid var(--border-hi);
+                 border-radius: 5px; color: var(--muted); font: 500 10px "IBM Plex Mono", ui-monospace, monospace;
+                 transition: color .14s ease; }
+  #copyCodeBtn:hover { color: var(--ink); }
+  .joinBox pre { margin: 0; padding: 9px 10px; background: var(--code-bg); border: 1px solid var(--border-soft);
+                 border-radius: 6px; font: 400 10px/1.6 "IBM Plex Mono", ui-monospace, monospace;
+                 color: var(--muted); white-space: pre-wrap; word-break: break-all; }
+
+  .feedBody { max-height: 340px; overflow-y: auto; padding: 4px 0; }
+  .feedRow { display: flex; align-items: center; gap: 9px; padding: 7px 12px;
+             border-left: 2px solid var(--dim); cursor: pointer; transition: background .14s ease; }
+  .feedRow:hover { background: var(--hover); }
+  .feedRow.fresh { animation: riseIn .3s ease both; }
+  .fTicket { font: 500 11px "IBM Plex Mono", ui-monospace, monospace; color: var(--muted); flex: 0 0 auto; }
+  .fText { font: 400 11px "IBM Plex Sans", sans-serif; color: var(--muted);
+           overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .fAgo { font: 400 10px "IBM Plex Mono", ui-monospace, monospace; color: var(--faint); flex: 0 0 auto; }
+  .sideEmpty { padding: 14px 12px; font: 400 11px "IBM Plex Mono", ui-monospace, monospace; color: var(--faint); }
+
+  /* ---------- ticket detail (side rail) ---------- */
+  #detailPanel { display: none; flex-direction: column; gap: 12px; animation: riseIn .2s ease both; }
+  #detailPanel.on { display: flex; }
+  .detailHead { display: flex; align-items: center; gap: 9px; }
+  .dId { font: 500 12px "IBM Plex Mono", ui-monospace, monospace; color: var(--muted); }
+  .statusChip { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 9px;
+                border-radius: 6px; font: 500 10px "IBM Plex Mono", ui-monospace, monospace;
+                background: var(--chip); border: 1px solid var(--chip-br); color: var(--muted); }
+  .statusChip.running { background: var(--ok-bg); border-color: var(--ok-br); color: var(--ok-ink); }
+  .statusChip.bad { background: var(--bad-bg); border-color: var(--bad-br); color: var(--bad-ink); }
+  .dClose { width: 24px; height: 24px; display: flex; align-items: center; justify-content: center;
+            background: transparent; border: 1px solid var(--chip-br); border-radius: 6px;
+            color: var(--muted); font-size: 13px; transition: background .14s ease, color .14s ease; }
+  .dClose:hover { background: var(--hover); color: var(--ink); }
+  .dTitle { margin: 0; font: 500 15px/1.4 "IBM Plex Sans", sans-serif; color: var(--ink-hi); text-wrap: pretty; }
+  .metaGrid { display: grid; grid-template-columns: auto 1fr; gap: 7px 14px; padding: 11px 12px;
+              background: var(--raised); border: 1px solid var(--border); border-radius: 10px; }
+  .mk { font: 400 11px "IBM Plex Sans", sans-serif; color: var(--muted); }
+  .mv { font: 500 11px "IBM Plex Mono", ui-monospace, monospace; color: var(--ink);
+        overflow: hidden; text-overflow: ellipsis; }
+  .logBox { padding: 9px 12px; display: flex; flex-direction: column; gap: 5px;
+            max-height: 260px; overflow-y: auto; }
+  .logBox div { font: 400 10px/1.6 "IBM Plex Mono", ui-monospace, monospace; color: var(--muted);
+                word-break: break-word; white-space: pre-wrap; }
+  .detailActions { display: flex; gap: 8px; }
+  .detailNote { display: flex; align-items: center; gap: 8px; padding: 9px 11px; border-radius: 8px;
+                font: 400 11px/1.5 "IBM Plex Sans", sans-serif;
+                background: var(--warn-bg); border: 1px solid var(--warn-br); color: var(--warn); }
+
+  /* ---------- settings view ---------- */
+  #settingsView { flex: 1; min-height: 0; overflow-y: auto; display: none;
+                  justify-content: center; padding: 28px 20px 60px; }
+  #settingsView.on { display: flex; }
+  .settingsWrap { width: 100%; max-width: 880px; display: flex; gap: 28px; animation: riseIn .22s ease both; }
+  .settingsNav { flex: 0 0 186px; display: flex; flex-direction: column; gap: 16px;
+                 position: sticky; top: 0; align-self: flex-start; }
+  .navGroup { display: flex; flex-direction: column; gap: 2px; }
+  .navGroupHead { display: flex; align-items: baseline; gap: 6px; padding: 0 11px 6px; }
+  .navGroupHead .lbl { font: 600 10px "IBM Plex Sans", sans-serif; letter-spacing: .1em;
+                       text-transform: uppercase; color: var(--muted); }
+  .navGroupHead .sub { font: 400 10px "IBM Plex Mono", ui-monospace, monospace; color: var(--faint);
+                       overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .navItem { text-align: left; height: 30px; padding: 0 11px; border: none; border-radius: 7px;
+             font: 500 13px "IBM Plex Sans", sans-serif; background: transparent; color: var(--muted);
+             transition: background .14s ease, color .14s ease; }
+  .navItem:hover { color: var(--ink); }
+  .navItem.on { background: var(--hover); color: var(--ink-hi); }
+  .settingsMain { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 18px; }
+  .scopeChip { margin-bottom: 7px; display: inline-flex; align-items: center; height: 22px; padding: 0 9px;
+               background: var(--chip); border: 1px solid var(--chip-br); border-radius: 6px;
+               font: 500 10px "IBM Plex Mono", ui-monospace, monospace; letter-spacing: .04em; color: var(--muted); }
+  .settingsMain h1 { margin: 0 0 5px; font: 600 20px "IBM Plex Sans", sans-serif;
+                     letter-spacing: -.015em; color: var(--ink-hi); }
+  .settingsMain .blurb { margin: 0; font: 400 13px/1.5 "IBM Plex Sans", sans-serif;
+                         color: var(--muted); text-wrap: pretty; }
+  .applyRow { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; padding: 11px 14px;
+              background: var(--surface); border: 1px solid var(--border); border-radius: 10px; }
+  .applyRow .lbl { font: 500 11px "IBM Plex Sans", sans-serif; color: var(--muted); }
+  .applyRow button { height: 26px; padding: 0 10px; border: 1px solid var(--border-hi); border-radius: 6px;
+                     background: transparent; color: var(--muted);
+                     font: 500 11px "IBM Plex Mono", ui-monospace, monospace;
+                     transition: border-color .14s ease, color .14s ease; }
+  .applyRow button.on { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-ink); }
+
+  .fRow { display: flex; align-items: center; gap: 20px; padding: 14px 16px; background: var(--surface);
+          border: 1px solid var(--border); border-radius: 10px; }
+  .fRow.stack { flex-direction: column; align-items: stretch; gap: 10px; }
+  .fText { flex: 1; min-width: 0; }
+  .fLabel { font: 500 13px "IBM Plex Sans", sans-serif; color: var(--ink); }
+  .fHint { margin-top: 3px; font: 400 12px/1.5 "IBM Plex Sans", sans-serif; color: var(--muted); text-wrap: pretty; }
+  .fHint code { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 11px; color: var(--ink); }
+  .fCtl { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; }
+  .fRow.stack .fCtl { display: block; }
+  .fInput { width: 100%; padding: 8px 11px; background: var(--panel); border: 1px solid var(--border-hi);
+            border-radius: 7px; color: var(--ink); font: 400 12px "IBM Plex Sans", sans-serif; outline: none; }
+  .fInput:focus { border-color: var(--accent-br); }
+  textarea.fInput { min-height: 84px; resize: vertical; line-height: 1.55; }
+  select.fInput, input.fNum { width: auto; min-width: 150px; }
+  select.fInput { appearance: none; -webkit-appearance: none; padding-right: 30px; cursor: pointer;
+                  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23888e9c' stroke-width='1.4' stroke-linecap='round'/%3E%3C/svg%3E");
+                  background-repeat: no-repeat; background-position: right 11px center;
+                  background-size: 10px 6px; }
+  input.fNum { width: 96px; text-align: right; font-family: "IBM Plex Mono", ui-monospace, monospace; }
+  .valuePill { flex: 0 0 auto; padding: 6px 11px; background: var(--chip); border: 1px solid var(--border-hi);
+               border-radius: 6px; font: 500 12px "IBM Plex Mono", ui-monospace, monospace; color: var(--ink); }
+  .tgl { flex: 0 0 auto; width: 38px; height: 22px; padding: 2px; border: none; border-radius: 12px;
+         display: flex; justify-content: flex-start; background: var(--border-hi); transition: background .18s ease; }
+  .tgl.on { background: var(--accent); justify-content: flex-end; }
+  .tgl .knob { width: 18px; height: 18px; border-radius: 50%; background: #f2f4f8; display: block; }
+  .settingsActions { display: flex; gap: 9px; padding-top: 2px; }
+  .settingsActions .btn { height: 32px; padding: 0 15px; }
+  .settingsActions.hidden { display: none; }
+  .dirtyNote { display: none; align-self: center; font: 400 11px "IBM Plex Mono", ui-monospace, monospace; color: var(--warn); }
+  .settingsActions.dirty .dirtyNote { display: block; }
+
+  .listCard { border: 1px solid var(--border); border-radius: 9px; background: var(--panel);
+              padding: 11px 13px; display: flex; flex-direction: column; gap: 7px; }
+  .listCard + .listCard { margin-top: 8px; }
+  .listCard .top { display: flex; align-items: center; gap: 8px; }
+  .listCard .nm { font: 500 13px "IBM Plex Sans", sans-serif; color: var(--ink); }
+  .listCard .sub { font: 400 11px/1.5 "IBM Plex Mono", ui-monospace, monospace; color: var(--muted); word-break: break-word; }
+
+  /* ---------- modals ---------- */
+  .overlay { position: fixed; inset: 0; background: var(--overlay); display: none;
+             align-items: center; justify-content: center; z-index: 20; padding: 20px; }
+  .overlay.show { display: flex; }
+  .modal { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 20px;
+           width: min(600px, 100%); max-height: 88vh; overflow-y: auto; box-shadow: var(--shadow); }
+  .modal h2 { margin: 0 0 4px; font: 600 17px "IBM Plex Sans", sans-serif;
+              letter-spacing: -.01em; color: var(--ink-hi); }
+  .modal h3 { margin: 0 0 6px; font: 600 11px "IBM Plex Sans", sans-serif; letter-spacing: .09em;
+              text-transform: uppercase; color: var(--muted); }
+  .modal label { display: block; margin: 12px 0 5px; font: 500 11px "IBM Plex Sans", sans-serif;
+                 letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+  .modal label .lc { text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--dim); }
+  .modal input, .modal textarea, .modal select {
+    width: 100%; padding: 8px 11px; background: var(--surface); border: 1px solid var(--border-hi);
+    border-radius: 7px; color: var(--ink); font: 400 13px "IBM Plex Sans", sans-serif; outline: none; }
+  .modal input:focus, .modal textarea:focus, .modal select:focus { border-color: var(--accent-br); }
+  .modal textarea { min-height: 92px; resize: vertical; line-height: 1.55; }
+  .modal input[type=checkbox] { width: auto; }
+  .checkRow { display: flex; align-items: center; gap: 8px; margin-top: 10px;
+              font: 400 13px "IBM Plex Sans", sans-serif; color: var(--ink); text-transform: none; letter-spacing: 0; }
+  .row { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; align-items: center; }
+  .comment { border-top: 1px solid var(--border-soft); padding: 8px 0;
+             font: 400 12px/1.55 "IBM Plex Sans", sans-serif; color: var(--ink); }
+  .comment .who { font-weight: 600; font-size: 12px; }
+  .comment .when { font: 400 10px "IBM Plex Mono", ui-monospace, monospace; color: var(--dim); margin-left: 6px; }
+
+  #authWrap { height: 100vh; height: 100dvh; display: none; place-items: center; padding: 20px; }
+  #authWrap.on { display: grid; }
+  #authView { width: min(380px, 100%); background: var(--panel); border: 1px solid var(--border);
+              border-radius: 12px; padding: 22px; box-shadow: var(--shadow); }
+  #authView h2 { margin: 0 0 2px; font: 600 18px "IBM Plex Sans", sans-serif; color: var(--ink-hi); }
+  #authView label { display: block; margin: 14px 0 5px; font: 500 11px "IBM Plex Sans", sans-serif;
+                    letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+  #authView input { width: 100%; padding: 9px 11px; background: var(--surface); border: 1px solid var(--border-hi);
+                    border-radius: 7px; color: var(--ink); font: 400 13px "IBM Plex Sans", sans-serif; outline: none; }
+  #authView input:focus { border-color: var(--accent-br); }
+
+  #toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+           background: var(--panel); color: var(--ink); border: 1px solid var(--border-hi);
+           box-shadow: var(--shadow); padding: 9px 16px; border-radius: 8px; display: none; z-index: 30;
+           font: 400 12px "IBM Plex Sans", sans-serif; max-width: 90vw; }
+
+  @media (max-width: 1000px) { .side { flex-basis: 280px; width: 280px; } }
+  @media (max-width: 820px) {
+    .side { display: none; }
+    .hideNarrow { display: none; }
+    .settingsWrap { flex-direction: column; gap: 18px; }
+    .settingsNav { position: static; flex-basis: auto; }
+  }
 </style>
 </head>
-<body>
+<body class="dark">
 
-<div id="authView" class="panel" style="display:none">
-  <h2>kanban-cloud</h2>
-  <label>Email</label><input id="authEmail" type="email" style="width:100%">
-  <label>Password</label><input id="authPass" type="password" style="width:100%">
-  <div class="row">
-    <button onclick="login()">Log in</button>
-    <button class="ghost" onclick="registerUser()">Register</button>
+<div id="authWrap">
+  <div id="authView">
+    <h2>kanban-cloud</h2>
+    <p class="muted" style="margin:0">Sign in to your boards.</p>
+    <label>Email</label><input id="authEmail" type="email">
+    <label>Password</label><input id="authPass" type="password">
+    <div class="row">
+      <button class="btn primary" onclick="login()">Log in</button>
+      <button class="btn" onclick="registerUser()">Register</button>
+    </div>
+    <p class="muted" id="authMsg"></p>
   </div>
-  <p class="muted" id="authMsg"></p>
 </div>
 
-<div id="appView" style="display:none">
+<div id="appView">
   <header>
-    <h1>kanban-cloud</h1>
-    <select id="clusterSel" onchange="switchCluster()"></select>
-    <select id="boardSel" onchange="loadBoard()"></select>
-    <button class="small ghost owner-only" id="boardSettingsBtn" onclick="openBoardSettings()"
-            title="Project settings — the context agents working this board are given">&#9881;</button>
-    <button class="small ghost owner-only" id="clusterSettingsBtn" onclick="openClusterSettings()"
-            title="Cluster settings — concurrency cap and stop-all switch">&#128295;</button>
-    <button class="small ghost owner-only" onclick="openProfilesModal()"
-            title="Agent profiles — named tool/model/system-prompt presets">Profiles</button>
-    <button class="small ghost owner-only" onclick="openClusterModal()">+ cluster</button>
-    <button class="small ghost owner-only" onclick="newBoard()">+ board</button>
-    <button class="small owner-only" onclick="openTicketModal(null)">+ ticket</button>
-    <button class="small ghost owner-only" id="importBtn" onclick="document.getElementById('importInput').click()"
-            title="Import a local .kanban board folder">Import</button>
-    <input type="file" id="importInput" webkitdirectory directory multiple
-           style="display:none" onchange="onImportPicked(event)">
-    <div class="spacer"></div>
-    <button class="small ghost owner-only" id="bellBtn" onclick="openBlockedModal()"
-            title="Tickets waiting on a human answer" style="position:relative">
-      &#128276;<span id="bellBadge" class="badge" style="display:none; position:absolute; top:-6px; right:-6px; background:var(--bad); color:#fff">0</span>
-    </button>
+    <span class="wordmark">kanban-cloud</span>
+    <div class="tabs">
+      <button id="tabBoard" class="on" onclick="showBoard()">Board</button>
+      <button id="tabSettings" class="owner-only" onclick="showSettings()">Settings</button>
+    </div>
+    <div class="hsep hideNarrow"></div>
+    <div class="pick hideNarrow"><span class="pickDot"></span><select id="clusterSel" onchange="switchCluster()"></select></div>
+    <div class="pick"><select id="boardSel" onchange="switchBoard()"></select></div>
+    <div class="grow"></div>
+    <div class="runPill idle hideNarrow" id="runPill"><span class="pdot"></span><span id="runPillText">no workers</span></div>
+    <button class="btn primary owner-only" onclick="openTicketModal(null)">+ ticket</button>
+    <div class="hsep"></div>
+    <button class="btn icon owner-only" id="bellBtn" onclick="openBlockedModal()"
+            title="Tickets waiting on a human answer">&#128276;<span id="bellBadge" class="badge blocked" style="display:none">0</span></button>
     <span id="spectatorNote">viewing read-only</span>
     <div class="accountWrap">
-      <button class="small" id="accountBtn" onclick="toggleAccountMenu()">
-        <span id="whoami"></span><span>▾</span>
+      <button class="btn" id="accountBtn" onclick="toggleAccountMenu()">
+        <span class="avatar" id="avatar">–</span><span id="whoami"></span><span class="dim" style="font-size:8px">▼</span>
       </button>
       <div id="accountMenu">
         <div class="menuEmail" id="menuEmail"></div>
         <button class="menuItem" id="signInBtn" style="display:none" onclick="signIn()">Sign in with GitHub</button>
         <button class="menuItem" id="darkModeItem" onclick="toggleDarkMode()">
-          <span>Dark mode</span><span id="darkModeState"></span>
+          <span>Dark mode</span><span class="dim" id="darkModeState"></span>
+        </button>
+        <button class="menuItem" id="clustersItem" onclick="openClusterModal()">
+          <span>Clusters</span><span class="dim">create / join</span>
         </button>
         <button class="menuItem" id="logoutBtn" onclick="logout()">Log out</button>
       </div>
     </div>
   </header>
-  <div class="layout" id="dropZone">
-    <div class="board" id="board"></div>
-    <div class="dropHint">Drop a <b>.kanban</b> board folder to import it</div>
-    <div class="side">
-      <div class="panel">
-        <h3>Workers</h3>
-        <div id="workersPanel" class="muted">–</div>
-        <p class="muted owner-only" style="margin-bottom:0">Join code: <b id="joinCode">–</b><br>
-        Start a PC: <code style="font-size:11px">py worker.py --enroll --server &lt;url&gt; --join-code &lt;code&gt;</code></p>
+
+  <!-- ---------- board ---------- -->
+  <div id="boardView">
+    <div class="boardScroll" id="dropZone">
+      <div class="boardCols" id="board"></div>
+      <div class="dropHint">Drop a <b>.kanban</b> board folder to import it</div>
+    </div>
+    <aside class="side">
+      <!-- One rail, two states: a selected ticket's detail, or the cluster's
+           workers and activity feed. Same as the mock's hasDetail/noDetail. -->
+      <div id="detailPanel"></div>
+      <div id="idlePanels" style="display:flex; flex-direction:column; gap:12px">
+        <section class="sideCard">
+          <div class="sideCardHead"><span>Workers</span><div class="grow"></div><span class="note" id="seatNote">–</span></div>
+          <div class="workersBody" id="workersPanel"></div>
+          <div class="joinBox owner-only">
+            <div class="wRow">
+              <span class="kicker">Join code</span><span id="joinCode">–</span>
+              <div class="grow"></div>
+              <button id="copyCodeBtn" onclick="copyJoinCode()">copy</button>
+            </div>
+            <pre id="enrollCmd">py worker.py --enroll --server &lt;url&gt; --join-code &lt;code&gt;</pre>
+          </div>
+        </section>
+        <section class="sideCard">
+          <div class="sideCardHead"><span>Feed</span><div class="grow"></div>
+            <button class="livePill" id="liveBtn" onclick="toggleLiveFeed()">
+              <span class="pdot on" id="liveDot"></span><span id="liveLabel">live</span>
+            </button>
+          </div>
+          <div class="feedBody" id="feedPanel"></div>
+        </section>
       </div>
-      <div class="panel">
-        <h3>Recent delegations</h3>
-        <div id="queuePanel" class="muted" style="font-size:12px">–</div>
+    </aside>
+  </div>
+
+  <!-- ---------- settings ---------- -->
+  <div id="settingsView">
+    <div class="settingsWrap">
+      <nav class="settingsNav" id="settingsNav"></nav>
+      <div class="settingsMain">
+        <div>
+          <div class="scopeChip" id="scopeChip">–</div>
+          <h1 id="settingsTitle">–</h1>
+          <p class="blurb" id="settingsBlurb"></p>
+        </div>
+        <div class="applyRow" id="applyRow" style="display:none">
+          <span class="lbl">Applying to</span><span id="applyBoards"></span>
+        </div>
+        <div id="settingsBody"></div>
+        <div class="settingsActions" id="settingsActions">
+          <button class="btn primary" onclick="saveSettingsSection()">Save changes</button>
+          <button class="btn" onclick="discardSettingsSection()">Discard</button>
+          <span class="dirtyNote">unsaved changes</span>
+        </div>
       </div>
     </div>
   </div>
 </div>
 
-<!-- ticket modal -->
+<!-- ticket modal: the full editor. The side rail shows a ticket at a glance;
+     this is where it is actually changed. -->
 <div class="overlay" id="ticketOverlay" onclick="if(event.target===this) closeTicketModal()">
   <div class="modal">
     <h2 id="ticketModalTitle">Ticket</h2>
@@ -162,46 +543,46 @@
     </select>
     <label>Run on</label>
     <select id="tTarget"><option value="">any worker</option></select>
-    <label>Agent profile <span class="muted" style="font-weight:normal">(overrides the board's default)</span></label>
+    <label>Agent profile <span class="lc">(overrides the board's default)</span></label>
     <select id="tProfile"><option value="">board default</option></select>
-    <label>Depends on <span class="muted" style="font-weight:normal">(ctrl/cmd-click to select several; must all reach done before this ticket is claimed)</span></label>
+    <label>Depends on <span class="lc">(ctrl/cmd-click to select several; must all reach done before this ticket is claimed)</span></label>
     <select id="tDeps" multiple size="4"></select>
-    <div id="tBlockedNote" class="badge blocked" style="display:none; margin-top:4px">Blocked — waiting on dependencies</div>
-    <div id="tCommitGate" style="display:none; margin-top:4px; font-size:12px"></div>
+    <div id="tBlockedNote" class="badge blocked" style="display:none; margin-top:8px">Blocked — waiting on dependencies</div>
+    <div id="tCommitGate" style="display:none; margin-top:8px; font-size:12px"></div>
     <!-- Human takeover of the agent's own Claude session. The transcript only
          exists on the PC that ran it, so the row names that worker; the
          command itself comes assembled from the server (resume_command). -->
-    <div class="row owner-only" id="tSessionRow" style="display:none; margin-top:6px; font-size:12px; align-items:center">
+    <div class="row owner-only" id="tSessionRow" style="display:none; margin-top:8px; align-items:center">
       <span class="muted">Claude session</span>
-      <code id="tSessionId" style="user-select:all"></code>
-      <button class="small ghost" id="copyResumeBtn" onclick="copyResumeCommand()">Copy resume cmd</button>
+      <code class="mono" id="tSessionId" style="user-select:all; font-size:11px"></code>
+      <button class="btn" id="copyResumeBtn" onclick="copyResumeCommand()">Copy resume cmd</button>
       <span class="muted" id="tSessionWorker"></span>
     </div>
     <div class="row owner-only">
-      <button onclick="saveTicket()">Save</button>
-      <button class="ghost" id="runBtn" onclick="runTicket()">Run on agent now</button>
-      <button class="ghost" style="color:var(--bad); border-color:var(--bad)" id="killBtn" onclick="killTicket(editingTicket.id)">Kill</button>
-      <div class="spacer"></div>
-      <button class="ghost" style="color:var(--bad); border-color:var(--bad)" id="delBtn" onclick="deleteTicket()">Delete</button>
+      <button class="btn primary" onclick="saveTicket()">Save</button>
+      <button class="btn" id="runBtn" onclick="runTicket()">Run on agent now</button>
+      <button class="btn danger" id="killBtn" onclick="killTicket(editingTicket.id)">Kill</button>
+      <div class="grow"></div>
+      <button class="btn danger" id="delBtn" onclick="deleteTicket()">Delete</button>
     </div>
-    <div id="commentsWrap" style="margin-top:14px">
-      <h3 style="font-size:13px; margin:0 0 4px">Comments</h3>
+    <div id="commentsWrap" style="margin-top:18px">
+      <h3>Comments</h3>
       <div id="comments"></div>
       <div class="row owner-only">
-        <input id="newComment" placeholder="Add a comment..." style="flex:1">
-        <button class="small" onclick="addComment()">Post</button>
+        <input id="newComment" placeholder="Add a comment..." style="flex:1; width:auto">
+        <button class="btn solid" onclick="addComment()">Post</button>
       </div>
     </div>
-    <div id="logWrap" style="margin-top:14px; display:none">
-      <h3 style="font-size:13px; margin:0 0 4px">Live agent output</h3>
-      <div id="agentLog" style="max-height:260px; overflow-y:auto; font-family:ui-monospace,Consolas,monospace; font-size:12px; white-space:pre-wrap; border:1px solid var(--border); border-radius:6px; padding:8px; background:var(--bg)"></div>
+    <div id="logWrap" style="margin-top:18px; display:none">
+      <h3>Live agent output</h3>
+      <div id="agentLog" class="logBox" style="max-height:260px; border:1px solid var(--border); border-radius:8px; background:var(--code-bg)"></div>
     </div>
-    <div id="chatWrap" style="margin-top:14px; display:none">
-      <h3 style="font-size:13px; margin:0 0 4px">Chat with the agent</h3>
+    <div id="chatWrap" style="margin-top:18px; display:none">
+      <h3>Chat with the agent</h3>
       <div id="agentChat" style="max-height:180px; overflow-y:auto"></div>
       <div class="row owner-only">
-        <input id="newChat" placeholder="Message the running agent..." style="flex:1" onkeydown="if(event.key==='Enter') sendChat()">
-        <button class="small" onclick="sendChat()">Send</button>
+        <input id="newChat" placeholder="Message the running agent..." style="flex:1; width:auto" onkeydown="if(event.key==='Enter') sendChat()">
+        <button class="btn solid" onclick="sendChat()">Send</button>
       </div>
     </div>
   </div>
@@ -211,47 +592,12 @@
 <div class="overlay" id="clusterOverlay" onclick="if(event.target===this) this.classList.remove('show')">
   <div class="modal">
     <h2>Clusters</h2>
+    <p class="muted" style="margin:0">A cluster is the team that shares boards and worker PCs.</p>
     <label>Create a new cluster</label>
-    <div class="row" style="margin-top:0"><input id="newClusterName" placeholder="Team name" style="flex:1"><button class="small" onclick="createCluster()">Create</button></div>
+    <div class="row" style="margin-top:0"><input id="newClusterName" placeholder="Team name" style="flex:1; width:auto"><button class="btn primary" onclick="createCluster()">Create</button></div>
     <label>Or join with a code</label>
-    <div class="row" style="margin-top:0"><input id="joinCodeInput" placeholder="ABC12345" style="flex:1"><button class="small" onclick="joinCluster()">Join</button></div>
-  </div>
-</div>
-
-<!-- board project settings modal -->
-<div class="overlay" id="boardOverlay" onclick="if(event.target===this) this.classList.remove('show')">
-  <div class="modal">
-    <h2>Project settings</h2>
-    <p class="muted" style="margin-top:0">Context every agent working this board is given.</p>
-    <label>Description</label>
-    <textarea id="bDescription" placeholder="One paragraph of background an agent needs before touching a ticket."></textarea>
-    <label>Out of scope</label>
-    <textarea id="bOutOfScope" placeholder="What agents must not touch."></textarea>
-    <label>Commit requirements</label>
-    <textarea id="bCommitReq" placeholder="e.g. All tests must pass before committing."></textarea>
-    <label style="display:flex; align-items:center; gap:6px; margin-top:8px">
-      <input type="checkbox" id="bUseWorktrees"> Use git worktrees for this project
-    </label>
-    <label>Repo URL</label>
-    <input id="bRepoUrl" placeholder="https://github.com/org/repo.git">
-    <p class="muted" style="font-size:12px">A worker PC with no
-      <code>--set-path</code> entry for this board clones this URL automatically
-      into its own AppData folder and keeps it up to date. Setting
-      <code>kanban-worker --set-path</code> on a PC always overrides this.</p>
-    <label>Default agent profile</label>
-    <select id="bDefaultProfile"><option value="">(none — falls back to the worker's own --allowed-tools)</option></select>
-    <p class="muted" style="font-size:12px">Used for every ticket on this board that doesn't pick its own profile.
-      Manage profiles from the <b>Profiles</b> button in the header.</p>
-    <label style="display:flex; align-items:center; gap:6px; margin-top:8px">
-      <input type="checkbox" id="bAutoPush"> Auto-push a finished ticket's branch to origin
-    </label>
-    <p class="muted" style="font-size:12px">Off by default. When on, a worker only pushes
-      if there are no commit requirements, or the agent's own commit gate reported them met.
-      Push credentials are the worker PC's own ambient git auth and never reach this server.</p>
-    <div class="row">
-      <button onclick="saveBoardSettings()">Save</button>
-      <button class="ghost" onclick="document.getElementById('boardOverlay').classList.remove('show')">Cancel</button>
-    </div>
+    <div class="row" style="margin-top:0"><input id="joinCodeInput" placeholder="ABC12345" style="flex:1; width:auto"><button class="btn solid" onclick="joinCluster()">Join</button></div>
+    <div class="row"><div class="grow"></div><button class="btn" onclick="document.getElementById('clusterOverlay').classList.remove('show')">Close</button></div>
   </div>
 </div>
 
@@ -263,57 +609,12 @@
     <input id="wName">
     <label>Concurrency limit</label>
     <input id="wConcurrency" type="number" min="1" step="1" placeholder="PC decides (leave blank)">
-    <p class="muted" style="font-size:12px">How many tickets this PC runs at once. Leave
-      blank to let the PC keep deciding for itself (its own <code>--concurrency</code>
-      flag or saved config). Takes effect the next time the worker starts.</p>
+    <p class="muted">How many tickets this PC runs at once. Leave blank to let the PC keep
+      deciding for itself (its own <code>--concurrency</code> flag or saved config).
+      Takes effect the next time the worker starts.</p>
     <div class="row">
-      <button onclick="saveWorkerSettings()">Save</button>
-      <button class="ghost" onclick="document.getElementById('workerOverlay').classList.remove('show')">Cancel</button>
-    </div>
-  </div>
-</div>
-
-<!-- cluster-wide settings modal -->
-<div class="overlay" id="clusterSettingsOverlay" onclick="if(event.target===this) this.classList.remove('show')">
-  <div class="modal">
-    <h2>Cluster settings</h2>
-    <p class="muted" style="margin-top:0">Limits every PC's claims combined — enforced inside the claim itself, so it holds with no central dispatcher.</p>
-    <label style="display:flex; align-items:center; gap:6px; margin-top:0">
-      <input type="checkbox" id="csEnabled"> Enable a cluster-wide concurrency cap
-    </label>
-    <label>Concurrency cap</label>
-    <input id="csCap" type="number" min="1" placeholder="e.g. 5">
-    <p class="muted" style="font-size:12px">Currently in flight (cluster-wide): <b id="csInFlight">–</b></p>
-    <label style="display:flex; align-items:center; gap:6px; margin-top:8px">
-      <input type="checkbox" id="csStopAll"> Stop all agents (blocks every claim, cluster-wide)
-    </label>
-    <div class="row">
-      <button onclick="saveClusterSettings()">Save</button>
-      <button class="ghost" onclick="document.getElementById('clusterSettingsOverlay').classList.remove('show')">Cancel</button>
-    </div>
-  </div>
-</div>
-
-<!-- agent profiles modal -->
-<div class="overlay" id="profilesOverlay" onclick="if(event.target===this) closeProfilesModal()">
-  <div class="modal">
-    <h2>Agent profiles</h2>
-    <p class="muted" style="margin-top:0">Named tool-allowlist / model / system-prompt presets. A board's
-      Project settings can pick one as its default; a ticket can override that.</p>
-    <div id="profilesList"></div>
-    <h3 id="profileFormTitle" style="font-size:13px; margin:14px 0 4px">New profile</h3>
-    <label>Name</label><input id="pName">
-    <label>Allowed tools <span class="muted" style="font-weight:normal">(comma-separated)</span></label>
-    <input id="pAllowedTools" placeholder="Read,Edit,Write,Bash,Grep,Glob">
-    <label>Model <span class="muted" style="font-weight:normal">(optional — blank uses the CLI's default)</span></label>
-    <input id="pModel" placeholder="e.g. claude-sonnet-5">
-    <label>System prompt <span class="muted" style="font-weight:normal">(optional, appended to the CLI's default)</span></label>
-    <textarea id="pSystemPrompt"></textarea>
-    <div class="row">
-      <button onclick="saveProfile()" id="profileSaveBtn">Save profile</button>
-      <button class="ghost" onclick="resetProfileForm()">New instead</button>
-      <div class="spacer"></div>
-      <button class="ghost" onclick="closeProfilesModal()">Close</button>
+      <button class="btn primary" onclick="saveWorkerSettings()">Save</button>
+      <button class="btn" onclick="document.getElementById('workerOverlay').classList.remove('show')">Cancel</button>
     </div>
   </div>
 </div>
@@ -322,10 +623,11 @@
 <div class="overlay" id="blockedOverlay" onclick="if(event.target===this) this.classList.remove('show')">
   <div class="modal">
     <h2>Needs your attention</h2>
-    <p class="muted" style="margin-top:0">Agents that hit an ambiguity, parked here instead of guessing.</p>
-    <div id="blockedList"><p class="muted">Nothing blocked right now.</p></div>
+    <p class="muted" style="margin:0">Agents that hit an ambiguity, parked here instead of guessing.</p>
+    <div id="blockedList" style="margin-top:12px"><p class="muted">Nothing blocked right now.</p></div>
     <div class="row">
-      <button class="ghost" onclick="document.getElementById('blockedOverlay').classList.remove('show')">Close</button>
+      <div class="grow"></div>
+      <button class="btn" onclick="document.getElementById('blockedOverlay').classList.remove('show')">Close</button>
     </div>
   </div>
 </div>
@@ -339,13 +641,13 @@
 // them) but read to a human exactly as blocked does — this one needs you — so
 // they share the Blocked column and the card carries a badge saying which.
 // `key` is what a drop sets the status to, and what the reorder endpoint
-// expands back into the column's statuses.
+// expands back into the column's statuses. `hue` is the column's dot.
 const COLS = [
-  {key: "todo", label: "TODO", statuses: ["todo"]},
-  {key: "ready", label: "Ready", statuses: ["ready"]},
-  {key: "doing", label: "In progress", statuses: ["doing"]},
-  {key: "blocked", label: "Blocked", statuses: ["blocked", "failed", "killed"]},
-  {key: "done", label: "Done", statuses: ["done"]},
+  {key: "todo", label: "TODO", statuses: ["todo"], hue: "#6d7484"},
+  {key: "ready", label: "Ready", statuses: ["ready"], hue: "#5f7cf0"},
+  {key: "doing", label: "In progress", statuses: ["doing"], hue: "#e0a458"},
+  {key: "blocked", label: "Blocked", statuses: ["blocked", "failed", "killed"], hue: "#d4767d"},
+  {key: "done", label: "Done", statuses: ["done"], hue: "#4fbf87"},
 ];
 // The column a status belongs to. Falls back to Blocked for anything
 // unrecognised so a ticket can never become invisible on the board.
@@ -353,9 +655,12 @@ function colOf(status) {
   return COLS.find(c => c.statuses.includes(status)) || COLS[3];
 }
 let token = localStorage.getItem("kc_token") || null;
-let clusters = [], boards = [], tickets = [], workers = [], profiles = [];
+let clusters = [], boards = [], tickets = [], workers = [], profiles = [], queue = [];
 let editingProfile = null;
 let currentCluster = null, currentBoard = null, editingTicket = null;
+// The ticket the side rail is showing, if any. Selection is what drives the
+// detail panel and the live log poll; the modal is a separate, heavier step.
+let selectedTicket = null;
 // 'local' (dev: login UI) | 'owner' (proxy-authenticated, full rights)
 // | 'spectator' (proxy, read-only). Set once at boot from ./api/session.
 let sessionMode = "local";
@@ -379,11 +684,14 @@ let pendingTicketId = (() => {
 })();
 
 // Keeps the address bar in sync with what's on screen (no new history entry
-// per board/ticket — this mirrors state, it isn't a back/forward stack).
+// per board/ticket — this mirrors state, it isn't a back/forward stack). The
+// ticket in the URL is the *selected* one: sharing a link opens the board
+// with that ticket's detail already up.
 function syncRoute() {
   if (!currentBoard) return;
   const params = new URLSearchParams();
-  if (editingTicket) params.set("ticket", editingTicket.id);
+  const shown = editingTicket || selectedTicket;
+  if (shown) params.set("ticket", shown.id);
   const qs = params.toString();
   const target = `${APP_ROOT}b/${currentBoard.id}${qs ? "?" + qs : ""}`;
   if (target !== location.pathname + location.search) history.replaceState(null, "", target);
@@ -431,7 +739,8 @@ function signIn() {
 function toast(msg) {
   const t = document.getElementById("toast");
   t.textContent = msg; t.style.display = "block";
-  setTimeout(() => t.style.display = "none", 2500);
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => t.style.display = "none", 2500);
 }
 
 async function api(method, path, body) {
@@ -455,7 +764,39 @@ async function api(method, path, body) {
   return resp.json();
 }
 
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+// ---------- time ----------
+// Server timestamps are naive UTC (models.utcnow), so they carry no offset —
+// parsing them as-is would read them as browser-local and skew every "ago".
+function tms(s) {
+  if (!s) return 0;
+  return Date.parse(/[Zz]$|[+-]\d\d:?\d\d$/.test(s) ? s : s + "Z");
+}
+function ago(ts) {
+  const s = Math.max(0, Math.round((Date.now() - tms(ts)) / 1000));
+  if (s < 5) return "now";
+  if (s < 60) return s + "s";
+  if (s < 3600) return Math.floor(s / 60) + "m";
+  if (s < 86400) return Math.floor(s / 3600) + "h";
+  return Math.floor(s / 86400) + "d";
+}
+function dur(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return s + "s";
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${String(s % 60).padStart(2, "0")}s`;
+  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`;
+}
+function stamp(s) { return s ? s.slice(0, 16).replace("T", " ") : ""; }
+
 // ---------- auth ----------
+function showAuth(on) {
+  document.getElementById("authWrap").classList.toggle("on", on);
+  document.getElementById("appView").classList.toggle("on", !on);
+}
 async function login() {
   try {
     const r = await api("POST", "./api/login", {
@@ -474,18 +815,35 @@ async function registerUser() {
 }
 function logout() {
   token = null; localStorage.removeItem("kc_token");
-  document.getElementById("appView").style.display = "none";
-  document.getElementById("authView").style.display = "block";
+  showAuth(true);
+}
+
+// ---------- views ----------
+function showBoard() {
+  document.getElementById("tabBoard").classList.add("on");
+  document.getElementById("tabSettings").classList.remove("on");
+  document.getElementById("boardView").style.display = "flex";
+  document.getElementById("settingsView").classList.remove("on");
+}
+function showSettings(section) {
+  if (sessionMode === "spectator") return;
+  if (section) settingsSection = section;
+  document.getElementById("tabBoard").classList.remove("on");
+  document.getElementById("tabSettings").classList.add("on");
+  document.getElementById("boardView").style.display = "none";
+  document.getElementById("settingsView").classList.add("on");
+  renderSettings();
+}
+function isSettingsOpen() {
+  return document.getElementById("settingsView").classList.contains("on");
 }
 
 // ---------- clusters/boards ----------
 async function init() {
   let me;
   try { me = await api("GET", "./api/me"); } catch { return; }
-  document.getElementById("authView").style.display = "none";
-  document.getElementById("appView").style.display = "block";
-  document.getElementById("whoami").textContent = me.email;
-  document.getElementById("menuEmail").textContent = me.email;
+  showAuth(false);
+  setWhoami(me.email);
   clusters = await api("GET", "./api/clusters");
   const sel = document.getElementById("clusterSel");
   sel.innerHTML = clusters.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join("");
@@ -497,30 +855,57 @@ async function init() {
   await refreshClusterBits();
 }
 
+function setWhoami(email) {
+  document.getElementById("whoami").textContent = email;
+  document.getElementById("menuEmail").textContent = email;
+  document.getElementById("avatar").textContent = (email || "?").trim().charAt(0).toUpperCase();
+}
+
 async function switchCluster() {
   currentCluster = clusters.find(c => c.id == document.getElementById("clusterSel").value);
   localStorage.setItem("kc_cluster", currentCluster.id);
+  clearSelection();
   await refreshClusterBits();
+}
+
+// The board picker carries one synthetic option at the end so "+ board" does
+// not need its own slot in a header the design keeps deliberately short.
+async function switchBoard() {
+  const sel = document.getElementById("boardSel");
+  if (sel.value === "__new") {
+    sel.value = currentBoard ? currentBoard.id : "";
+    return newBoard();
+  }
+  clearSelection();
+  await loadBoard();
+  if (isSettingsOpen()) renderSettings();
 }
 
 async function refreshClusterBits() {
   document.getElementById("joinCode").textContent = currentCluster.join_code || "–";
+  document.getElementById("enrollCmd").textContent =
+    `py worker.py --enroll --server ${enrollServer()} --join-code ${currentCluster.join_code || "<code>"}`;
   boards = await api("GET", `./api/clusters/${currentCluster.id}/boards`);
-  const bs = document.getElementById("boardSel");
-  bs.innerHTML = boards.map(b => `<option value="${b.id}">${esc(b.name)}</option>`).join("");
+  renderBoardPicker();
   currentBoard = boards.find(b => b.id === pendingBoardId) || boards.find(b => b.id === sessionBoardId)
     || boards[0] || null;
   pendingBoardId = null;
-  if (currentBoard) bs.value = currentBoard.id;
+  if (currentBoard) document.getElementById("boardSel").value = currentBoard.id;
   const jobs = [loadBoard(), loadWorkers(), loadQueue(), loadBlocked(), loadProfiles()];
   await Promise.all(jobs);
   if (pendingTicketId) {
     const id = pendingTicketId;
     pendingTicketId = null;
-    const t = tickets.find(x => x.id === id);
-    if (t) openTicketModal(t.id);
+    if (tickets.find(x => x.id === id)) selectTicket(id);
   }
+  if (isSettingsOpen()) renderSettings();
   syncRoute();
+}
+
+function renderBoardPicker() {
+  const bs = document.getElementById("boardSel");
+  bs.innerHTML = boards.map(b => `<option value="${b.id}">${esc(b.name)}</option>`).join("") +
+    (sessionMode === "spectator" ? "" : `<option value="__new">+ new board…</option>`);
 }
 
 function openClusterModal() { document.getElementById("clusterOverlay").classList.add("show"); }
@@ -528,6 +913,7 @@ async function createCluster() {
   const name = document.getElementById("newClusterName").value.trim();
   if (!name) return;
   await api("POST", "./api/clusters", {name});
+  document.getElementById("newClusterName").value = "";
   document.getElementById("clusterOverlay").classList.remove("show");
   init();
 }
@@ -535,6 +921,7 @@ async function joinCluster() {
   const code = document.getElementById("joinCodeInput").value.trim();
   if (!code) return;
   await api("POST", "./api/clusters/join", {join_code: code});
+  document.getElementById("joinCodeInput").value = "";
   document.getElementById("clusterOverlay").classList.remove("show");
   init();
 }
@@ -545,142 +932,13 @@ async function newBoard() {
   refreshClusterBits();
 }
 
-// ---------- board project settings ----------
-// The metadata edited here is what app/prompt.py turns into the agent's
-// prompt. The board's folder on disk is deliberately absent: each worker PC
-// sets its own with `kanban-worker --set-path`.
-function openBoardSettings() {
-  const b = boards.find(x => x.id === Number(document.getElementById("boardSel").value));
-  if (!b) return;
-  document.getElementById("bDescription").value = b.description || "";
-  document.getElementById("bOutOfScope").value = b.out_of_scope || "";
-  document.getElementById("bCommitReq").value = b.commit_requirements || "";
-  document.getElementById("bUseWorktrees").checked = !!b.use_worktrees;
-  document.getElementById("bRepoUrl").value = b.repo_url || "";
-  const sel = document.getElementById("bDefaultProfile");
-  sel.innerHTML = `<option value="">(none — falls back to the worker's own --allowed-tools)</option>` +
-    profiles.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join("");
-  sel.value = b.default_profile_id || "";
-  document.getElementById("bAutoPush").checked = !!b.auto_push;
-  document.getElementById("boardOverlay").classList.add("show");
-}
-
-async function saveBoardSettings() {
-  const id = Number(document.getElementById("boardSel").value);
-  if (!id) return;
-  const profileVal = document.getElementById("bDefaultProfile").value;
-  const payload = {
-    description: document.getElementById("bDescription").value,
-    out_of_scope: document.getElementById("bOutOfScope").value,
-    commit_requirements: document.getElementById("bCommitReq").value,
-    use_worktrees: document.getElementById("bUseWorktrees").checked,
-    repo_url: document.getElementById("bRepoUrl").value,
-    auto_push: document.getElementById("bAutoPush").checked,
-  };
-  if (profileVal) payload.default_profile_id = parseInt(profileVal);
-  else payload.clear_default_profile = true;
-  await api("PATCH", `./api/boards/${id}`, payload);
-  document.getElementById("boardOverlay").classList.remove("show");
-  await refreshClusterBits();
-  toast("Project settings saved");
-}
-
-// ---------- cluster-wide settings: concurrency cap + stop-all ----------
-// Fetched fresh every time the modal opens (rather than cached like the board
-// list) so the in-flight count is current, not a snapshot from page load.
-async function openClusterSettings() {
-  if (!currentCluster) return;
-  const s = await api("GET", `./api/clusters/${currentCluster.id}/settings`);
-  document.getElementById("csEnabled").checked = !!s.enabled;
-  document.getElementById("csCap").value = s.concurrency_cap == null ? "" : s.concurrency_cap;
-  document.getElementById("csStopAll").checked = !!s.stop_all_requested;
-  document.getElementById("csInFlight").textContent = s.in_flight;
-  document.getElementById("clusterSettingsOverlay").classList.add("show");
-}
-
-async function saveClusterSettings() {
-  if (!currentCluster) return;
-  const capRaw = document.getElementById("csCap").value.trim();
-  await api("PUT", `./api/clusters/${currentCluster.id}/settings`, {
-    enabled: document.getElementById("csEnabled").checked,
-    concurrency_cap: capRaw ? parseInt(capRaw) : null,
-    stop_all_requested: document.getElementById("csStopAll").checked,
-  });
-  document.getElementById("clusterSettingsOverlay").classList.remove("show");
-  toast("Cluster settings saved");
-}
-
-// ---------- agent profiles ----------
-async function loadProfiles() {
-  if (!currentCluster) return;
-  profiles = await api("GET", `./api/clusters/${currentCluster.id}/profiles`);
-}
-
-function openProfilesModal() {
-  resetProfileForm();
-  renderProfilesList();
-  document.getElementById("profilesOverlay").classList.add("show");
-}
-function closeProfilesModal() { document.getElementById("profilesOverlay").classList.remove("show"); }
-
-function renderProfilesList() {
-  document.getElementById("profilesList").innerHTML = profiles.length ? profiles.map(p => `
-    <div class="comment">
-      <b>${esc(p.name)}</b>${p.model ? ` <span class="muted">(${esc(p.model)})</span>` : ""}
-      <div class="muted" style="font-size:11px">${esc(p.allowed_tools)}</div>
-      <div class="row" style="margin-top:6px">
-        <button class="small ghost" onclick="editProfile(${p.id})">Edit</button>
-        <button class="small ghost" style="color:var(--bad); border-color:var(--bad)" onclick="deleteProfile(${p.id})">Delete</button>
-      </div>
-    </div>`).join("") : `<p class="muted">No profiles yet — every ticket runs with the worker's own --allowed-tools default.</p>`;
-}
-
-function resetProfileForm() {
-  editingProfile = null;
-  document.getElementById("profileFormTitle").textContent = "New profile";
-  document.getElementById("pName").value = "";
-  document.getElementById("pAllowedTools").value = "";
-  document.getElementById("pModel").value = "";
-  document.getElementById("pSystemPrompt").value = "";
-  document.getElementById("profileSaveBtn").textContent = "Save profile";
-}
-
-function editProfile(id) {
-  const p = profiles.find(x => x.id === id);
-  if (!p) return;
-  editingProfile = p;
-  document.getElementById("profileFormTitle").textContent = `Edit "${p.name}"`;
-  document.getElementById("pName").value = p.name;
-  document.getElementById("pAllowedTools").value = p.allowed_tools;
-  document.getElementById("pModel").value = p.model || "";
-  document.getElementById("pSystemPrompt").value = p.system_prompt || "";
-  document.getElementById("profileSaveBtn").textContent = "Save changes";
-}
-
-async function saveProfile() {
-  const name = document.getElementById("pName").value.trim();
-  const allowedTools = document.getElementById("pAllowedTools").value.trim();
-  if (!name || !allowedTools) { toast("Name and allowed tools are required"); return; }
-  const payload = {
-    name, allowed_tools: allowedTools,
-    model: document.getElementById("pModel").value.trim() || null,
-    system_prompt: document.getElementById("pSystemPrompt").value.trim() || null,
-  };
-  if (editingProfile) await api("PATCH", `./api/profiles/${editingProfile.id}`, payload);
-  else await api("POST", `./api/clusters/${currentCluster.id}/profiles`, payload);
-  await loadProfiles();
-  resetProfileForm();
-  renderProfilesList();
-  toast("Profile saved");
-}
-
-async function deleteProfile(id) {
-  const p = profiles.find(x => x.id === id);
-  if (!p || !confirm(`Delete profile "${p.name}"? Boards/tickets pinned to it fall back to the next thing in the chain.`)) return;
-  await api("DELETE", `./api/profiles/${id}`);
-  await loadProfiles();
-  if (editingProfile && editingProfile.id === id) resetProfileForm();
-  renderProfilesList();
+function copyJoinCode() {
+  const code = currentCluster && currentCluster.join_code;
+  if (!code) return;
+  const btn = document.getElementById("copyCodeBtn");
+  const done = () => { btn.textContent = "copied"; setTimeout(() => btn.textContent = "copy", 1400); };
+  if (navigator.clipboard) navigator.clipboard.writeText(code).then(done, () => toast(code));
+  else toast(code);
 }
 
 // ---------- import a local .kanban board ----------
@@ -786,6 +1044,7 @@ async function importBoard(files) {
   await refreshClusterBits();
   const bs = document.getElementById("boardSel");
   bs.value = out.board_id;
+  currentBoard = boards.find(b => b.id === out.board_id) || currentBoard;
   await loadBoard();
 
   let msg = `Imported ${out.imported} tickets into "${out.name}"`;
@@ -834,30 +1093,62 @@ function isFileDrag(ev) {
 
 // ---------- board ----------
 async function loadBoard() {
-  const bs = document.getElementById("boardSel");
-  currentBoard = boards.find(b => b.id == bs.value) || boards[0];
+  currentBoard = boards.find(b => b.id == document.getElementById("boardSel").value) || boards[0];
   if (!currentBoard) { document.getElementById("board").innerHTML = ""; return; }
   tickets = await api("GET", `./api/boards/${currentBoard.id}/tickets`);
-  const el = document.getElementById("board");
-  el.innerHTML = COLS.map(col => {
-    const inCol = tickets.filter(t => col.statuses.includes(t.status));
-    const cards = inCol.map(t => `
-      <div class="card" onclick="openTicketModal(${t.id})" draggable="${sessionMode !== "spectator"}"
-           ondragstart="event.dataTransfer.setData('text/plain','${t.id}')"
-           ondragover="event.preventDefault(); event.stopPropagation()"
-           ondrop="dropOnCard(event,${t.id})">
-        <div class="tid">#${t.id}${t.target_worker ? " → " + esc(workerName(t.target_worker)) : ""}</div>
-        <div>${esc(t.title)}</div>
-        ${t.status !== col.key ? `<span class="badge blocked">${t.status}</span>` : ""}
-        ${t.blocked ? `<span class="badge blocked">waiting on deps</span>` : ""}
-        ${t.assigned_worker && (t.status === "doing") ? `<span class="badge">on ${esc(workerName(t.assigned_worker))}</span>` : ""}
-        ${t.comments.length ? `<span class="badge">${t.comments.length} 💬</span>` : ""}
-        ${t.status === "doing" ? `<div><button class="small ghost owner-only" style="color:var(--bad); border-color:var(--bad); margin-top:4px" onclick="event.stopPropagation(); killTicket(${t.id})">Kill</button></div>` : ""}
-      </div>`).join("");
-    return `<div class="col" ondragover="event.preventDefault()" ondrop="dropTicket(event,'${col.key}')">
-      <h3><span>${col.label}</span><span>${inCol.length}</span></h3>${cards}</div>`;
-  }).join("");
+  renderBoard();
+  // A ticket can vanish under the rail (deleted elsewhere, or the board
+  // changed) — re-resolve from the fresh list rather than showing a ghost.
+  if (selectedTicket) {
+    const still = tickets.find(t => t.id === selectedTicket.id);
+    if (still) { selectedTicket = still; renderDetail(); } else clearSelection();
+  }
   syncRoute();
+}
+
+function renderBoard() {
+  document.getElementById("board").innerHTML = COLS.map(col => {
+    const inCol = tickets.filter(t => col.statuses.includes(t.status));
+    const cards = inCol.map(t => cardHTML(t, col)).join("") ||
+      `<div class="colEmpty">empty</div>`;
+    return `<section class="col${inCol.length ? "" : " empty"}"
+        ondragover="event.preventDefault(); this.classList.add('dragOver')"
+        ondragleave="this.classList.remove('dragOver')"
+        ondrop="this.classList.remove('dragOver'); dropTicket(event,'${col.key}')">
+      <div class="colHead">
+        <span class="cdot" style="background:${col.hue}"></span>
+        <span class="cname">${esc(col.label)}</span>
+        <div class="grow"></div>
+        <span class="ccount">${inCol.length}</span>
+      </div>
+      <div class="colBody">${cards}</div>
+    </section>`;
+  }).join("");
+}
+
+function cardHTML(t, col) {
+  const running = t.status === "doing";
+  const foot = [];
+  // failed/killed share the Blocked column, so the card has to name the status
+  // or the two become indistinguishable.
+  if (t.status !== col.key) foot.push(`<span class="badge blocked">${esc(t.status)}</span>`);
+  if (t.blocked) foot.push(`<span class="badge blocked">waiting on deps</span>`);
+  if (t.question) foot.push(`<span class="badge warn">needs an answer</span>`);
+  if (t.target_worker) foot.push(`<span class="badge">→ ${esc(workerName(t.target_worker))}</span>`);
+  if (t.comments.length) foot.push(`<span class="cmeta">◍ ${t.comments.length}</span>`);
+  const chip = running && t.assigned_worker
+    ? `<span class="runChip"><span class="pdot on"></span><span class="txt">${esc(workerName(t.assigned_worker))}</span></span>`
+    : "";
+  return `<article class="card${running ? " running" : ""}${selectedTicket && selectedTicket.id === t.id ? " sel" : ""}"
+      onclick="selectTicket(${t.id})" ondblclick="openTicketModal(${t.id})"
+      draggable="${sessionMode !== "spectator"}"
+      ondragstart="event.dataTransfer.setData('text/plain','${t.id}')"
+      ondragover="event.preventDefault(); event.stopPropagation()"
+      ondrop="event.stopPropagation(); dropOnCard(event,${t.id})">
+    <div class="cardTop"><span class="cardId">#${t.id}</span>${chip}</div>
+    <div class="cardTitle">${esc(t.title)}</div>
+    ${foot.length ? `<div class="cardFoot">${foot.join("")}</div>` : ""}
+  </article>`;
 }
 
 // `colKey` is a column, so a drop into Blocked sets the plain `blocked`
@@ -869,6 +1160,7 @@ async function dropTicket(ev, colKey) {
   ev.preventDefault();
   if (sessionMode === "spectator") return;
   const id = ev.dataTransfer.getData("text/plain");
+  if (!id) return;
   await api("PATCH", `./api/tickets/${id}`, {status: colKey});
   if (colKey === "ready") toast("Queued for agent");
   loadBoard(); loadQueue();
@@ -905,6 +1197,161 @@ function workerName(id) {
   return w ? w.name : "worker " + id;
 }
 
+// The profile a ticket would actually run under: its own pin, else the
+// board's default, else whatever the worker PC was started with.
+function modelFor(t) {
+  const pid = t.profile_id || (currentBoard && currentBoard.default_profile_id);
+  const p = pid ? profiles.find(x => x.id === pid) : null;
+  return p ? (p.model || p.name) : "worker default";
+}
+
+// ---------- ticket selection: the side rail's detail panel ----------
+function selectTicket(id) {
+  const t = tickets.find(x => x.id === id);
+  if (!t) return;
+  const changed = !selectedTicket || selectedTicket.id !== id;
+  selectedTicket = t;
+  renderBoard();
+  renderDetail();
+  if (changed) startLivePoll();
+  syncRoute();
+}
+
+function clearSelection() {
+  if (!selectedTicket) return;
+  selectedTicket = null;
+  stopLivePoll();
+  renderBoard();
+  renderDetail();
+  syncRoute();
+}
+
+function renderDetail() {
+  const panel = document.getElementById("detailPanel");
+  const idle = document.getElementById("idlePanels");
+  const t = selectedTicket;
+  if (!t) {
+    panel.classList.remove("on");
+    panel.innerHTML = "";
+    idle.style.display = "flex";
+    return;
+  }
+  idle.style.display = "none";
+  panel.classList.add("on");
+
+  const col = colOf(t.status);
+  const running = t.status === "doing";
+  const bad = ["failed", "killed", "blocked"].includes(t.status);
+  const item = queue.find(i => i.ticket_id === t.id && i.status === "claimed");
+  const elapsed = item && item.claimed_at ? dur(Date.now() - tms(item.claimed_at)) : "—";
+  const gate = t.commit_gate;
+
+  const notes = [];
+  if (t.question) notes.push(`<div class="detailNote">Waiting on your answer
+    <div class="grow"></div>
+    <button class="btn sm owner-only" onclick="openBlockedModal()">Answer</button></div>`);
+  if (t.blocked) notes.push(`<div class="detailNote">Blocked — waiting on ${t.depends_on.length} dependency(s)</div>`);
+  if (gate) notes.push(`<div class="detailNote" style="background:var(--chip); border-color:var(--chip-br); color:var(--muted)">
+    <span class="badge ${gate.requirements_met ? "ok" : "blocked"}">commit gate: ${gate.requirements_met ? "met" : "not met"}</span>
+    ${gate.summary ? esc(gate.summary) : ""}</div>`);
+
+  panel.innerHTML = `
+    <div class="detailHead">
+      <span class="dId">#${t.id}</span>
+      <span class="statusChip${running ? " running" : (bad ? " bad" : "")}">
+        ${running ? `<span class="pdot on"></span>` : ""}${esc(t.status)}</span>
+      <div class="grow"></div>
+      <button class="dClose" onclick="clearSelection()" title="Close">×</button>
+    </div>
+    <h2 class="dTitle">${esc(t.title)}</h2>
+    ${notes.join("")}
+    <div class="metaGrid">
+      <span class="mk">Column</span><span class="mv">${esc(col.label)}</span>
+      <span class="mk">Worker</span><span class="mv">${t.assigned_worker ? esc(workerName(t.assigned_worker)) : "—"}</span>
+      <span class="mk">Model</span><span class="mv">${esc(modelFor(t))}</span>
+      <span class="mk">Elapsed</span><span class="mv" id="detailElapsed">${elapsed}</span>
+    </div>
+    <section class="sideCard">
+      <div class="sideCardHead"><span>Agent output</span><div class="grow"></div>
+        <span class="note">${t.comments.length} comment${t.comments.length === 1 ? "" : "s"}</span></div>
+      <div class="logBox" id="detailLog"></div>
+    </section>
+    <div class="detailActions">
+      <button class="btn solid wide" onclick="openTicketModal(${t.id})">Open ticket</button>
+      ${running ? `<button class="btn danger owner-only" onclick="killTicket(${t.id})">Kill run</button>` : ""}
+    </div>`;
+  paintLog();
+}
+
+// ---------- live agent output + chat ----------
+// Polls independently of the board's outer refresh, which is what makes this
+// "live" while a ticket is selected (rail) or open (modal). Lines are held in
+// one buffer and painted into whichever of the two boxes is on screen.
+let liveInterval = null;
+let liveSeq = 0;
+let liveLines = [];
+let liveTicketId = null;
+
+function livePollTicket() { return editingTicket || selectedTicket; }
+
+function startLivePoll() {
+  const t = livePollTicket();
+  if (!t) return stopLivePoll();
+  if (liveTicketId !== t.id) { liveSeq = 0; liveLines = []; liveTicketId = t.id; }
+  if (liveInterval) clearInterval(liveInterval);
+  paintLog();
+  pollLive();
+  liveInterval = setInterval(pollLive, 2000);
+}
+function stopLivePoll() {
+  if (liveInterval) { clearInterval(liveInterval); liveInterval = null; }
+  liveTicketId = null; liveSeq = 0; liveLines = [];
+}
+async function pollLive() {
+  const t = livePollTicket();
+  if (!t) return;
+  const id = t.id;
+  try {
+    const log = await api("GET", `./api/tickets/${id}/log?since_seq=${liveSeq}`);
+    if (log.lines.length) {
+      log.lines.forEach(l => { liveSeq = Math.max(liveSeq, l.seq); liveLines.push(l.text); });
+      if (liveLines.length > 500) liveLines = liveLines.slice(-500);
+      paintLog();
+    }
+  } catch {}
+  if (editingTicket) {
+    try { renderAgentChat(await api("GET", `./api/tickets/${id}/chat`)); } catch {}
+  }
+}
+function paintLog() {
+  const html = liveLines.length
+    ? liveLines.map(l => `<div>${esc(l)}</div>`).join("")
+    : `<div class="dim">no output yet</div>`;
+  for (const boxId of ["detailLog", "agentLog"]) {
+    const box = document.getElementById(boxId);
+    if (!box) continue;
+    const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+    box.innerHTML = html;
+    if (nearBottom) box.scrollTop = box.scrollHeight;
+  }
+}
+function renderAgentChat(rows) {
+  const box = document.getElementById("agentChat");
+  if (!box) return;
+  box.innerHTML = rows.map(c => `
+    <div class="comment"><span class="who">${esc(c.sender)}</span>
+    <span class="when">${stamp(c.created_at)}</span>
+    ${c.delivered ? "" : `<span class="badge">queued</span>`}<br>${esc(c.message)}</div>`).join("")
+    || `<p class="muted">No messages yet.</p>`;
+}
+async function sendChat() {
+  const msg = document.getElementById("newChat").value.trim();
+  if (!msg || !editingTicket) return;
+  await api("POST", `./api/tickets/${editingTicket.id}/chat`, {message: msg});
+  document.getElementById("newChat").value = "";
+  pollLive();
+}
+
 // ---------- ticket modal ----------
 function openTicketModal(id) {
   editingTicket = id === null ? null : tickets.find(t => t.id === id);
@@ -931,7 +1378,7 @@ function openTicketModal(id) {
   const gateEl = document.getElementById("tCommitGate");
   gateEl.style.display = gate ? "" : "none";
   if (gate) {
-    gateEl.innerHTML = `<span class="badge ${gate.requirements_met ? "" : "blocked"}">` +
+    gateEl.innerHTML = `<span class="badge ${gate.requirements_met ? "ok" : "blocked"}">` +
       `commit gate: ${gate.requirements_met ? "met" : "not met"}</span>` +
       (gate.summary ? ` ${esc(gate.summary)}` : "");
   }
@@ -958,66 +1405,17 @@ function openTicketModal(id) {
 }
 function closeTicketModal() {
   document.getElementById("ticketOverlay").classList.remove("show");
-  stopLivePoll();
   editingTicket = null;
+  // The rail may still be showing this ticket — keep tailing for it, and only
+  // stop once nothing is selected either.
+  if (selectedTicket) startLivePoll(); else stopLivePoll();
   syncRoute();
-}
-
-// ---------- live agent output + chat (polls independently of the board's
-// outer refresh, which is what makes this "live" while the modal is open) ----------
-let liveInterval = null;
-let liveSeq = 0;
-
-function startLivePoll() {
-  stopLivePoll();
-  liveSeq = 0;
-  document.getElementById("agentLog").innerHTML = "";
-  pollLive();
-  liveInterval = setInterval(pollLive, 2000);
-}
-function stopLivePoll() {
-  if (liveInterval) { clearInterval(liveInterval); liveInterval = null; }
-}
-async function pollLive() {
-  if (!editingTicket) return;
-  const id = editingTicket.id;
-  try {
-    const log = await api("GET", `./api/tickets/${id}/log?since_seq=${liveSeq}`);
-    if (log.lines.length) {
-      const box = document.getElementById("agentLog");
-      const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
-      log.lines.forEach(l => {
-        liveSeq = Math.max(liveSeq, l.seq);
-        const row = document.createElement("div");
-        row.textContent = l.text;
-        box.appendChild(row);
-      });
-      if (nearBottom) box.scrollTop = box.scrollHeight;
-    }
-  } catch {}
-  try {
-    renderAgentChat(await api("GET", `./api/tickets/${id}/chat`));
-  } catch {}
-}
-function renderAgentChat(rows) {
-  document.getElementById("agentChat").innerHTML = rows.map(c => `
-    <div class="comment"><span class="who">${esc(c.sender)}</span>
-    <span class="muted">${c.created_at.slice(0, 16).replace("T", " ")}</span>
-    ${c.delivered ? "" : `<span class="badge">queued</span>`}<br>${esc(c.message)}</div>`).join("")
-    || `<p class="muted">No messages yet.</p>`;
-}
-async function sendChat() {
-  const msg = document.getElementById("newChat").value.trim();
-  if (!msg || !editingTicket) return;
-  await api("POST", `./api/tickets/${editingTicket.id}/chat`, {message: msg});
-  document.getElementById("newChat").value = "";
-  pollLive();
 }
 
 function renderComments(t) {
   document.getElementById("comments").innerHTML = t.comments.map(c => `
     <div class="comment"><span class="who">${esc(c.writer)}</span>
-    <span class="muted">${c.timestamp.slice(0, 16).replace("T", " ")}</span><br>${esc(c.message)}</div>`).join("")
+    <span class="when">${stamp(c.timestamp)}</span><br>${esc(c.message)}</div>`).join("")
     || `<p class="muted">No comments yet.</p>`;
 }
 
@@ -1041,15 +1439,19 @@ async function saveTicket() {
   }
   closeTicketModal(); loadBoard(); loadQueue();
 }
+
 async function runTicket() {
   if (!editingTicket) return;
   await api("POST", `./api/tickets/${editingTicket.id}/run`);
-  toast("Queued for agent"); closeTicketModal(); loadBoard(); loadQueue();
+  toast("Queued for agent");
+  closeTicketModal();
+  loadBoard(); loadQueue();
 }
 async function deleteTicket() {
   if (!editingTicket || !confirm("Delete ticket #" + editingTicket.id + "?")) return;
   await api("DELETE", `./api/tickets/${editingTicket.id}`);
-  closeTicketModal(); loadBoard();
+  if (selectedTicket && selectedTicket.id === editingTicket.id) selectedTicket = null;
+  closeTicketModal(); loadBoard(); loadQueue();
 }
 async function copyResumeCommand() {
   // The string is built server-side (app.main.build_resume_command) so its
@@ -1066,10 +1468,14 @@ async function copyResumeCommand() {
     toast("Copy failed — select the command and copy it");
   }
 }
+// Reachable from both surfaces now: the modal's Kill button and the side
+// rail's "Kill run". Only tear the modal down if it is actually open.
 async function killTicket(id) {
   if (!confirm("Kill this ticket's running agent?")) return;
   await api("POST", `./api/tickets/${id}/kill`);
-  toast("Kill requested"); closeTicketModal(); loadBoard(); loadQueue();
+  toast("Kill requested");
+  if (document.getElementById("ticketOverlay").classList.contains("show")) closeTicketModal();
+  loadBoard(); loadQueue();
 }
 async function addComment() {
   const msg = document.getElementById("newComment").value.trim();
@@ -1079,22 +1485,50 @@ async function addComment() {
   editingTicket = t; renderComments(t); loadBoard();
 }
 
-// ---------- side panels ----------
+// ---------- workers rail ----------
 async function loadWorkers() {
   workers = await api("GET", `./api/clusters/${currentCluster.id}/workers`);
+  const live = workers.filter(w => !w.revoked);
+  const online = live.filter(w => w.online);
+  document.getElementById("seatNote").textContent =
+    live.length ? `${online.length} online / ${live.length} enrolled` : "none enrolled";
+
+  const running = online.reduce((n, w) => n + (w.running || 0), 0);
+  const seats = online.reduce((n, w) => n + (w.desired_concurrency || w.concurrency || 1), 0);
+  const pill = document.getElementById("runPill");
+  pill.classList.toggle("idle", !online.length);
+  pill.querySelector(".pdot").classList.toggle("on", running > 0);
+  document.getElementById("runPillText").textContent =
+    online.length ? `${running}/${seats} running` : "no workers";
+
   document.getElementById("workersPanel").innerHTML = workers.length
-    ? workers.map(w => `<div class="worker-row"><span class="dot ${w.online && !w.revoked ? "on" : ""}"></span>
-        <b class="worker-name">${esc(w.name)}</b>
-        ${w.revoked ? '<span class="muted">(revoked)</span>'
-          : `<span class="muted">${w.online
-                ? `${w.running || 0}/${w.concurrency || 1} running` : "offline"}</span>
-             ${w.desired_concurrency ? `<span class="muted">(site limit ${w.desired_concurrency})</span>` : ""}
-             <span class="worker-actions">
-               <button class="ghost small owner-only" onclick="openWorkerSettings(${w.id})">Edit</button>
-               <button class="ghost small owner-only" onclick="revokeWorker(${w.id})">Revoke</button>
-             </span>`}</div>`).join("")
-    : `<span class="muted">No PCs enrolled yet. On the PC:<br>
-       <code>py worker.py --enroll --server ${esc(enrollServer())} --join-code &lt;code&gt;</code></span>`;
+    ? workers.map(w => workerBlockHTML(w)).join("")
+    : `<div class="sideEmpty">No PCs enrolled yet — use the join code below.</div>`;
+}
+
+function workerBlockHTML(w) {
+  if (w.revoked) {
+    return `<div class="wBlock"><div class="wRow">
+      <span class="pdot"></span><span class="wName">${esc(w.name)}</span>
+      <div class="grow"></div><span class="wLoad">revoked</span></div></div>`;
+  }
+  const cap = w.desired_concurrency || w.concurrency || 1;
+  const pct = w.online ? Math.min(100, Math.round(((w.running || 0) / Math.max(1, cap)) * 100)) : 0;
+  return `<div class="wBlock">
+    <div class="wRow">
+      <span class="pdot${w.online && (w.running || 0) > 0 ? " on" : ""}"
+            style="${w.online ? "" : "background:var(--faint)"}"></span>
+      <span class="wName">${esc(w.name)}</span>
+      <div class="grow"></div>
+      <span class="wLoad">${w.online ? `${w.running || 0}/${cap}` : "offline"}</span>
+    </div>
+    <div class="wBar"><div class="wFill" style="width:${pct}%"></div></div>
+    ${w.desired_concurrency ? `<div class="wLoad">site limit ${w.desired_concurrency}</div>` : ""}
+    <div class="wActions owner-only">
+      <button class="btn sm" onclick="openWorkerSettings(${w.id})">Edit</button>
+      <button class="btn sm danger" onclick="revokeWorker(${w.id})">Revoke</button>
+    </div>
+  </div>`;
 }
 
 // ---------- worker settings: rename / concurrency cap (ticket #18) ----------
@@ -1135,11 +1569,378 @@ async function revokeWorker(id) {
   await api("POST", `./api/workers/${id}/revoke`);
   await loadWorkers();
 }
+
+// ---------- feed ----------
+// Derived from the cluster's work queue rather than a second endpoint: every
+// row already carries the three moments that matter (queued / claimed /
+// finished), so the feed is a flattening of it, newest first.
+const FEED_VERBS = {
+  queued:  {hue: "#6d7484", text: "queued for an agent"},
+  claimed: {hue: "#5f7cf0", text: "claimed by"},
+  kill:    {hue: "#d4767d", text: "kill requested"},
+  done:    {hue: "#4fbf87", text: "run finished — committed and pushed"},
+  failed:  {hue: "#d4767d", text: "run failed"},
+  blocked: {hue: "#e0a458", text: "agent asked a question"},
+  killed:  {hue: "#d4767d", text: "run killed"},
+};
+let feedLive = true;
+let feedRows = [];
+
+function toggleLiveFeed() {
+  feedLive = !feedLive;
+  document.getElementById("liveLabel").textContent = feedLive ? "live" : "paused";
+  document.getElementById("liveDot").classList.toggle("on", feedLive);
+  if (feedLive) renderFeed();
+}
+
+function buildFeed() {
+  const out = [];
+  for (const i of queue) {
+    if (i.queued_at) out.push({t: i.queued_at, ticket: i.ticket_id, verb: "queued"});
+    if (i.claimed_at) out.push({t: i.claimed_at, ticket: i.ticket_id, verb: "claimed", who: i.claimed_by});
+    if (i.finished_at) out.push({t: i.finished_at, ticket: i.ticket_id, verb: i.status});
+    else if (i.kill_requested) out.push({t: i.claimed_at || i.queued_at, ticket: i.ticket_id, verb: "kill"});
+  }
+  out.sort((a, b) => tms(b.t) - tms(a.t));
+  return out.slice(0, 40);
+}
+
+function renderFeed() {
+  if (!feedLive) return;
+  feedRows = buildFeed();
+  const el = document.getElementById("feedPanel");
+  if (!feedRows.length) { el.innerHTML = `<div class="sideEmpty">No delegations yet.</div>`; return; }
+  el.innerHTML = feedRows.map(e => {
+    const v = FEED_VERBS[e.verb] || {hue: "#6d7484", text: e.verb};
+    const text = e.verb === "claimed" && e.who ? `${v.text} ${workerName(e.who)}` : v.text;
+    const fresh = Date.now() - tms(e.t) < 6000;
+    return `<div class="feedRow${fresh ? " fresh" : ""}" style="border-left-color:${v.hue}"
+        onclick="selectTicket(${e.ticket})">
+      <span class="fTicket">#${e.ticket}</span>
+      <span class="fText">${esc(text)}</span>
+      <div class="grow"></div>
+      <span class="fAgo" data-ts="${esc(e.t)}">${ago(e.t)}</span>
+    </div>`;
+  }).join("");
+}
+
+// Relative times and the running clock have to move on their own — the board
+// only refreshes every 5s, and a stuck "9s" reads as a frozen page.
+setInterval(() => {
+  document.querySelectorAll(".fAgo[data-ts]").forEach(el => {
+    el.textContent = ago(el.getAttribute("data-ts"));
+  });
+  const el = document.getElementById("detailElapsed");
+  if (el && selectedTicket) {
+    const item = queue.find(i => i.ticket_id === selectedTicket.id && i.status === "claimed");
+    if (item && item.claimed_at) el.textContent = dur(Date.now() - tms(item.claimed_at));
+  }
+}, 1000);
+
 async function loadQueue() {
-  const q = await api("GET", `./api/clusters/${currentCluster.id}/queue`);
-  document.getElementById("queuePanel").innerHTML = q.length
-    ? q.slice(0, 10).map(i => `<div>#${i.ticket_id} — ${i.status}${i.claimed_by ? " by " + esc(workerName(i.claimed_by)) : ""}</div>`).join("")
-    : "No delegations yet.";
+  queue = await api("GET", `./api/clusters/${currentCluster.id}/queue`);
+  renderFeed();
+}
+
+// ---------- agent profiles ----------
+async function loadProfiles() {
+  if (!currentCluster) return;
+  profiles = await api("GET", `./api/clusters/${currentCluster.id}/profiles`);
+}
+
+function renderProfilesList() {
+  const el = document.getElementById("profilesList");
+  if (!el) return;
+  el.innerHTML = profiles.length ? profiles.map(p => `
+    <div class="listCard">
+      <div class="top"><span class="nm">${esc(p.name)}</span>
+        ${p.model ? `<span class="badge">${esc(p.model)}</span>` : ""}
+        <div class="grow"></div>
+        <button class="btn sm" onclick="editProfile(${p.id})">Edit</button>
+        <button class="btn sm danger" onclick="deleteProfile(${p.id})">Delete</button>
+      </div>
+      <div class="sub">${esc(p.allowed_tools)}</div>
+    </div>`).join("")
+    : `<p class="muted">No profiles yet — every ticket runs with the worker's own --allowed-tools default.</p>`;
+}
+
+function resetProfileForm() {
+  editingProfile = null;
+  const title = document.getElementById("profileFormTitle");
+  if (!title) return;
+  title.textContent = "New profile";
+  document.getElementById("pName").value = "";
+  document.getElementById("pAllowedTools").value = "";
+  document.getElementById("pModel").value = "";
+  document.getElementById("pSystemPrompt").value = "";
+  document.getElementById("profileSaveBtn").textContent = "Save profile";
+}
+
+function editProfile(id) {
+  const p = profiles.find(x => x.id === id);
+  if (!p) return;
+  editingProfile = p;
+  document.getElementById("profileFormTitle").textContent = `Edit "${p.name}"`;
+  document.getElementById("pName").value = p.name;
+  document.getElementById("pAllowedTools").value = p.allowed_tools;
+  document.getElementById("pModel").value = p.model || "";
+  document.getElementById("pSystemPrompt").value = p.system_prompt || "";
+  document.getElementById("profileSaveBtn").textContent = "Save changes";
+}
+
+async function saveProfile() {
+  const name = document.getElementById("pName").value.trim();
+  const allowedTools = document.getElementById("pAllowedTools").value.trim();
+  if (!name || !allowedTools) { toast("Name and allowed tools are required"); return; }
+  const payload = {
+    name, allowed_tools: allowedTools,
+    model: document.getElementById("pModel").value.trim() || null,
+    system_prompt: document.getElementById("pSystemPrompt").value.trim() || null,
+  };
+  if (editingProfile) await api("PATCH", `./api/profiles/${editingProfile.id}`, payload);
+  else await api("POST", `./api/clusters/${currentCluster.id}/profiles`, payload);
+  await loadProfiles();
+  resetProfileForm();
+  renderProfilesList();
+  toast("Profile saved");
+}
+
+async function deleteProfile(id) {
+  const p = profiles.find(x => x.id === id);
+  if (!p || !confirm(`Delete profile "${p.name}"? Boards/tickets pinned to it fall back to the next thing in the chain.`)) return;
+  await api("DELETE", `./api/profiles/${id}`);
+  await loadProfiles();
+  if (editingProfile && editingProfile.id === id) resetProfileForm();
+  renderProfilesList();
+}
+
+// ---------- settings ----------
+// Two scopes, and every field on this page is one the server actually
+// persists: board rows (PATCH /api/boards/{id}) and cluster settings
+// (PUT /api/clusters/{id}/settings), plus the immediate actions (profiles,
+// import) that have no draft to save.
+const SCOPES = [
+  {key: "board", label: "This board"},
+  {key: "cluster", label: "Cluster"},
+];
+const SETTINGS_SECTIONS = [
+  {key: "project", scope: "board", name: "Project", save: "board",
+   blurb: "Context every agent working this board is given, turned into the run prompt."},
+  {key: "repo", scope: "board", name: "Repository", save: "board",
+   blurb: "Where a worker PC does the work, and what it does with the branch when it finishes."},
+  {key: "agents", scope: "board", name: "Agents", save: "board",
+   blurb: "Which agent profile this board's tickets run under when they don't pick their own."},
+  {key: "import", scope: "board", name: "Import",
+   blurb: "Bring a local .kanban board folder into this cluster."},
+  {key: "concurrency", scope: "cluster", name: "Concurrency", save: "cluster",
+   blurb: "Limits every PC's claims combined — enforced inside the claim itself, so it holds with no central dispatcher."},
+  {key: "profiles", scope: "cluster", name: "Profiles",
+   blurb: "Named tool-allowlist / model / system-prompt presets a board or ticket can pin."},
+];
+let settingsSection = "project";
+let boardDraft = {};
+let clusterDraft = null;   // null until the section is opened and fetched
+
+function currentSection() {
+  return SETTINGS_SECTIONS.find(s => s.key === settingsSection) || SETTINGS_SECTIONS[0];
+}
+function boardValue(key) {
+  if (key in boardDraft) return boardDraft[key];
+  return currentBoard ? currentBoard[key] : null;
+}
+function setBoardDraft(key, val) { boardDraft[key] = val; markDirty(); }
+function setClusterDraft(key, val) { clusterDraft[key] = val; markDirty(); }
+function markDirty() { document.getElementById("settingsActions").classList.add("dirty"); }
+
+function pickSection(key) {
+  settingsSection = key;
+  boardDraft = {};
+  clusterDraft = null;
+  renderSettings();
+}
+async function pickBoard(id) {
+  document.getElementById("boardSel").value = id;
+  boardDraft = {};
+  clearSelection();
+  await loadBoard();
+  renderSettings();
+}
+
+async function renderSettings() {
+  const sec = currentSection();
+  // The cluster draft is fetched fresh so the in-flight count is current,
+  // not a snapshot from page load.
+  if (sec.save === "cluster" && clusterDraft === null && currentCluster) {
+    try { clusterDraft = await api("GET", `./api/clusters/${currentCluster.id}/settings`); }
+    catch { clusterDraft = {enabled: false, concurrency_cap: null, stop_all_requested: false, in_flight: 0}; }
+  }
+
+  document.getElementById("settingsNav").innerHTML = SCOPES.map(sc => {
+    const sub = sc.key === "board"
+      ? (currentBoard ? currentBoard.name : "no board")
+      : (currentCluster ? currentCluster.name : "–");
+    const items = SETTINGS_SECTIONS.filter(s => s.scope === sc.key).map(s =>
+      `<button class="navItem${s.key === sec.key ? " on" : ""}" onclick="pickSection('${s.key}')">${esc(s.name)}</button>`).join("");
+    return `<div class="navGroup">
+      <div class="navGroupHead"><span class="lbl">${esc(sc.label)}</span><span class="sub">${esc(sub)}</span></div>
+      ${items}</div>`;
+  }).join("");
+
+  document.getElementById("scopeChip").textContent = sec.scope === "board"
+    ? `Board · ${currentBoard ? currentBoard.name : "none"}`
+    : `Cluster · ${currentCluster ? currentCluster.name : "none"}`;
+  document.getElementById("settingsTitle").textContent = sec.name;
+  document.getElementById("settingsBlurb").textContent = sec.blurb;
+
+  const apply = document.getElementById("applyRow");
+  apply.style.display = sec.scope === "board" && boards.length > 1 ? "" : "none";
+  if (sec.scope === "board") {
+    document.getElementById("applyBoards").innerHTML = boards.map(b =>
+      `<button class="${currentBoard && b.id === currentBoard.id ? "on" : ""}" onclick="pickBoard(${b.id})">${esc(b.name)}</button>`).join(" ");
+  }
+
+  document.getElementById("settingsBody").innerHTML = SECTION_BODY[sec.key]();
+  if (sec.key === "profiles") { renderProfilesList(); resetProfileForm(); }
+
+  const actions = document.getElementById("settingsActions");
+  actions.classList.toggle("hidden", !sec.save);
+  actions.classList.remove("dirty");
+}
+
+function fRow(label, hint, control, stack) {
+  return `<div class="fRow${stack ? " stack" : ""}">
+    <div class="fText"><div class="fLabel">${esc(label)}</div>${hint ? `<div class="fHint">${hint}</div>` : ""}</div>
+    <div class="fCtl">${control}</div>
+  </div>`;
+}
+function tglCtl(id, on, handler) {
+  return `<button class="tgl${on ? " on" : ""}" id="${id}" aria-pressed="${!!on}"
+    onclick="${handler}"><span class="knob"></span></button>`;
+}
+function onToggle(ev, fn, key) {
+  const btn = ev.currentTarget;
+  const on = !btn.classList.contains("on");
+  btn.classList.toggle("on", on);
+  btn.setAttribute("aria-pressed", on);
+  fn(key, on);
+}
+function toggleBoard(ev, key) { onToggle(ev, setBoardDraft, key); }
+function toggleCluster(ev, key) { onToggle(ev, setClusterDraft, key); }
+
+const SECTION_BODY = {
+  project: () => {
+    if (!currentBoard) return `<p class="muted">No board yet — create one from the board picker.</p>`;
+    return fRow("Description", "One paragraph of background an agent needs before touching a ticket.",
+        `<textarea class="fInput" id="bDescription" oninput="setBoardDraft('description', this.value)"
+           placeholder="What this project is.">${esc(boardValue("description") || "")}</textarea>`, true) +
+      fRow("Out of scope", "What agents must not touch.",
+        `<textarea class="fInput" id="bOutOfScope" oninput="setBoardDraft('out_of_scope', this.value)"
+           placeholder="Files, systems or decisions that are off limits.">${esc(boardValue("out_of_scope") || "")}</textarea>`, true) +
+      fRow("Commit requirements", "Checked by the agent's own commit gate before it commits.",
+        `<textarea class="fInput" id="bCommitReq" oninput="setBoardDraft('commit_requirements', this.value)"
+           placeholder="e.g. All tests must pass before committing.">${esc(boardValue("commit_requirements") || "")}</textarea>`, true);
+  },
+  repo: () => {
+    if (!currentBoard) return `<p class="muted">No board yet — create one from the board picker.</p>`;
+    return fRow("Repo URL",
+        "A worker PC with no <code>--set-path</code> entry for this board clones this URL automatically into its own AppData folder and keeps it up to date. Setting <code>kanban-worker --set-path</code> on a PC always overrides this.",
+        `<input class="fInput" id="bRepoUrl" value="${esc(boardValue("repo_url") || "")}"
+           placeholder="https://github.com/org/repo.git" oninput="setBoardDraft('repo_url', this.value)">`, true) +
+      fRow("Use git worktrees", "Each ticket gets its own worktree instead of sharing the checkout.",
+        tglCtl("bUseWorktrees", !!boardValue("use_worktrees"), "toggleBoard(event,'use_worktrees')")) +
+      fRow("Auto-push a finished branch",
+        "Off by default. When on, a worker only pushes if there are no commit requirements, or the agent's own commit gate reported them met. Push credentials are the worker PC's own ambient git auth and never reach this server.",
+        tglCtl("bAutoPush", !!boardValue("auto_push"), "toggleBoard(event,'auto_push')"));
+  },
+  agents: () => {
+    if (!currentBoard) return `<p class="muted">No board yet — create one from the board picker.</p>`;
+    const cur = boardValue("default_profile_id") || "";
+    return fRow("Default agent profile",
+        "Used for every ticket on this board that doesn't pick its own. Manage the profiles themselves under Cluster · Profiles.",
+        `<select class="fInput" id="bDefaultProfile" onchange="setBoardDraft('default_profile_id', this.value ? parseInt(this.value) : null)">
+           <option value="">(none — the worker's own --allowed-tools)</option>
+           ${profiles.map(p => `<option value="${p.id}" ${cur == p.id ? "selected" : ""}>${esc(p.name)}</option>`).join("")}
+         </select>`);
+  },
+  import: () => fRow("Import a .kanban folder",
+      "The server can't see your disk, so the browser reads the folder and posts the tickets up. You can also drop the folder straight onto the board.",
+      `<button class="btn solid owner-only" id="importBtn"
+         onclick="document.getElementById('importInput').click()">Choose folder…</button>
+       <input type="file" id="importInput" webkitdirectory directory multiple
+              style="display:none" onchange="onImportPicked(event)">`),
+  concurrency: () => {
+    const d = clusterDraft || {};
+    return fRow("Cluster-wide concurrency cap", "Applies to every PC's claims combined.",
+        tglCtl("csEnabled", !!d.enabled, "toggleCluster(event,'enabled')")) +
+      fRow("Concurrency cap", "Maximum claims in flight across the whole cluster.",
+        `<input class="fInput fNum" id="csCap" type="number" min="1" placeholder="e.g. 5"
+           value="${d.concurrency_cap == null ? "" : d.concurrency_cap}"
+           oninput="setClusterDraft('concurrency_cap', this.value.trim() ? parseInt(this.value) : null)">`) +
+      fRow("Currently in flight", "Claims held right now, cluster-wide.",
+        `<span class="valuePill" id="csInFlight">${d.in_flight == null ? "–" : d.in_flight}</span>`) +
+      fRow("Stop all agents", "Blocks every claim, cluster-wide, until it is switched back off.",
+        tglCtl("csStopAll", !!d.stop_all_requested, "toggleCluster(event,'stop_all_requested')"));
+  },
+  profiles: () => `<div id="profilesList"></div>
+    <div class="fRow stack">
+      <div class="fText"><div class="fLabel" id="profileFormTitle">New profile</div>
+        <div class="fHint">Tools are a comma-separated allowlist; model and system prompt are optional.</div></div>
+      <div class="fCtl" style="display:flex; flex-direction:column; gap:8px">
+        <input class="fInput" id="pName" placeholder="Name, e.g. sonnet-readonly">
+        <input class="fInput" id="pAllowedTools" placeholder="Read,Edit,Write,Bash,Grep,Glob">
+        <input class="fInput" id="pModel" placeholder="Model (blank uses the CLI's default)">
+        <textarea class="fInput" id="pSystemPrompt" placeholder="System prompt (optional, appended to the CLI's default)"></textarea>
+        <div style="display:flex; gap:8px">
+          <button class="btn primary" id="profileSaveBtn" onclick="saveProfile()">Save profile</button>
+          <button class="btn" onclick="resetProfileForm()">New instead</button>
+        </div>
+      </div>
+    </div>`,
+};
+
+async function saveSettingsSection() {
+  const sec = currentSection();
+  if (sec.save === "board") return saveBoardSettings();
+  if (sec.save === "cluster") return saveClusterSettings();
+}
+function discardSettingsSection() {
+  boardDraft = {};
+  clusterDraft = null;
+  renderSettings();
+}
+
+// The metadata edited here is what app/prompt.py turns into the agent's
+// prompt. The board's folder on disk is deliberately absent: each worker PC
+// sets its own with `kanban-worker --set-path`.
+async function saveBoardSettings() {
+  if (!currentBoard) return;
+  const payload = {
+    description: boardValue("description") || "",
+    out_of_scope: boardValue("out_of_scope") || "",
+    commit_requirements: boardValue("commit_requirements") || "",
+    use_worktrees: !!boardValue("use_worktrees"),
+    repo_url: boardValue("repo_url") || "",
+    auto_push: !!boardValue("auto_push"),
+  };
+  const prof = boardValue("default_profile_id");
+  if (prof) payload.default_profile_id = parseInt(prof);
+  else payload.clear_default_profile = true;
+  await api("PATCH", `./api/boards/${currentBoard.id}`, payload);
+  boardDraft = {};
+  await refreshClusterBits();
+  toast("Project settings saved");
+}
+
+async function saveClusterSettings() {
+  if (!currentCluster || !clusterDraft) return;
+  await api("PUT", `./api/clusters/${currentCluster.id}/settings`, {
+    enabled: !!clusterDraft.enabled,
+    concurrency_cap: clusterDraft.concurrency_cap == null ? null : parseInt(clusterDraft.concurrency_cap),
+    stop_all_requested: !!clusterDraft.stop_all_requested,
+  });
+  clusterDraft = null;
+  await renderSettings();
+  toast("Cluster settings saved");
 }
 
 // ---------- notification bell: blocked tickets waiting on a human ----------
@@ -1174,7 +1975,7 @@ function renderBlockedList() {
       <p>${esc(q.question)}</p>
       <label>Answer</label>${field}
       <label>Notes</label><textarea id="note_${q.id}" placeholder="optional"></textarea>
-      <div class="row"><button class="small" onclick="answerQuestion(${b.ticket_id}, ${q.id})">Answer &amp; requeue</button></div>
+      <div class="row"><button class="btn primary" onclick="answerQuestion(${b.ticket_id}, ${q.id})">Answer &amp; requeue</button></div>
     </div>`;
   }).join("") : `<p class="muted">Nothing blocked right now.</p>`;
 }
@@ -1194,14 +1995,10 @@ async function answerQuestion(ticketId, questionId) {
   loadBoard(); loadQueue();
 }
 
-function esc(s) {
-  return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-}
-
 // periodic refresh of live bits (spectators keep polling too — live board)
 setInterval(() => {
   if ((token || sessionMode !== "local") && currentCluster &&
-      document.getElementById("appView").style.display !== "none") {
+      document.getElementById("appView").classList.contains("on")) {
     loadWorkers(); loadQueue(); loadBlocked();
     if (!document.getElementById("ticketOverlay").classList.contains("show")) loadBoard();
   }
@@ -1228,9 +2025,9 @@ async function boot() {
       document.getElementById("signInBtn").style.display = "";
     }
     document.getElementById("logoutBtn").style.display = "none";
-    document.getElementById("authView").style.display = "none";
-    document.getElementById("appView").style.display = "block";
-    document.getElementById("whoami").textContent = "Spectator";
+    document.getElementById("clustersItem").style.display = "none";
+    showAuth(false);
+    setWhoami("Spectator");
     document.getElementById("menuEmail").textContent = "Viewing read-only";
     const sel = document.getElementById("clusterSel");
     sel.disabled = true;
