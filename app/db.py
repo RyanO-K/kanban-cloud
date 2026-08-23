@@ -91,6 +91,15 @@ _PHASE7_COLUMNS = [
     ("work_queue", "resume BOOLEAN NOT NULL DEFAULT FALSE"),
 ]
 
+# (table, column DDL) pair added by the copyable resume command: the worker
+# reports the directory its Claude session actually ran in, so the board can
+# offer `cd '<dir>'; claude --resume <session_id>` for a human takeover.
+# Nullable — NULL means "not recorded yet" (a ticket whose last run predates
+# this column), which the UI degrades to the bare `claude --resume <id>`.
+_SESSION_DIR_COLUMNS = [
+    ("tickets", "session_dir VARCHAR(1024)"),
+]
+
 # Statuses dropped from models.TICKET_STATUSES, and what an existing row that
 # still carries one becomes (ticket #20's five-column rework). `review` meant
 # "the agent finished, a human should look at it" — every ticket that reached
@@ -207,7 +216,8 @@ def _add_missing_columns(engine) -> None:
     with engine.begin() as conn:
         for table, ddl in (_PHASE1_COLUMNS + _PHASE2_COLUMNS + _PHASE3_COLUMNS
                            + _PHASE4_COLUMNS + _PHASE5_COLUMNS + _TRIAGE_COLUMNS
-                           + _PHASE6_COLUMNS + _PHASE7_COLUMNS):
+                           + _PHASE6_COLUMNS + _PHASE7_COLUMNS
+                           + _SESSION_DIR_COLUMNS):
             if table not in tables:
                 continue  # a brand-new DB: create_all() already built the shape
             column = ddl.split()[0].strip('"')

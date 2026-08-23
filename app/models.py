@@ -245,6 +245,11 @@ class Ticket(Base):
     # Claude CLI session id of the most recent attempt, so a human can take a
     # stuck run over with `claude --resume <id>`.
     session_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Working directory that session ran in, reported by the worker once
+    # resolve_directory() has picked one. Claude scopes sessions per-cwd, so
+    # the resume command the UI offers is `cd '<session_dir>'; claude --resume
+    # <session_id>` — without the directory the id alone finds nothing.
+    session_dir: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     # Drag-order rank, ascending; see CLAIM_ORDER_BY in worker.py.
     order: Mapped[int] = mapped_column(Integer, default=0, nullable=False, server_default="0")
     # NULL = not yet triaged (or a pre-triage row). Set once, by initial triage
