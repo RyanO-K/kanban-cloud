@@ -222,3 +222,58 @@ def test_ticket_json_carries_the_assembled_resume_command(client, user, cluster)
     assert fresh["resume_command"] == r"cd 'C:\repos\board-1'; claude --resume sess-abc"
 
 
+# ---------- takeover for a board that ran over ssh ----------
+#
+# The worker claims and streams from here, but the CLI ran on another machine
+# (worker.py --set-ssh), so the transcript is on *that* disk. The command has
+# to travel or it resumes nothing.
+
+def _record_remote_session(client, ticket_id, host="ryan@studio",
+                           session_dir="/srv/site-page"):
+    engine = client.app.state.engine
+    with engine.begin() as conn:
+        conn.execute(text(
+            "UPDATE tickets SET session_id=:s, session_dir=:d, session_host=:h "
+            "WHERE id=:t"
+        ), {"s": "sess-abc", "d": session_dir, "h": host, "t": ticket_id})
+
+
+def test_resume_command_travels_to_the_host_that_holds_the_transcript():
+    """`-t` because the resumed session is interactive: without a tty the CLI
+    comes up attached to a dead pipe. `&&` rather than the local spelling's
+    `;` since the far end is POSIX."""
+    from app.main import build_resume_command
+
+    assert (build_resume_command("sess-abc", "/srv/site-page", "ryan@studio")
+            == 'ssh ryan@studio -t "cd \'/srv/site-page\' && claude --resume sess-abc"')
+
+
+def test_remote_resume_command_without_a_directory_still_travels():
+    from app.main import build_resume_command
+
+    assert (build_resume_command("sess-abc", None, "ryan@studio")
+            == 'ssh ryan@studio -t "claude --resume sess-abc"')
+
+
+def test_no_host_still_gives_the_plain_local_command():
+    """The overwhelmingly common case, and the one every existing row is."""
+    from app.main import build_resume_command
+
+    assert (build_resume_command("sess-abc", r"C:\repos\board-1", None)
+            == r"cd 'C:\repos\board-1'; claude --resume sess-abc")
+
+
+def test_ticket_json_exposes_the_session_host(client, user, cluster):
+    t = make_ticket(client, user, cluster["board_id"])
+    _record_remote_session(client, t["id"])
+    fresh = _reread(client, user, t["id"])
+    assert fresh["session_host"] == "ryan@studio"
+    assert fresh["resume_command"].startswith("ssh ryan@studio -t ")
+
+
+def test_a_local_ticket_reports_no_session_host(client, user, cluster):
+    t = make_ticket(client, user, cluster["board_id"])
+    _record_session(client, t["id"])
+    assert _reread(client, user, t["id"])["session_host"] is None
+
+

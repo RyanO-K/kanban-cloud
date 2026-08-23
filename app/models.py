@@ -250,6 +250,11 @@ class Ticket(Base):
     # the resume command the UI offers is `cd '<session_dir>'; claude --resume
     # <session_id>` — without the directory the id alone finds nothing.
     session_dir: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    # ssh target the session ran on, for a board this PC runs on another
+    # machine (worker.py --set-ssh). NULL — the usual case — means the worker
+    # PC itself, and session_dir is a path on it. When set, session_dir is a
+    # path over there instead, and the takeover command has to travel.
+    session_host: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # Drag-order rank, ascending; see CLAIM_ORDER_BY in worker.py.
     order: Mapped[int] = mapped_column(Integer, default=0, nullable=False, server_default="0")
     # NULL = not yet triaged (or a pre-triage row). Set once, by initial triage

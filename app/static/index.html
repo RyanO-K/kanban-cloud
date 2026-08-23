@@ -1500,9 +1500,14 @@ function openTicketModal(id) {
   document.getElementById("tSessionRow").style.display = resumeCmd ? "" : "none";
   if (resumeCmd) {
     document.getElementById("tSessionId").textContent = editingTicket.session_id;
+    // Which machine holds the transcript. session_host wins: an ssh board ran
+    // the CLI over there, so naming the PC that claimed the ticket would send
+    // the human to a disk the session was never on. The command already
+    // carries the ssh hop, so this line only has to say where it lands.
+    const host = editingTicket.session_host;
     const owner = editingTicket.session_worker;
     document.getElementById("tSessionWorker").textContent =
-      owner ? `run it on ${owner}` : "";
+      host ? `runs on ${host} over ssh` : (owner ? `run it on ${owner}` : "");
   }
   document.getElementById("delBtn").style.display = editingTicket ? "" : "none";
   document.getElementById("runBtn").style.display = editingTicket ? "" : "none";

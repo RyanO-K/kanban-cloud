@@ -323,7 +323,9 @@ def test_record_session_dir_writes_the_directory_against_the_ticket():
     assert len(writes) == 1, f"expected one session_dir write, got {conn.calls}"
     sql, params = writes[0]
     assert "UPDATE tickets" in sql
-    assert params == (r"C:\repos\site-page", 42)
+    # (directory, host, ticket_id): host is None for a run on this PC, which
+    # is what a board without an --set-ssh target is.
+    assert params == (r"C:\repos\site-page", None, 42)
 
 
 def test_record_session_dir_stringifies_a_path_object():
@@ -364,7 +366,8 @@ class QuietExecutor:
 
     def run(self, ticket, board=None, directory=None, session_id=None,
             progress_cb=None, should_kill=None, chat_source=None,
-            chat_delivered=None, log_cb=None, profile=None, resume=None):
+            chat_delivered=None, log_cb=None, profile=None, resume=None,
+            ssh=None):
         return True, "done"
 
 
@@ -396,7 +399,7 @@ def _run_one_slot(monkeypatch, tmp_path, resolve):
     monkeypatch.setattr(worker, "_claim_heartbeat_loop", lambda *a, **k: None)
     monkeypatch.setattr(worker, "resolve_directory", resolve)
     monkeypatch.setattr(worker, "record_session_dir",
-                        lambda conn, tid, d: recorded.append((tid, d)))
+                        lambda conn, tid, d, host=None: recorded.append((tid, d)))
 
     cfg = {"dsn": "x", "worker_id": 1, "cluster_id": 1, "name": "pc",
            "boards": {"1": str(tmp_path)}}

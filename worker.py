@@ -30,6 +30,7 @@ import datetime
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -148,6 +149,79 @@ RETURNING id, ticket_id, resume
 """
 
 
+# ---------- ssh transport ----------
+#
+# A board can be pointed at another machine instead of this PC: the worker
+# keeps doing the claiming, streaming and result-posting, but the `claude`
+# CLI (and the git that lands its branch) runs on the far end of an ssh
+# connection, in a checkout that lives there. Nothing about the rest of the
+# worker changes — the CLI still speaks stream-json over stdin/stdout, and
+# ssh is a transparent pipe for both, so the live `ticket_log` transcript in
+# the browser is byte-for-byte what a local run produces.
+#
+# The far end is assumed to be POSIX: everything below quotes for `sh`, since
+# that is what sshd hands a command string to. An ssh target whose login
+# shell is cmd.exe/PowerShell is out of scope.
+
+# -T: never ask for a tty. A pty would echo our stdin back and translate
+#     newlines, which corrupts the stream-json the reader parses.
+# BatchMode=yes: never prompt for a password or passphrase. stdin belongs to
+#     the agent's stream-json turns, so a prompt there would hang the slot
+#     forever rather than fail it — the same reasoning as _run_git's
+#     GIT_TERMINAL_PROMPT=0.
+SSH_OPTIONS = ["-T", "-o", "BatchMode=yes"]
+
+# ssh's own exit codes, distinct from anything the remote command returns.
+SSH_CONNECT_FAILED = 255
+SSH_COMMAND_NOT_FOUND = 127
+
+
+def build_remote_shell(directory, cmd: list, env: dict | None = None) -> str:
+    """The single POSIX `sh` string ssh runs on the far end.
+
+    `exec` so the remote command replaces its wrapper shell rather than
+    sitting under it: one less process to outlive a dropped connection.
+    Environment is applied through `env` rather than a `VAR=v exec cmd`
+    prefix, whose interaction with a special built-in is a corner of POSIX
+    not worth relying on.
+    """
+    if env:
+        cmd = ["env", *[f"{k}={v}" for k, v in sorted(env.items())], *cmd]
+    run = "exec " + shlex.join(str(part) for part in cmd)
+    if directory:
+        return "cd " + shlex.quote(str(directory)) + " && " + run
+    return run
+
+
+def build_ssh_command(ssh: dict, cmd: list, directory=None,
+                      env: dict | None = None, ssh_exe: str = "ssh") -> list:
+    """argv that runs `cmd` on `ssh["target"]`, in `directory` (defaulting to
+    the target's configured one)."""
+    remote_dir = directory if directory is not None else ssh.get("directory")
+    return [ssh_exe, *SSH_OPTIONS, ssh["target"],
+            build_remote_shell(remote_dir, cmd, env)]
+
+
+def ssh_exit_hint(returncode: int) -> str:
+    """A line explaining an ssh run's exit code, or "" when it says nothing
+    beyond what the transcript already shows.
+
+    Both codes below are ones a local run simply cannot produce, and both have
+    the same unhelpful shape in a transcript (an empty or one-line failure),
+    so the hint is where the diagnosis lives.
+    """
+    if returncode == SSH_CONNECT_FAILED:
+        return ("\n\n(ssh could not connect or authenticate. This PC must "
+                "reach the target with key-based auth and a known host key — "
+                "BatchMode is on, so there is no password prompt to answer.)")
+    if returncode == SSH_COMMAND_NOT_FOUND:
+        return ("\n\n(Exit 127 is `command not found` on the far end. A "
+                "non-interactive ssh shell does not read the profile that "
+                "usually puts `claude` on PATH; install it somewhere already "
+                "on the non-interactive PATH, or symlink it there.)")
+    return ""
+
+
 # ---------- executors ----------
 
 class KilledByRequest(RuntimeError):
@@ -167,7 +241,13 @@ AGENT_TIMEOUT_SECONDS = 1800
 def _terminate_process_tree(proc: subprocess.Popen) -> None:
     """Kill the CLI and any child processes it spawned. A plain terminate()
     only signals the immediate child; the Claude CLI's own subprocesses (the
-    tools it shells out to) would otherwise survive it."""
+    tools it shells out to) would otherwise survive it.
+
+    For an ssh run this kills the local ssh client, which drops the channel:
+    the remote CLI then sees EOF on stdin and EPIPE on its next write and
+    exits on its own. That is one round-trip slower than a local kill, and a
+    remote agent producing no output at all could linger until it next writes.
+    """
     if os.name == "nt":
         subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
                        capture_output=True)
@@ -187,7 +267,7 @@ class StubExecutor:
     def run(self, ticket, board=None, directory=None, session_id=None,
             progress_cb=None, should_kill=None,
             chat_source=None, chat_delivered=None, log_cb=None, profile=None,
-            resume=None):
+            resume=None, ssh=None):
         print(f"  [stub] pretending to work on ticket #{ticket['id']}: {ticket['title']}")
         time.sleep(2)
         return True, (
@@ -376,6 +456,12 @@ class ClaudeExecutor:
     The CLI authenticates from whatever local configuration this PC already
     has — a `claude login` session, or the operator's own ANTHROPIC_API_KEY.
     The cluster neither stores nor forwards a key.
+
+    Given an `ssh` target (see resolve_ssh), the same CLI invocation is run on
+    another machine instead, in that machine's checkout: the CLI, its auth and
+    the repo are all the far end's, and this PC only carries the pipe. Every
+    other part of a run — stream-json in and out, the chat pump, kill, the
+    timeout, the local raw-stream log — is identical either way.
     """
 
     name = "claude"
@@ -393,7 +479,7 @@ class ClaudeExecutor:
     def run(self, ticket, board=None, directory=None, session_id=None,
             progress_cb=None, should_kill=None,
             chat_source=None, chat_delivered=None, log_cb=None, profile=None,
-            resume=None):
+            resume=None, ssh=None):
         board = board or {}
         name = board.get("name", "?")
         should_kill = should_kill or (lambda: False)
@@ -402,20 +488,36 @@ class ClaudeExecutor:
                 f"This PC has no folder configured for board '{name}'. Set one "
                 f"with: kanban-worker --set-path \"{name}=<path to the repo>\""
             )
-        if not Path(directory).is_dir():
-            return False, (
-                f"The configured folder for board '{name}' no longer exists: "
-                f"{directory}. Fix it with --set-path."
-            )
+        if ssh:
+            # `directory` names a folder on the ssh target, so there is
+            # nothing here to stat — a wrong path fails on the far end, where
+            # the message says so. What must exist locally is ssh itself.
+            ssh_exe = shutil.which("ssh")
+            if not ssh_exe:
+                return False, (
+                    "`ssh` was not found on this PC's PATH, but board "
+                    f"'{name}' is configured to run on {ssh['target']}. "
+                    "Install an OpenSSH client, or clear the target with: "
+                    f"kanban-worker --set-ssh \"{name}=\""
+                )
+            # The far end resolves its own CLI from its own PATH; there is no
+            # local binary to point at.
+            exe = "claude"
+        else:
+            if not Path(directory).is_dir():
+                return False, (
+                    f"The configured folder for board '{name}' no longer exists: "
+                    f"{directory}. Fix it with --set-path."
+                )
 
-        # Resolve the CLI ourselves rather than passing shell=True. On Windows
-        # shell=True re-parses the argument list through cmd.exe, which cuts the
-        # multi-line prompt off at its first newline — the agent then saw the
-        # title and none of the ticket body. shutil.which finds the .CMD/.EXE
-        # shim that shell=True was there for.
-        exe = shutil.which("claude")
-        if not exe:
-            return False, "`claude` CLI not found on this PC's PATH."
+            # Resolve the CLI ourselves rather than passing shell=True. On Windows
+            # shell=True re-parses the argument list through cmd.exe, which cuts the
+            # multi-line prompt off at its first newline — the agent then saw the
+            # title and none of the ticket body. shutil.which finds the .CMD/.EXE
+            # shim that shell=True was there for.
+            exe = shutil.which("claude")
+            if not exe:
+                return False, "`claude` CLI not found on this PC's PATH."
 
         # profile (resolved by worker.resolve_profile: ticket beats board)
         # supplies the tool allowlist, model and system prompt for this run.
@@ -450,7 +552,16 @@ class ClaudeExecutor:
             cmd += ["--model", model]
         if system_prompt:
             cmd += ["--append-system-prompt", system_prompt]
-        print(f"  [claude] running in {directory} for ticket #{ticket['id']}"
+        # Over ssh the whole invocation becomes one quoted `sh` string on the
+        # far end; locally it stays the argv it already was. Popen's cwd is
+        # only meaningful in the local case — `directory` is a remote path in
+        # the other, and cd'ing into it is the remote shell's job.
+        popen_cwd = directory
+        if ssh:
+            cmd = build_ssh_command(ssh, cmd, directory=directory, ssh_exe=ssh_exe)
+            popen_cwd = None
+        where = f"{ssh['target']}:{directory}" if ssh else directory
+        print(f"  [claude] running in {where} for ticket #{ticket['id']}"
              + (" (resuming)" if resume else ""))
 
         def emit(text):
@@ -469,10 +580,12 @@ class ClaudeExecutor:
             # pipe too — --input-format stream-json accepts further user
             # turns on it for as long as the process is alive, which is what
             # lets chat messages reach a running agent at all.
-            proc = subprocess.Popen(cmd, cwd=directory, stdin=subprocess.PIPE,
+            proc = subprocess.Popen(cmd, cwd=popen_cwd, stdin=subprocess.PIPE,
                                     stdout=subprocess.PIPE,
                                     stderr=subprocess.STDOUT, text=True, bufsize=1)
         except FileNotFoundError:
+            if ssh:
+                return False, "`ssh` was not found on this PC's PATH."
             return False, "`claude` CLI not found on this PC's PATH."
 
         # The run's first user turn: the ticket prompt itself, ahead of any
@@ -611,7 +724,8 @@ class ClaudeExecutor:
         returncode = proc.wait()
         output = _render_stream_lines(seen_lines)
         if returncode != 0:
-            return False, f"Claude CLI exited {returncode}: {output[:2000]}"
+            hint = ssh_exit_hint(returncode) if ssh else ""
+            return False, f"Claude CLI exited {returncode}: {output[:2000]}{hint}"
         return True, output[:10000] or "(no output)"
 
 
@@ -644,14 +758,41 @@ def board_paths(cfg: dict) -> dict:
     return cfg.get("boards") or {}
 
 
+def board_ssh_targets(cfg: dict) -> dict:
+    """{board_id_as_str: {"target": ..., "directory": ...}} for the boards
+    this PC runs on another machine over ssh."""
+    return cfg.get("ssh") or {}
+
+
+def resolve_ssh(board: dict, cfg: dict) -> dict | None:
+    """The ssh target this board's agent runs on, or None to run locally.
+
+    Kept separate from resolve_directory rather than folded into it: a remote
+    board has no local checkout to clone, refresh or even stat, so the whole
+    of that function is inapplicable — the entry's directory is used exactly
+    as configured, the same way an explicit --set-path is.
+    """
+    entry = board_ssh_targets(cfg).get(str((board or {}).get("id")))
+    if not entry:
+        return None
+    # A hand-edited config missing either half is not a usable target; falling
+    # back to a local run is what the PC would have done without the entry.
+    if not entry.get("target") or not entry.get("directory"):
+        return None
+    return entry
+
+
 def configured_board_ids(cfg: dict) -> list:
-    """Board ids this PC has a checkout for, as ints for the claim query."""
+    """Board ids this PC can work, as ints for the claim query — a local
+    checkout (--set-path) or an ssh target (--set-ssh) both count."""
     out = []
-    for key in board_paths(cfg):
+    for key in (*board_paths(cfg), *board_ssh_targets(cfg)):
         try:
-            out.append(int(key))
+            key = int(key)
         except (TypeError, ValueError):
             continue  # a hand-edited config should not stop the worker
+        if key not in out:
+            out.append(key)
     return out
 
 
@@ -707,6 +848,58 @@ def apply_set_path(conn, cfg: dict, arg: str) -> dict:
     cfg.setdefault("boards", {})[str(board_id)] = str(resolved)
     save_config(cfg)
     print(f"Board {board_id} ({name}) -> {resolved}")
+    return cfg
+
+
+def parse_set_ssh(arg: str):
+    """Split a --set-ssh value into (board token, target, directory).
+
+    `<board>=[user@]host:/path/to/repo`, splitting the value on its FIRST ':'
+    since a POSIX remote path starts with '/' and the target never contains
+    one. `<board>=` with nothing after it means "clear", and comes back as
+    (token, None, None) — without it the only way back to a local run would be
+    hand-editing the config file.
+    """
+    if "=" not in (arg or ""):
+        raise ValueError("--set-ssh needs <board-id-or-name>=[user@]host:/path "
+                         "(or <board-id-or-name>= to clear)")
+    token, value = arg.split("=", 1)
+    token, value = token.strip(), value.strip()
+    if not token:
+        raise ValueError("--set-ssh needs a board id or name before the '='")
+    if not value:
+        return token, None, None
+    if ":" not in value:
+        raise ValueError(f"'{value}' has no remote path; use "
+                         "[user@]host:/path/to/repo")
+    target, directory = value.split(":", 1)
+    target, directory = target.strip(), directory.strip()
+    if not target or not directory:
+        raise ValueError(f"'{value}' needs both a host and a remote path")
+    return token, target, directory
+
+
+def apply_set_ssh(conn, cfg: dict, arg: str) -> dict:
+    """Validate and record (or clear) one board->ssh target; saves and
+    returns cfg.
+
+    Nothing here connects to the target. A board is configured while the far
+    end is asleep as readily as while it is up, and a reachability check that
+    passed once would say nothing about the moment a ticket is claimed
+    anyway — an unreachable target surfaces as a failed run, with ssh's own
+    message (see ssh_exit_hint) rather than a guess made here.
+    """
+    token, target, directory = parse_set_ssh(arg)
+    board_id, name = resolve_board(conn, cfg["cluster_id"], token)
+    targets = cfg.setdefault("ssh", {})
+    if target is None:
+        targets.pop(str(board_id), None)
+        save_config(cfg)
+        print(f"Board {board_id} ({name}) -> runs on this PC")
+        return cfg
+    targets[str(board_id)] = {"target": target, "directory": directory}
+    save_config(cfg)
+    print(f"Board {board_id} ({name}) -> {target}:{directory}")
     return cfg
 
 
@@ -805,7 +998,8 @@ def _redact_text(text: str) -> str:
 GIT_TIMEOUT_SECONDS = 600
 
 
-def _run_git(args: list, cwd: str | None = None) -> subprocess.CompletedProcess:
+def _run_git(args: list, cwd: str | None = None,
+             ssh: dict | None = None) -> subprocess.CompletedProcess:
     """Run one git subcommand with no chance of hanging the slot forever.
 
     A repo_url that needs credentials not ambiently available can otherwise
@@ -814,9 +1008,22 @@ def _run_git(args: list, cwd: str | None = None) -> subprocess.CompletedProcess:
     usual interactive-prompt env vars are disabled so git fails fast instead
     of waiting on a prompt nobody can answer; a hard timeout is the backstop
     in case some git/credential-helper combination prompts anyway.
+
+    With `ssh`, the same subcommand runs in `cwd` on the ssh target instead —
+    a remote board's checkout is over there, so running git here would at best
+    address a path this PC does not have. The returned CompletedProcess has
+    the same shape either way (ssh passes the remote exit code through), so
+    every caller's success test is unchanged. `cwd` is deliberately not handed
+    to subprocess.run in that case: it is a remote path, and a local chdir to
+    it would raise rather than fail.
     """
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "Never"}
-    cmd = ["git", *args]
+    if ssh:
+        cmd = build_ssh_command(ssh, ["git", *args], directory=cwd,
+                                env={"GIT_TERMINAL_PROMPT": "0"})
+        cwd = None
+    else:
+        cmd = ["git", *args]
     try:
         return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
                               stdin=subprocess.DEVNULL, env=env,
@@ -920,7 +1127,8 @@ def resolve_directory(board: dict, cfg: dict) -> tuple:
 # ticket is done. Everything here therefore reports back a plain boolean about
 # what git actually did, and never about what the agent claimed it did.
 
-def push_ticket_branch(directory: str, branch: str) -> tuple[bool, str | None]:
+def push_ticket_branch(directory: str, branch: str,
+                       ssh: dict | None = None) -> tuple[bool, str | None]:
     """Best-effort push of `branch` to origin.
 
     Returns (pushed, note): whether the branch actually reached the remote,
@@ -933,8 +1141,13 @@ def push_ticket_branch(directory: str, branch: str) -> tuple[bool, str | None]:
     Never fails the ticket: a push failure (no network, no credentials, a
     protected branch) is surfaced in the comment instead so a human can push
     by hand, same as today, rather than losing the run's result.
+
+    `ssh` sends both commands to the machine that holds the checkout — and to
+    that machine's git credentials, which is the point: push auth stays
+    ambient to whoever owns the repo, exactly as it is for a local board.
     """
-    proc = _run_git(["rev-parse", "--verify", "--quiet", branch], cwd=directory)
+    proc = _run_git(["rev-parse", "--verify", "--quiet", branch], cwd=directory,
+                    ssh=ssh)
     if proc.returncode != 0:
         # No such branch: the agent committed nothing under the name both
         # sides agreed on, so there is nothing to land.
@@ -942,7 +1155,7 @@ def push_ticket_branch(directory: str, branch: str) -> tuple[bool, str | None]:
             f"\n\n(Nothing pushed: this checkout has no branch `{branch}` — "
             "the agent committed nothing under it.)"
         )
-    proc = _run_git(["push", "origin", branch], cwd=directory)
+    proc = _run_git(["push", "origin", branch], cwd=directory, ssh=ssh)
     if proc.returncode != 0:
         stderr = _redact_text((proc.stderr or proc.stdout).strip()[:1000])
         return False, f"\n\n(Could not push branch `{branch}` to origin: {stderr})"
@@ -950,7 +1163,8 @@ def push_ticket_branch(directory: str, branch: str) -> tuple[bool, str | None]:
 
 
 def resolve_push(board: dict, ticket: dict, directory: str,
-                 commit_gate: dict | None) -> tuple[bool, str | None]:
+                 commit_gate: dict | None,
+                 ssh: dict | None = None) -> tuple[bool, str | None]:
     """Decide whether a finished run's work goes to origin, and try it.
 
     Returns (pushed, note) exactly as push_ticket_branch does. Split out of
@@ -963,9 +1177,10 @@ def resolve_push(board: dict, ticket: dict, directory: str,
     ticket is about to sit in the Blocked column waiting for a human.
     """
     if not board.get("auto_push"):
+        where = f"on {ssh['target']}" if ssh else "on the worker PC"
         return False, (
             "\n\n(Not pushed: auto-push is off for this board, so the branch "
-            "is only on the worker PC. Push it by hand to close the ticket.)"
+            f"is only {where}. Push it by hand to close the ticket.)"
         )
     # A board with commit_requirements refuses to push unless the agent's own
     # gate says they were met — an unreported gate (marker missing/malformed)
@@ -976,7 +1191,7 @@ def resolve_push(board: dict, ticket: dict, directory: str,
             "\n\n(Not pushed: the commit gate did not report the board's "
             "commit requirements were met.)"
         )
-    return push_ticket_branch(directory, ticket_branch_name(ticket))
+    return push_ticket_branch(directory, ticket_branch_name(ticket), ssh=ssh)
 
 
 def enroll(server: str, join_code: str, name: str) -> dict:
@@ -1103,8 +1318,9 @@ def touch_claim_heartbeat(conn, item_id: int) -> None:
         )
 
 
-def record_session_dir(conn, ticket_id: int, directory) -> None:
-    """Report the directory this ticket's Claude session actually ran in.
+def record_session_dir(conn, ticket_id: int, directory, host=None) -> None:
+    """Report the directory — and, for an ssh board, the machine — this
+    ticket's Claude session actually ran in.
 
     The board turns it into a human-takeover command,
     `cd '<session_dir>'; claude --resume <session_id>`. Both halves are
@@ -1112,6 +1328,11 @@ def record_session_dir(conn, ticket_id: int, directory) -> None:
     own resolves to nothing. Session ids are minted in claim_next, but the
     directory is only known once resolve_directory has run, hence the
     separate write here rather than one UPDATE at claim time.
+
+    `host` is the ssh target, or None for a run on this PC, and is written on
+    every call rather than only when set: a board moved back off ssh would
+    otherwise keep handing a human a command aimed at a machine its transcript
+    is no longer on.
 
     A falsy `directory` (a stub run, or a resolve that failed) writes
     nothing at all — blanking the column would throw away a good path an
@@ -1128,8 +1349,8 @@ def record_session_dir(conn, ticket_id: int, directory) -> None:
     try:
         with conn.transaction(), conn.cursor() as cur:
             cur.execute(
-                "UPDATE tickets SET session_dir=%s WHERE id=%s",
-                (str(directory), ticket_id),
+                "UPDATE tickets SET session_dir=%s, session_host=%s WHERE id=%s",
+                (str(directory), str(host) if host else None, ticket_id),
             )
     except Exception as exc:
         print(f"  [session] could not record the run directory: {exc!r}")
@@ -1903,8 +2124,16 @@ def run_slot(cfg, args, executor, stop_event, slot_no: int) -> None:
                             log_cb=log_cb, profile=work.get("profile"),
                             resume=work.get("resume"))
                     else:
-                        directory, resolve_error = resolve_directory(
-                            work.get("board") or {}, cfg)
+                        # A board pointed at an ssh target has its checkout on
+                        # that machine, so there is nothing here to resolve,
+                        # clone or refresh: the configured remote directory is
+                        # used as-is, exactly as an explicit --set-path is.
+                        ssh = resolve_ssh(work.get("board") or {}, cfg)
+                        if ssh:
+                            directory, resolve_error = ssh["directory"], None
+                        else:
+                            directory, resolve_error = resolve_directory(
+                                work.get("board") or {}, cfg)
                         if resolve_error:
                             ok, comment = False, resolve_error
                         else:
@@ -1912,7 +2141,8 @@ def run_slot(cfg, args, executor, stop_event, slot_no: int) -> None:
                             # or dies is exactly when a human wants the
                             # takeover command, and a write that only
                             # happened on clean exit would be missing then.
-                            record_session_dir(conn, ticket["id"], directory)
+                            record_session_dir(conn, ticket["id"], directory,
+                                               host=ssh["target"] if ssh else None)
                             ok, comment = executor.run(
                                 ticket, board=work.get("board"),
                                 directory=directory,
@@ -1920,7 +2150,7 @@ def run_slot(cfg, args, executor, stop_event, slot_no: int) -> None:
                                 progress_cb=None, should_kill=should_kill,
                                 chat_source=chat_source, chat_delivered=chat_delivered,
                                 log_cb=log_cb, profile=work.get("profile"),
-                                resume=work.get("resume"))
+                                resume=work.get("resume"), ssh=ssh)
                             # A question isn't a finished attempt — nothing to
                             # push yet, and (in tests especially) `directory`
                             # may not even be a real git checkout.
@@ -1928,7 +2158,7 @@ def run_slot(cfg, args, executor, stop_event, slot_no: int) -> None:
                                 commit_gate = parse_commit_gate(comment)
                                 pushed, push_note = resolve_push(
                                     work.get("board") or {}, ticket, directory,
-                                    commit_gate)
+                                    commit_gate, ssh=ssh)
                                 if push_note:
                                     comment = (comment or "") + push_note
                 except KilledByRequest as exc:
@@ -1999,6 +2229,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--set-path", action="append", metavar="BOARD=PATH",
                         help="map a board (id or name) to its folder on this PC; "
                              "repeatable")
+    parser.add_argument("--set-ssh", action="append", metavar="BOARD=HOST:PATH",
+                        help="run a board's agent on another machine over ssh, "
+                             "in that machine's checkout: "
+                             "<board>=[user@]host:/path; <board>= clears it; "
+                             "repeatable")
     parser.add_argument("--list-boards", action="store_true",
                         help="list this cluster's boards and their configured paths")
     parser.add_argument("--concurrency", type=int, default=None,
@@ -2058,7 +2293,7 @@ def main() -> int:
             print(f"Enrolled, but could not list boards ({str(e)[:120]}).")
             print("Set folders later with --set-path <board>=<path>.")
 
-    if args.list_boards or args.set_path:
+    if args.list_boards or args.set_path or args.set_ssh:
         conn = connect_db(cfg["dsn"])
         try:
             for arg in args.set_path or []:
@@ -2067,12 +2302,23 @@ def main() -> int:
                 except ValueError as e:
                     print(f"--set-path {arg}: {e}")
                     return 2
+            for arg in args.set_ssh or []:
+                try:
+                    cfg = apply_set_ssh(conn, cfg, arg)
+                except ValueError as e:
+                    print(f"--set-ssh {arg}: {e}")
+                    return 2
             if args.list_boards:
                 paths = board_paths(cfg)
+                targets = board_ssh_targets(cfg)
                 print(f"{'id':>4}  {'board':<24} path")
                 for b in list_cluster_boards(conn, cfg["cluster_id"]):
-                    print(f"{b['id']:>4}  {b['name']:<24} "
-                          f"{paths.get(str(b['id']), '(not configured)')}")
+                    # An ssh target wins the line: it is what a claimed ticket
+                    # would actually run against, whatever --set-path also says.
+                    ssh = targets.get(str(b["id"]))
+                    where = (f"{ssh['target']}:{ssh['directory']} (ssh)" if ssh
+                             else paths.get(str(b["id"]), "(not configured)"))
+                    print(f"{b['id']:>4}  {b['name']:<24} {where}")
         finally:
             conn.close()
         return 0
@@ -2102,10 +2348,11 @@ def main() -> int:
         save_config(cfg)
 
     if not isinstance(executor, StubExecutor) and not configured_board_ids(cfg):
-        print("WARNING: no board folders configured on this PC via --set-path; "
-              "only boards with a Repo URL set (auto-clone) will be claimable "
-              "here.\n         Fix with: --list-boards, then "
-              "--set-path <board>=<path>")
+        print("WARNING: no board folders configured on this PC via --set-path "
+              "or --set-ssh; only boards with a Repo URL set (auto-clone) will "
+              "be claimable here.\n         Fix with: --list-boards, then "
+              "--set-path <board>=<path> (or --set-ssh <board>=host:/path to "
+              "run on another machine)")
 
     print(f"Worker '{cfg['name']}' polling Postgres every {args.poll}s "
           f"({concurrency} slot{'s' if concurrency > 1 else ''}, "

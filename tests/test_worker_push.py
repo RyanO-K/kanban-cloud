@@ -90,8 +90,9 @@ def _never(*_a, **_k):
 
 def test_resolve_push_pushes_when_nothing_vetoes_it(monkeypatch):
     calls = []
-    monkeypatch.setattr(worker, "push_ticket_branch",
-                        lambda d, b: calls.append((d, b)) or (True, "\n\n(Pushed.)"))
+    monkeypatch.setattr(
+        worker, "push_ticket_branch",
+        lambda d, b, ssh=None: calls.append((d, b)) or (True, "\n\n(Pushed.)"))
     pushed, note = worker.resolve_push({"auto_push": True}, TICKET, "/repo", None)
     assert calls == [("/repo", ticket_branch_name(TICKET))]
     assert (pushed, note) == (True, "\n\n(Pushed.)")
@@ -123,7 +124,8 @@ def test_missing_gate_is_treated_as_unmet(monkeypatch):
 
 
 def test_met_gate_lets_the_push_through(monkeypatch):
-    monkeypatch.setattr(worker, "push_ticket_branch", lambda d, b: (True, None))
+    monkeypatch.setattr(worker, "push_ticket_branch",
+                        lambda d, b, ssh=None: (True, None))
     board = {"auto_push": True, "commit_requirements": "All tests pass."}
     gate = {"requirements_met": True, "summary": "Ran the suite."}
     assert worker.resolve_push(board, TICKET, "/repo", gate)[0] is True
@@ -139,11 +141,12 @@ def _run_slot_once(monkeypatch, board, push_result, finished):
         def run(self, ticket, board=None, directory=None, session_id=None,
                 progress_cb=None, should_kill=None,
                 chat_source=None, chat_delivered=None, log_cb=None, profile=None,
-                resume=None):
+                resume=None, ssh=None):
             return True, "Implemented the thing."
 
     monkeypatch.setattr(worker, "resolve_directory", lambda b, cfg: ("/repo", None))
-    monkeypatch.setattr(worker, "push_ticket_branch", lambda d, b: push_result)
+    monkeypatch.setattr(worker, "push_ticket_branch",
+                        lambda d, b, ssh=None: push_result)
 
     calls = {"claim": 0}
 

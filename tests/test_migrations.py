@@ -477,3 +477,38 @@ def test_ticket_model_has_session_dir_column():
     from app.models import Ticket
 
     assert "session_dir" in {c.name for c in Ticket.__table__.columns}
+
+
+# ---------- session host (a board whose agent runs over ssh) ----------
+
+def test_migration_adds_session_host_column_to_an_existing_db(tmp_path):
+    """Every database predates the ssh transport, so this one has to arrive by
+    migration on a live board rather than only in create_all()."""
+    from app.db import _SESSION_HOST_COLUMNS
+
+    engine = make_engine(f"sqlite:///{tmp_path / 'old_sh.db'}")
+    Base.metadata.create_all(engine)
+    with engine.begin() as conn:
+        for table, ddl in _SESSION_HOST_COLUMNS:
+            conn.execute(sa.text(f"ALTER TABLE {table} DROP COLUMN {ddl.split()[0]}"))
+
+    run_migrations(engine)
+    run_migrations(engine)  # idempotent
+
+    insp = sa.inspect(engine)
+    for table, ddl in _SESSION_HOST_COLUMNS:
+        assert ddl.split()[0] in {c["name"] for c in insp.get_columns(table)}, ddl
+
+
+def test_session_host_is_nullable_so_existing_rows_stay_valid(tmp_path):
+    """NULL means "ran on the worker PC itself" — which is what every row
+    written before the ssh transport was, and still the usual case."""
+    from app.models import Ticket
+
+    assert Ticket.__table__.c.session_host.nullable is True
+
+
+def test_ticket_model_has_session_host_column():
+    from app.models import Ticket
+
+    assert "session_host" in {c.name for c in Ticket.__table__.columns}

@@ -100,6 +100,14 @@ _SESSION_DIR_COLUMNS = [
     ("tickets", "session_dir VARCHAR(1024)"),
 ]
 
+# Added by the ssh transport (worker.py --set-ssh): when a board's agent runs
+# on another machine, session_dir is a path over there, so the takeover command
+# needs the host too. Nullable — NULL means the session ran on the worker PC
+# itself, which is both the usual case and what every pre-existing row was.
+_SESSION_HOST_COLUMNS = [
+    ("tickets", "session_host VARCHAR(255)"),
+]
+
 # Statuses dropped from models.TICKET_STATUSES, and what an existing row that
 # still carries one becomes (ticket #20's five-column rework). `review` meant
 # "the agent finished, a human should look at it" — every ticket that reached
@@ -217,7 +225,7 @@ def _add_missing_columns(engine) -> None:
         for table, ddl in (_PHASE1_COLUMNS + _PHASE2_COLUMNS + _PHASE3_COLUMNS
                            + _PHASE4_COLUMNS + _PHASE5_COLUMNS + _TRIAGE_COLUMNS
                            + _PHASE6_COLUMNS + _PHASE7_COLUMNS
-                           + _SESSION_DIR_COLUMNS):
+                           + _SESSION_DIR_COLUMNS + _SESSION_HOST_COLUMNS):
             if table not in tables:
                 continue  # a brand-new DB: create_all() already built the shape
             column = ddl.split()[0].strip('"')

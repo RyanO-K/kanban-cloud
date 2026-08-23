@@ -137,6 +137,12 @@ CREATE TABLE IF NOT EXISTS tickets (
     -- `cd '<session_dir>'; claude --resume <session_id>`.
     -- NULL = the ticket's last run predates this column.
     session_dir     VARCHAR(1024),
+    -- ssh target the session ran on when the worker was configured to run this
+    -- board on another machine (worker.py's --set-ssh). The transcript and the
+    -- checkout are both over there, so the takeover command becomes
+    -- `ssh <host> -t "cd '<session_dir>' && claude --resume <session_id>"`.
+    -- NULL = the session ran on the worker PC itself, which is the usual case.
+    session_host    VARCHAR(255),
     -- Drag-order rank, ascending. Claimed ahead of queue age by CLAIM_SQL;
     -- ties (the common case — most tickets never get dragged) fall back to
     -- queued_at. Not unique or contiguous: only relative order matters.

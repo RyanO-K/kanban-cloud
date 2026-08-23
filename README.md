@@ -97,7 +97,10 @@ and the modal offers a **Copy resume cmd** button for it:
 `cd '<dir>'; claude --resume <session-id>`. Run that on the PC the row names
 — the transcript lives on that machine's disk, nowhere else — and you pick up
 the agent's own conversation rather than starting over. Useful on a ticket
-sitting in Blocked, or on one whose worker died mid-run.
+sitting in Blocked, or on one whose worker died mid-run. If the board was
+configured to run over ssh, the command carries the hop as well
+(`ssh <host> -t "cd '<dir>' && claude --resume <session-id>"`) and the modal
+names the host rather than the PC that claimed the ticket.
 
 **A ticket is done when it is committed and pushed** — nothing else counts. A
 run that finishes but leaves its branch on the worker PC (auto-push off for
@@ -218,6 +221,34 @@ them.
 A PC only claims tickets for boards it has a folder for — one with nothing
 configured stays idle rather than claiming work it would have to abandon.
 (`--stub` ignores this: it needs no repo.)
+
+**Running a board's agent on another machine (ssh).** A board can point at a
+checkout on a different PC instead of this one:
+
+```powershell
+py worker.py --set-ssh site-page=ryan@studio:/srv/site-page
+py worker.py --set-ssh site-page=          # back to running here
+```
+
+This PC keeps claiming, streaming and posting results; only the `claude` CLI
+and the git that lands its branch move to the far end, in that machine's
+checkout, using that machine's Claude auth and git credentials. Because ssh is
+a transparent pipe for stdin/stdout, the live transcript in the browser is
+exactly what a local run produces — watching a run on a machine you are not
+sitting at is the point of the arrangement.
+
+Requirements: key-based auth from this PC to the target (`BatchMode` is on, so
+there is no password prompt to answer), a POSIX login shell over there, and
+`claude` on the target's **non-interactive** PATH — an ssh command shell does
+not read the profile that usually puts it there, which shows up as exit 127.
+An ssh board's directory is a path on the target and is used exactly as given:
+nothing is cloned, refreshed or stat'ed locally, and `--set-ssh` wins over any
+`--set-path` for the same board. Nothing connects at configure time, so a
+target can be set up while the far end is asleep.
+
+A ticket that ran this way records the host alongside the directory, so its
+takeover command travels too:
+`ssh <host> -t "cd '<dir>' && claude --resume <session-id>"`.
 
 **How much this PC runs at once** is also the PC's own setting:
 

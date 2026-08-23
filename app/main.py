@@ -221,7 +221,8 @@ class WorkerPatch(BaseModel):
 
 # ---------- resume command ----------
 
-def build_resume_command(session_id: str | None, session_dir: str | None) -> str | None:
+def build_resume_command(session_id: str | None, session_dir: str | None,
+                         session_host: str | None = None) -> str | None:
     """The shell command that hands a ticket's agent session to a human.
 
     Assembled server-side, not in index.html, so these fallbacks are covered
@@ -234,9 +235,20 @@ def build_resume_command(session_id: str | None, session_dir: str | None) -> str
     string serves Windows and POSIX workers alike. A ticket whose last run
     predates the session_dir column still gets the bare resume — the human
     knows their own folder — rather than nothing at all.
+
+    `session_host` is set only for a board the worker runs on another machine
+    over ssh (worker.py --set-ssh). Then the transcript is on *that* machine's
+    disk, so the command has to travel to it — and `-t` is what makes the
+    resumed session interactive rather than a CLI attached to a dead pipe.
+    Its far end is POSIX by the same assumption worker.build_remote_shell
+    makes, so `&&` rather than the local spelling's `;`.
     """
     if not session_id:
         return None
+    if session_host:
+        inner = (f"cd '{session_dir}' && claude --resume {session_id}"
+                 if session_dir else f"claude --resume {session_id}")
+        return f'ssh {session_host} -t "{inner}"'
     if not session_dir:
         return f"claude --resume {session_id}"
     return f"cd '{session_dir}'; claude --resume {session_id}"
@@ -580,6 +592,9 @@ def create_app(
         # naming it is part of the answer, not decoration. Any of them may be
         # None (a ticket that never ran, or whose last run predates
         # session_dir); the UI degrades rather than hiding the id it has.
+        # session_host displaces session_worker as the machine to run it on:
+        # a board configured with an ssh target ran the CLI over there, so the
+        # transcript is on that host rather than on the PC that claimed it.
         session_worker = (
             db.get(Worker, t.assigned_worker) if t.assigned_worker else None
         )
@@ -596,8 +611,10 @@ def create_app(
             "attempts": t.attempts,
             "session_id": t.session_id,
             "session_dir": t.session_dir,
+            "session_host": t.session_host,
             "session_worker": session_worker.name if session_worker else None,
-            "resume_command": build_resume_command(t.session_id, t.session_dir),
+            "resume_command": build_resume_command(t.session_id, t.session_dir,
+                                                   t.session_host),
             "order": t.order,
             "created_at": t.created_at.isoformat(),
             "updated_at": t.updated_at.isoformat(),

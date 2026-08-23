@@ -327,7 +327,7 @@ def test_run_slot_starts_a_heartbeat_thread_that_stops_after(monkeypatch, tmp_pa
         def run(self, ticket, board=None, directory=None, session_id=None,
                 progress_cb=None, should_kill=None,
                 chat_source=None, chat_delivered=None, log_cb=None, profile=None,
-                resume=None):
+                resume=None, ssh=None):
             time.sleep(0.05)
             seen["thread_count_during_run"] = threading.active_count()
             return True, "ok"

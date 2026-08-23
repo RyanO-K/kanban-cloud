@@ -104,12 +104,12 @@ def _run_slot_once(monkeypatch, tmp_path, board, comment, push_calls, finished):
         def run(self, ticket, board=None, directory=None, session_id=None,
                 progress_cb=None, should_kill=None,
                 chat_source=None, chat_delivered=None, log_cb=None, profile=None,
-                resume=None):
+                resume=None, ssh=None):
             return True, comment
 
     monkeypatch.setattr(worker, "resolve_directory", lambda b, cfg: ("/repo", None))
 
-    def fake_push(directory, branch):
+    def fake_push(directory, branch, ssh=None):
         push_calls.append((directory, branch))
         return True, "\n\n(Pushed branch `5-my-ticket` to origin.)"
 
