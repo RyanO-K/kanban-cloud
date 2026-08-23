@@ -92,6 +92,13 @@ status='queued' ... FOR UPDATE SKIP LOCKED LIMIT 1)` run directly against
 Postgres, so two pollers can never double-claim and neither blocks the
 other. A failed run requeues once, then the ticket goes to `failed`.
 
+Any ticket that has been claimed carries the Claude session its agent ran in,
+and the modal offers a **Copy resume cmd** button for it:
+`cd '<dir>'; claude --resume <session-id>`. Run that on the PC the row names
+— the transcript lives on that machine's disk, nowhere else — and you pick up
+the agent's own conversation rather than starting over. Useful on a ticket
+sitting in Blocked, or on one whose worker died mid-run.
+
 **A ticket is done when it is committed and pushed** — nothing else counts. A
 run that finishes but leaves its branch on the worker PC (auto-push off for
 the board, an unmet commit gate, a push that failed, or an agent that

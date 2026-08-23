@@ -2,6 +2,50 @@
 
 Last updated: 2026-08-23
 
+## Resume command: taking a ticket's agent session over by hand (2026-08-23)
+
+The ticket modal now offers **Copy resume cmd**, which puts
+`cd '<dir>'; claude --resume <session-id>` on the clipboard so a human can
+pick up where the agent left off. This is the `claudeSessionId` /
+`claudeSessionDir` row the gap analysis had marked *Missing*
+(`docs/2026-08-22-local-vs-cloud-gap-analysis.md`), and it matches what the
+local `.kanban` board already does.
+
+**Why a directory had to be added.** `tickets.session_id` already existed
+(minted in `claim_next`), but the CLI scopes sessions by working directory —
+an id on its own resolves to nothing from anywhere else. That directory was
+known only to the worker: `resolve_directory` runs per-PC and its result
+never left the machine. So `tickets.session_dir` is new
+(`schema.sql`, `app/models.py`, `_SESSION_DIR_COLUMNS` in `app/db.py`), and
+`worker.py`'s `run_slot` reports it via the new `record_session_dir` just
+*before* handing off to the executor — an agent that hangs or dies is exactly
+when a human wants this command, so a write that only happened on a clean
+exit would be missing when it mattered. That write is best-effort by
+contract: a failure there is printed and swallowed, because a breadcrumb for
+a human must never fail the agent run it precedes.
+
+**Where the string is built.** `app.main.build_resume_command`, server-side,
+surfaced as `resume_command` on every ticket alongside `session_id`,
+`session_dir` and `session_worker` (the PC that owns the transcript — the
+command is useless without knowing which). Assembling it in Python rather
+than in `index.html` is what makes its fallbacks testable: this repo has no
+JS runner, so anything built in the browser is only ever checked by eye. A
+ticket whose last run predates `session_dir` still gets the bare
+`claude --resume <id>` rather than nothing. `cd '<dir>'; <cmd>` parses in
+both PowerShell and bash, so one string serves Windows and POSIX workers.
+
+The row is `owner-only`: it exposes an absolute path on the owner's own PC,
+and the takeover it offers is not a spectator's to run. It renders for any
+ticket that has a session, whatever its status; a ticket that never ran shows
+nothing at all rather than a dead button.
+
+Tests: 543 → 560 (3 `record_session_dir` + 1 best-effort-write, 2 `run_slot`
+wiring, 4 `build_resume_command`/`resume_command`, 3 session fields on
+`ticket_json`, 4 markup guards). Verified by hand against a live instance
+driven with Playwright: the row shows the id and `run it on ryan-desktop`,
+the button copies the exact command, and the row stays hidden both for a
+ticket that never ran and for spectators.
+
 ## Board UI rebuilt from the design canvas (2026-08-23)
 
 `app/static/index.html` was rewritten against the `Kanban Board.dc.html`

@@ -219,6 +219,29 @@ class WorkerPatch(BaseModel):
     clear_desired_concurrency: bool = False
 
 
+# ---------- resume command ----------
+
+def build_resume_command(session_id: str | None, session_dir: str | None) -> str | None:
+    """The shell command that hands a ticket's agent session to a human.
+
+    Assembled server-side, not in index.html, so these fallbacks are covered
+    by tests — the repo has no JS runner. Returns None when there is no
+    session to resume, which is what hides the board's copy button.
+
+    `cd` comes first because the CLI scopes sessions by working directory: the
+    id on its own resolves to nothing from anywhere else. The
+    `cd '<dir>'; <cmd>` spelling parses in both PowerShell and bash, so one
+    string serves Windows and POSIX workers alike. A ticket whose last run
+    predates the session_dir column still gets the bare resume — the human
+    knows their own folder — rather than nothing at all.
+    """
+    if not session_id:
+        return None
+    if not session_dir:
+        return f"claude --resume {session_id}"
+    return f"cd '{session_dir}'; claude --resume {session_id}"
+
+
 # ---------- app factory ----------
 
 def create_app(
@@ -551,6 +574,15 @@ def create_app(
             select(Comment).where(Comment.ticket_id == t.id).order_by(Comment.created_at)
         ).all()
         question = open_question(db, t.id)
+        # The three halves of the human-takeover command the board offers:
+        # `cd '<session_dir>'; claude --resume <session_id>`, run on
+        # session_worker. The transcript lives on that PC's disk only, so
+        # naming it is part of the answer, not decoration. Any of them may be
+        # None (a ticket that never ran, or whose last run predates
+        # session_dir); the UI degrades rather than hiding the id it has.
+        session_worker = (
+            db.get(Worker, t.assigned_worker) if t.assigned_worker else None
+        )
         return {
             "id": t.id,
             "board_id": t.board_id,
@@ -562,6 +594,10 @@ def create_app(
             "target_worker": t.target_worker,
             "profile_id": t.profile_id,
             "attempts": t.attempts,
+            "session_id": t.session_id,
+            "session_dir": t.session_dir,
+            "session_worker": session_worker.name if session_worker else None,
+            "resume_command": build_resume_command(t.session_id, t.session_dir),
             "order": t.order,
             "created_at": t.created_at.isoformat(),
             "updated_at": t.updated_at.isoformat(),

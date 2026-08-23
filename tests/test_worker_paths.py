@@ -1,9 +1,14 @@
 """Per-PC board paths: the machine-level half of "where does this agent run".
 
-The server never learns these paths — the same board is worked by machines with
-different layouts, so the folder is this PC's business.
+Which folder a board maps to is this PC's business — the same board is worked
+by machines with different layouts, so the server never *decides* these paths.
+It does learn one after the fact: run_slot reports the directory each run
+actually happened in (record_session_dir), because the board's resume command
+is `cd '<dir>'; claude --resume <id>` and the id alone resumes nothing.
 """
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -264,3 +269,212 @@ def test_claim_next_ignores_resume_flag_without_a_prior_session():
     work = worker.claim_next(conn, worker_id=1, cluster_id=1, board_ids=None)
     assert work["resume"] is None
     assert work["session_id"] is not None  # a fresh one was minted
+
+
+# ---------- record_session_dir: the cwd half of the resume command ----------
+
+class RecordingCursor:
+    def __init__(self):
+        self.calls = []
+
+    def execute(self, sql, params=None):
+        self.calls.append((sql, params))
+
+    def fetchone(self):
+        return None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class RecordingConn:
+    """Captures every statement run against it, across all cursors."""
+
+    def __init__(self):
+        self.calls = []
+
+    def cursor(self):
+        cur = RecordingCursor()
+        cur.calls = self.calls  # share one log, in issue order
+        return cur
+
+    def transaction(self):
+        class _T:
+            def __enter__(self_):
+                return self_
+
+            def __exit__(self_, *a):
+                return False
+
+        return _T()
+
+
+def _session_dir_writes(conn):
+    return [(sql, params) for sql, params in conn.calls if "session_dir" in sql]
+
+
+def test_record_session_dir_writes_the_directory_against_the_ticket():
+    conn = RecordingConn()
+    worker.record_session_dir(conn, 42, r"C:\repos\site-page")
+    writes = _session_dir_writes(conn)
+    assert len(writes) == 1, f"expected one session_dir write, got {conn.calls}"
+    sql, params = writes[0]
+    assert "UPDATE tickets" in sql
+    assert params == (r"C:\repos\site-page", 42)
+
+
+def test_record_session_dir_stringifies_a_path_object():
+    """resolve_directory can hand back a Path (the auto-clone branch returns
+    app_data_boards_dir()/<id>); psycopg would not adapt it to VARCHAR."""
+    conn = RecordingConn()
+    worker.record_session_dir(conn, 7, Path(r"C:\repos") / "board-1")
+    _, params = _session_dir_writes(conn)[0]
+    assert isinstance(params[0], str)
+    assert params[0].endswith("board-1")
+
+
+def test_record_session_dir_ignores_a_missing_directory():
+    """A stub run, or a resolve that failed: nothing to record, and the write
+    must not blank out a directory an earlier run already reported."""
+    conn = RecordingConn()
+    worker.record_session_dir(conn, 7, None)
+    assert _session_dir_writes(conn) == []
+
+
+def test_record_session_dir_survives_a_failing_write(capsys):
+    """Best-effort by contract. This column only feeds a convenience command
+    for a human; a blip writing it must not take down the agent run that is
+    about to start, so the failure is reported and swallowed."""
+    class BrokenConn:
+        def transaction(self):
+            raise RuntimeError("connection is closed")
+
+    worker.record_session_dir(BrokenConn(), 7, "/repo")
+    assert "connection is closed" in capsys.readouterr().out
+
+
+# ---------- run_slot wires the resolved directory through ----------
+
+class QuietExecutor:
+    """A non-stub executor: run_slot must resolve a directory for it."""
+    name = "quiet"
+
+    def run(self, ticket, board=None, directory=None, session_id=None,
+            progress_cb=None, should_kill=None, chat_source=None,
+            chat_delivered=None, log_cb=None, profile=None, resume=None):
+        return True, "done"
+
+
+WORK = {"assignment_id": 1, "session_id": "sess-1", "board": {"id": 1, "name": "b"},
+        "ticket": {"id": 9, "board_id": 1, "title": "t", "body": "",
+                   "status": "doing", "attempts": 1}}
+
+
+def _run_one_slot(monkeypatch, tmp_path, resolve):
+    """Drive run_slot through exactly one claim, then stop it. Returns the
+    (ticket_id, directory) pairs record_session_dir was called with."""
+    monkeypatch.setattr(worker, "CONFIG_PATH", tmp_path / "cfg.json")
+    claims = iter([WORK])
+    recorded = []
+
+    class C:
+        closed = False
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(worker.psycopg, "connect", lambda dsn, **kw: C())
+    monkeypatch.setattr(worker, "claim_next", lambda *a, **k: next(claims, None))
+    monkeypatch.setattr(worker, "finish_work", lambda *a, **k: "done")
+    monkeypatch.setattr(worker, "set_slot_counts", lambda *a, **k: None)
+    monkeypatch.setattr(worker, "heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(worker, "resolve_push", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(worker, "fetch_pending_chat", lambda *a, **k: [])
+    monkeypatch.setattr(worker, "_claim_heartbeat_loop", lambda *a, **k: None)
+    monkeypatch.setattr(worker, "resolve_directory", resolve)
+    monkeypatch.setattr(worker, "record_session_dir",
+                        lambda conn, tid, d: recorded.append((tid, d)))
+
+    cfg = {"dsn": "x", "worker_id": 1, "cluster_id": 1, "name": "pc",
+           "boards": {"1": str(tmp_path)}}
+    args = worker.build_parser().parse_args(["--poll", "0.01"])
+    stop = threading.Event()
+    t = threading.Thread(target=worker.run_slot,
+                         args=(cfg, args, QuietExecutor(), stop, 0))
+    t.start()
+    time.sleep(0.3)
+    stop.set()
+    t.join(timeout=5)
+    return recorded
+
+
+def test_run_slot_records_the_directory_it_resolved(monkeypatch, tmp_path):
+    """Without this the board can only offer a bare `claude --resume <id>`,
+    which resolves to nothing from the wrong working directory."""
+    where = str(tmp_path / "site-page")
+    recorded = _run_one_slot(monkeypatch, tmp_path,
+                             lambda board, cfg: (where, None))
+    assert recorded == [(9, where)]
+
+
+def test_run_slot_records_nothing_when_the_directory_cannot_be_resolved(
+        monkeypatch, tmp_path):
+    """resolve_directory failed (no --set-path, no repo_url): the agent never
+    ran, so there is no session directory to report."""
+    recorded = _run_one_slot(monkeypatch, tmp_path,
+                             lambda board, cfg: (None, "no folder configured"))
+    assert recorded == []
+
+
+def test_a_failed_session_dir_write_never_fails_the_ticket(monkeypatch, tmp_path):
+    """Recording the directory is bookkeeping for a convenience button. It
+    happens inside run_slot's broad `except Exception` — so if it were allowed
+    to raise, a dropped connection would turn a perfectly good agent run into
+    'Executor error' and throw the work away. Convenience must not be able to
+    fail the thing it is a convenience for.
+    """
+    class BrokenConn:
+        """No .transaction()/.cursor() — exactly what a real psycopg
+        connection looks like once it has been closed underneath us."""
+        closed = False
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(worker, "CONFIG_PATH", tmp_path / "cfg.json")
+    claims = iter([WORK])
+    finished = {}
+
+    def fake_finish_work(conn, wid, wname, item_id, ticket_id, ok, comment,
+                         killed=False, commit_gate=None, pushed=False):
+        finished["ok"], finished["comment"] = ok, comment
+        return "done"
+
+    monkeypatch.setattr(worker.psycopg, "connect", lambda dsn, **kw: BrokenConn())
+    monkeypatch.setattr(worker, "claim_next", lambda *a, **k: next(claims, None))
+    monkeypatch.setattr(worker, "finish_work", fake_finish_work)
+    monkeypatch.setattr(worker, "set_slot_counts", lambda *a, **k: None)
+    monkeypatch.setattr(worker, "heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(worker, "resolve_push", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(worker, "fetch_pending_chat", lambda *a, **k: [])
+    monkeypatch.setattr(worker, "_claim_heartbeat_loop", lambda *a, **k: None)
+    monkeypatch.setattr(worker, "resolve_directory",
+                        lambda board, cfg: (str(tmp_path), None))
+
+    cfg = {"dsn": "x", "worker_id": 1, "cluster_id": 1, "name": "pc",
+           "boards": {"1": str(tmp_path)}}
+    args = worker.build_parser().parse_args(["--poll", "0.01"])
+    stop = threading.Event()
+    t = threading.Thread(target=worker.run_slot,
+                         args=(cfg, args, QuietExecutor(), stop, 0))
+    t.start()
+    time.sleep(0.3)
+    stop.set()
+    t.join(timeout=5)
+
+    assert finished.get("ok") is True, (
+        f"the run should still have succeeded, got {finished!r}")
+    assert "Executor error" not in (finished.get("comment") or "")
