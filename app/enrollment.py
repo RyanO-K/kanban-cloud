@@ -34,10 +34,19 @@ PASSWORD_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 # can lock the row (Postgres requires UPDATE, not just SELECT, to take a row
 # lock). INSERT on ticket_deps is initial triage writing the dependency edges
 # it infers (worker.triage_todo_tickets).
+# SELECT on profiles is claim_next resolving the agent profile a claimed
+# ticket runs under (resolve_profile); the worker never writes one — profiles
+# are edited in the browser through the server's own DB session.
+#
+# Every table the worker's SQL touches must appear here, which
+# tests/test_enrollment.py derives from worker.py's own source rather than
+# trusting this list to be kept in sync by hand: a missing grant does not
+# fail at deploy time, it fails as InsufficientPrivilege on every slot of
+# every enrolled PC, which is how `profiles` shipped without one.
 GROUP_GRANTS = [
     f"GRANT SELECT ON tickets, boards, clusters, workers, cluster_settings, "
     f"work_queue, comments, ticket_deps, ticket_questions, ticket_chat, "
-    f"ticket_log TO {GROUP_ROLE}",
+    f"ticket_log, profiles TO {GROUP_ROLE}",
     f"GRANT INSERT ON comments, work_queue, ticket_questions, ticket_log, "
     f"ticket_deps TO {GROUP_ROLE}",
     f"GRANT UPDATE ON work_queue, tickets, workers, ticket_chat, cluster_settings TO {GROUP_ROLE}",

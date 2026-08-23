@@ -1,6 +1,60 @@
 # STATUS — kanban-cloud MVP
 
-Last updated: 2026-08-22
+Last updated: 2026-08-23
+
+## Fix: worker role was never granted SELECT on `profiles` (2026-08-23)
+
+Agent profiles (ticket #13) added a `profiles` table and a read of it inside
+`claim_next`, but `enrollment.GROUP_GRANTS` never learned about it — so every
+slot on every enrolled PC failed its claim with
+`InsufficientPrivilege('permission denied for table profiles')`. Grants are
+re-applied on each server start (`create_app` → `ensure_worker_group`), so
+the code fix ships with a deploy; the live DB needed the one GRANT applied by
+hand to unblock the running worker.
+
+Rather than just adding the missing table, `tests/test_enrollment.py` now
+derives the required {privilege → tables} from worker.py's own SQL (filtered
+through `Base.metadata.tables`, so prose in comments can't pose as a table)
+and asserts `GROUP_GRANTS` covers it. A future feature that touches a new
+table now fails a unit test instead of every worker in production. Verified
+against the live DB's `information_schema.role_table_grants`: `profiles` was
+the only gap.
+
+Tests: 499 → 502 (grant coverage derived from worker.py, the `profiles`
+regression itself, and `cluster_settings` needing UPDATE for its row lock).
+
+## Fix: the worker wedged itself on its own connection (2026-08-23)
+
+A live worker stopped claiming anything ~10s after start and sat there
+looking alive-but-idle. psycopg3 is not autocommit by default, so a bare
+`conn.cursor()` read leaves an implicit transaction open until something
+commits — and the maintenance tick's reaper scan, the triage scans,
+`fetch_pending_chat` and `fetch_worker_settings` are all deliberately bare
+reads. Once one of them opened that transaction, every later
+`with conn.transaction()` on the same connection was just a SAVEPOINT inside
+it: writes never committed and row locks were never released. The next
+tick's `set_slot_counts` UPDATE therefore took this PC's own `workers` row
+lock and held it for the life of the process; every slot's `claim_next` —
+which locked `cluster_settings` and *then* touched `workers.last_seen` —
+blocked on it while holding the cluster-wide gate, so all five slots plus the
+heartbeat piled up behind one another. Diagnosed off `pg_stat_activity`: one
+session `idle in transaction` since process start, five `Lock`
+transactionid/tuple waiters.
+
+Two changes. `worker.connect_db` is now the only place the process opens a
+connection and it sets `autocommit=True` — a bare read becomes one
+self-contained statement, and every helper that needs atomicity still gets a
+real BEGIN/COMMIT from `conn.transaction()`. (It also makes the slot
+connection safe to share between the slot thread's `should_kill` and the
+executor reader thread's `progress_cb`/`log_cb`.) And `claim_next` now
+refreshes `workers.last_seen` *before* taking the `cluster_settings` gate:
+own row first, cluster-wide row second, so waiting on the hot row can never
+pin the row every PC serializes on.
+
+Tests: 492 → 499 (`tests/test_worker_txn.py`: connect_db's autocommit
+invariant, a source guard that nothing bypasses it, a psycopg-shaped
+FakeConn proving a maintenance tick and a bare-read-then-write pair strand
+nothing, and the claim's lock order).
 
 ## Session resume: an unblocked ticket continues its own agent session (ticket #16, 2026-08-22)
 

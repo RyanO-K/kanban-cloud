@@ -944,6 +944,46 @@ def first_run_enroll(args) -> dict | None:
 
 # ---------- direct-SQL work protocol ----------
 
+CONNECT_TIMEOUT_SECONDS = 15
+
+
+def connect_db(dsn: str):
+    """The only place this process opens a Postgres connection.
+
+    `autocommit=True` is not a style choice — it is load-bearing. psycopg3
+    defaults to autocommit off, which means a *bare* `conn.cursor()` SELECT
+    (no `with conn.transaction()` around it) silently opens a transaction
+    that stays open until something explicitly commits. Several read helpers
+    here are deliberately bare — reap_stale_claims' candidate scan,
+    triage_todo_tickets' scan, _triage_candidates, fetch_pending_chat,
+    fetch_worker_settings — and once one of them has opened that implicit
+    transaction, every later `with conn.transaction()` block on the same
+    connection degrades to a SAVEPOINT *inside* it: its writes never commit
+    and its row locks are held for the life of the process.
+
+    That is exactly how a live worker wedged itself: the maintenance tick's
+    bare reaper scan left a transaction open, the next tick's
+    set_slot_counts UPDATE took the worker's own `workers` row lock inside
+    it and never released it, and every slot's claim_next — which locks
+    cluster_settings and then updates workers.last_seen — piled up behind
+    it. All five slots plus the heartbeat, blocked forever, on a worker that
+    still looked alive.
+
+    Under autocommit, a bare read is one self-contained statement and every
+    helper that needs atomicity still gets it: `conn.transaction()` issues a
+    real BEGIN/COMMIT rather than a savepoint. It also makes the slot
+    connection safe to share between the slot thread (should_kill) and the
+    executor's reader thread (progress_cb/log_cb) — those writes can no
+    longer land inside someone else's open transaction.
+
+    Nothing here relies on a transaction spanning two helper calls: every
+    multi-statement unit (claim_next, finish_work, _reap_one,
+    _apply_triage_one, raise_question, ...) already wraps itself.
+    """
+    return psycopg.connect(dsn, connect_timeout=CONNECT_TIMEOUT_SECONDS,
+                           autocommit=True)
+
+
 def heartbeat(conn, worker_id: int) -> None:
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
@@ -973,7 +1013,7 @@ def _claim_heartbeat_loop(dsn: str, item_id: int, stop_event: threading.Event,
     while not stop_event.wait(interval):
         try:
             if conn is None or conn.closed:
-                conn = psycopg.connect(dsn, connect_timeout=15)
+                conn = connect_db(dsn)
             touch_claim_heartbeat(conn, item_id)
         except Exception:
             conn = None  # reconnect next tick; a missed beat or two is fine
@@ -1066,25 +1106,31 @@ def claim_next(conn, worker_id: int, cluster_id: int, board_ids=None) -> dict | 
     `board_ids` limits the claim to boards this PC has a checkout for. None
     means no limit, which is what the stub executor uses — it needs no repo.
 
-    One transaction: cluster cap gate + claim + ticket flip + board read. A
-    cluster at (or over) its cap, or with stop_all_requested set, looks
-    exactly like "nothing queued" to the caller — idle, not an error.
+    One transaction: heartbeat + cluster cap gate + claim + ticket flip +
+    board read. A cluster at (or over) its cap, or with stop_all_requested
+    set, looks exactly like "nothing queued" to the caller — idle, not an
+    error.
+
+    Lock order inside that transaction is deliberate: this PC's own `workers`
+    row first, the cluster-wide `cluster_settings` row second, never the
+    reverse. `workers` is the hottest row this process writes (every progress
+    post refreshes last_seen from a different thread), while cluster_settings
+    is the single row every slot on every PC serializes on. Waiting for the
+    hot row while already holding the cluster-wide one is what escalates one
+    slow writer into a stalled cluster — see connect_db.
     """
     with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            f"UPDATE workers SET last_seen={UTC_NOW} WHERE id=%s", (worker_id,)
+        )
         if not cluster_claim_gate(cur, cluster_id):
-            cur.execute(
-                f"UPDATE workers SET status='idle', last_seen={UTC_NOW} WHERE id=%s",
-                (worker_id,),
-            )
+            cur.execute("UPDATE workers SET status='idle' WHERE id=%s", (worker_id,))
             return None
         cur.execute(CLAIM_SQL, {"wid": worker_id, "cid": cluster_id,
                                 "boards": board_ids})
         row = cur.fetchone()
         if row is None:
-            cur.execute(
-                f"UPDATE workers SET status='idle', last_seen={UTC_NOW} WHERE id=%s",
-                (worker_id,),
-            )
+            cur.execute("UPDATE workers SET status='idle' WHERE id=%s", (worker_id,))
             return None
         item_id, ticket_id, is_resume = row
         cur.execute(
@@ -1637,7 +1683,7 @@ def run_slot(cfg, args, executor, stop_event, slot_no: int) -> None:
     while not stop_event.is_set():
         try:
             if conn is None or conn.closed:
-                conn = psycopg.connect(cfg["dsn"], connect_timeout=15)
+                conn = connect_db(cfg["dsn"])
             work = claim_next(conn, cfg["worker_id"], cfg["cluster_id"], boards)
             if work:
                 ticket = work["ticket"]
@@ -1685,7 +1731,7 @@ def run_slot(cfg, args, executor, stop_event, slot_no: int) -> None:
                 # run, finish_work). A connection failure here just disables
                 # chat for this run instead of failing the ticket.
                 try:
-                    chat_conn = psycopg.connect(cfg["dsn"], connect_timeout=15)
+                    chat_conn = connect_db(cfg["dsn"])
                 except Exception as exc:
                     # Any failure here just disables chat for this run rather
                     # than failing the ticket (and, since _RUNNING["n"] was
@@ -1870,7 +1916,7 @@ def main() -> int:
             pause_if_frozen()
             return 2
         try:
-            conn = psycopg.connect(cfg["dsn"], connect_timeout=15)
+            conn = connect_db(cfg["dsn"])
             try:
                 cfg = prompt_for_board_paths(conn, cfg)
             finally:
@@ -1880,7 +1926,7 @@ def main() -> int:
             print("Set folders later with --set-path <board>=<path>.")
 
     if args.list_boards or args.set_path:
-        conn = psycopg.connect(cfg["dsn"], connect_timeout=15)
+        conn = connect_db(cfg["dsn"])
         try:
             for arg in args.set_path or []:
                 try:
@@ -1906,7 +1952,7 @@ def main() -> int:
     # existed.
     settings = {}
     try:
-        settings_conn = psycopg.connect(cfg["dsn"], connect_timeout=15)
+        settings_conn = connect_db(cfg["dsn"])
         try:
             settings = fetch_worker_settings(settings_conn, cfg["worker_id"])
         finally:
@@ -1951,7 +1997,7 @@ def main() -> int:
         while any(t.is_alive() for t in slots):
             try:
                 if hb_conn is None or hb_conn.closed:
-                    hb_conn = psycopg.connect(cfg["dsn"], connect_timeout=15)
+                    hb_conn = connect_db(cfg["dsn"])
                 set_slot_counts(hb_conn, cfg["worker_id"], concurrency,
                                 running_count())
                 reap_stale_claims(hb_conn, cfg["cluster_id"])
