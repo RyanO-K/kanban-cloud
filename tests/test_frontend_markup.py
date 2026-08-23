@@ -334,8 +334,14 @@ def test_only_the_column_body_scrolls_vertically(markup):
     assert ".boardScroll { position: relative; flex: 1; min-width: 0; overflow-x: auto; overflow-y: hidden;" in markup
 
 
-def test_the_side_rail_has_a_fixed_width(markup):
-    assert ".side { flex: 0 0 320px; width: 320px;" in markup
+def test_the_side_rail_has_a_definite_width(markup):
+    """`flex: 0 0` still, so the rail never grows or shrinks with the board and
+    the columns take whatever is left. What used to be the literal 320px is now
+    a variable the drag handle writes (see the resizable-side-rail tests); the
+    fallback in the var is what keeps 320 as the starting width."""
+    side = markup[markup.index("  .side {"):]
+    side = side[:side.index("}")]
+    assert "flex: 0 0 var(--side-w, 320px)" in side
 
 
 def test_the_rail_gets_out_of_the_way_on_a_narrow_screen(markup):
@@ -508,3 +514,87 @@ def test_dark_mode_toggle_and_its_stored_preference_survive(markup):
 
 def test_the_ui_asks_for_the_design_typefaces(markup):
     assert "IBM+Plex+Sans" in markup and "IBM+Plex+Mono" in markup
+
+
+# ---------- resizable side rail ----------
+#
+# The rail holds a ticket's log and chat, which 320px cannot show much of.
+# It sits between the scrolling columns and the window edge, so the grip is a
+# flex sibling of both rather than an overlay.
+
+def _grip_js(markup):
+    """The drag implementation, sliced out so a passing mention of a constant
+    in a comment elsewhere cannot satisfy these assertions."""
+    return markup[markup.index("function initSideGrip"):markup.index("// ---- end side grip")]
+
+
+def test_the_grip_sits_between_the_board_and_the_rail(markup):
+    """Order matters: dragging it left must grow the rail, not the board."""
+    board = markup.index('class="boardScroll"')
+    grip = markup.index('id="sideGrip"')
+    rail = markup.index('<aside class="side"')
+    assert board < grip < rail
+
+
+def test_the_grip_is_a_keyboard_operable_separator(markup):
+    """A pointer-only resize is unusable without a mouse, and the file already
+    holds toggles to announcing their state."""
+    tag = markup[markup.index('id="sideGrip"'):]
+    tag = tag[:tag.index(">")]
+    assert 'role="separator"' in tag
+    assert 'aria-orientation="vertical"' in tag
+    assert 'tabindex="0"' in tag
+    assert "ArrowLeft" in _grip_js(markup) and "ArrowRight" in _grip_js(markup)
+
+
+def test_the_drag_uses_pointer_capture(markup):
+    """Without capture the drag stops the moment the cursor outruns a 6px
+    element, which at speed is immediately."""
+    js = _grip_js(markup)
+    assert "pointerdown" in js
+    assert "setPointerCapture" in js
+
+
+def test_the_width_is_clamped_at_both_ends(markup):
+    """Neither the rail nor the board may be dragged away to nothing."""
+    js = _grip_js(markup)
+    assert "SIDE_MIN" in js and "SIDE_MAX" in js
+    assert "Math.max" in js and "Math.min" in js
+
+
+def test_the_width_survives_a_reload(markup):
+    """Same convention as the theme preference."""
+    assert "kc_side_w" in markup
+    assert "localStorage" in _grip_js(markup)
+
+
+def test_the_rail_width_is_driven_by_a_custom_property(markup):
+    """The drag sets one variable; CSS decides what it means, so the rail and
+    any future rule stay in sync."""
+    assert "--side-w" in markup
+    side = markup[markup.index("  .side {"):]
+    assert "var(--side-w" in side[:side.index("}")]
+
+
+def test_a_reset_is_offered(markup):
+    """A rail dragged to an unusable width on one monitor needs a way back
+    that is not 'guess where 320 was'."""
+    assert "dblclick" in _grip_js(markup)
+
+
+def test_a_click_that_never_moved_does_not_resize(markup):
+    """Verified in a browser first: applying the pointer position on every
+    pointerup meant a stray click snapped the rail to the grip's own position,
+    and — because that shifted the grip out from under the second click —
+    double-click-to-reset never fired at all."""
+    assert "moved" in _grip_js(markup)
+
+
+def test_an_unset_rail_leaves_the_responsive_default_alone(markup):
+    """.side is narrowed to 280px under 1000px wide and hidden under 820px.
+    Writing an inline width on load would override both, so the variable is
+    only set once there is a stored preference or a drag to honour."""
+    js = _grip_js(markup)
+    assert "stored > 0" in js
+    css = markup[markup.index("@media (max-width: 1000px)"):]
+    assert "--side-w" in css[:css.index("}")]
